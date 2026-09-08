@@ -10,6 +10,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/health"
 	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/region"
+	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/routing"
 	"github.com/NaNA1337/super-proxy/internal/xray"
 	"gorm.io/gorm/clause"
@@ -121,5 +122,20 @@ func main() {
 	} else {
 		log.Printf("Successfully generated Xray config with 3 slots and Balancer.")
 	}
-	log.Println("Phase 4 test complete.")
+	// PHASE 5: Reputation Engine
+	log.Println("--- Starting Phase 5 Test: Reputation Engine ---")
+	repEngine := reputation.NewEngine()
+	
+	// Test a clean IP
+	cleanIP := "219.100.37.179"
+	res, _ := repEngine.EvaluateIP(context.Background(), cleanIP)
+	log.Printf("Reputation for %s (Prefix %s): HardReject=%v, Penalty=%d, Reason: %s", 
+		cleanIP, reputation.AnalyzePrefix(cleanIP), res.HardReject, res.ScorePenalty, res.ProviderReason)
+
+	// Test a malicious IP (ends in .66 for dummy trigger)
+	malIP := "192.168.1.66"
+	res2, _ := repEngine.EvaluateIP(context.Background(), malIP)
+	log.Printf("Reputation for %s (Prefix %s): HardReject=%v, Penalty=%d, Reason: %s", 
+		malIP, reputation.AnalyzePrefix(malIP), res2.HardReject, res2.ScorePenalty, res2.ProviderReason)
+	log.Println("Phase 5 test complete.")
 }
