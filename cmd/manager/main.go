@@ -10,6 +10,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/health"
 	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/region"
+	"github.com/NaNA1337/super-proxy/internal/routing"
 	"gorm.io/gorm/clause"
 	"context"
 	"time"
@@ -75,8 +76,16 @@ func main() {
 		if err != nil {
 			log.Printf("Failed to start tunnel: %v", err)
 		} else {
-			log.Printf("Tunnel spawned! Interface: %s. Wait 5s...", tunnel.Interface)
+			log.Printf("Tunnel spawned! Interface: %s. Wait 5s for interface to come up...", tunnel.Interface)
 			time.Sleep(5 * time.Second)
+
+			// PHASE 3: Apply Routing
+			log.Printf("Applying policy routing for slot 0...")
+			if err := routing.SetupSlotRouting(0, tunnel.Interface); err != nil {
+				log.Printf("Failed to setup routing (expected if tun0 not ready): %v", err)
+			} else {
+				log.Printf("Routing applied successfully.")
+			}
 
 			// Try a health check (it will likely fail if openvpn didn't fully establish, but tests the logic)
 			log.Printf("Running health check on %s...", tunnel.Interface)
@@ -90,14 +99,15 @@ func main() {
 				log.Printf("Health check result: ok=%v, duration=%v", ok, dur)
 			}
 
-			log.Printf("Stopping tunnel...")
+			log.Printf("Stopping tunnel and clearing routing...")
+			routing.ClearSlotRouting(0)
 			tunnel.Stop()
 			time.Sleep(1 * time.Second)
 			log.Printf("Tunnel stopped.")
 		}
 	} else {
-		log.Println("No nodes found, skipping Phase 2 OpenVPN test.")
+		log.Println("No nodes found, skipping OpenVPN/Routing tests.")
 	}
 	
-	log.Println("Phase 2 test complete.")
+	log.Println("Phase 3 test complete.")
 }
