@@ -12,6 +12,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/region"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/routing"
+	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/NaNA1337/super-proxy/internal/xray"
 	"gorm.io/gorm/clause"
 	"context"
@@ -137,5 +138,13 @@ func main() {
 	res2, _ := repEngine.EvaluateIP(context.Background(), malIP)
 	log.Printf("Reputation for %s (Prefix %s): HardReject=%v, Penalty=%d, Reason: %s", 
 		malIP, reputation.AnalyzePrefix(malIP), res2.HardReject, res2.ScorePenalty, res2.ProviderReason)
-	log.Println("Phase 5 test complete.")
+	// PHASE 6: Scheduler
+	log.Println("--- Starting Phase 6 Test: Scheduler ---")
+	sched := scheduler.NewScheduler(3, 2, repEngine)
+	sched.Start()
+	
+	log.Println("Scheduler is running in background. Waiting 30 seconds to observe failover loops...")
+	time.Sleep(30 * time.Second)
+	sched.Stop()
+	log.Println("Phase 6 test complete.")
 }
