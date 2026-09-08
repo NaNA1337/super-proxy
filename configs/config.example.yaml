@@ -1,0 +1,15 @@
+region:
+  primary: JP
+  fallback:
+    - KR
+    - SG
+
+database:
+  path: xray_manager.db
+
+discovery:
+  url: "http://www.vpngate.net/api/iphone/"
+  interval: 15
+
+reputation:
+  enabled: false
