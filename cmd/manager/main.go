@@ -7,8 +7,12 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/config"
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/discovery"
+	"github.com/NaNA1337/super-proxy/internal/health"
+	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/region"
 	"gorm.io/gorm/clause"
+	"context"
+	"time"
 )
 
 func main() {
@@ -57,4 +61,43 @@ func main() {
 
 	log.Printf("Successfully saved/updated %d nodes in SQLite database", result.RowsAffected)
 	log.Println("Phase 1 initialization complete.")
+
+	// PHASE 2 TEST
+	log.Println("--- Starting Phase 2 Test: OpenVPN Lifecycle ---")
+	if len(filteredNodes) > 0 {
+		testNode := &filteredNodes[0]
+		
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		log.Printf("Spawning tunnel for node %s (%s)", testNode.ID, testNode.Country)
+		tunnel, err := openvpn.StartTunnel(ctx, 0, testNode)
+		if err != nil {
+			log.Printf("Failed to start tunnel: %v", err)
+		} else {
+			log.Printf("Tunnel spawned! Interface: %s. Wait 5s...", tunnel.Interface)
+			time.Sleep(5 * time.Second)
+
+			// Try a health check (it will likely fail if openvpn didn't fully establish, but tests the logic)
+			log.Printf("Running health check on %s...", tunnel.Interface)
+			ctxTimeout, cancelTimeout := context.WithTimeout(ctx, 10*time.Second)
+			ok, dur, err := health.CheckTunnelConnectivity(ctxTimeout, tunnel.Interface, "http://1.1.1.1")
+			cancelTimeout()
+			
+			if err != nil {
+				log.Printf("Health check failed (expected if VPN not connected): %v", err)
+			} else {
+				log.Printf("Health check result: ok=%v, duration=%v", ok, dur)
+			}
+
+			log.Printf("Stopping tunnel...")
+			tunnel.Stop()
+			time.Sleep(1 * time.Second)
+			log.Printf("Tunnel stopped.")
+		}
+	} else {
+		log.Println("No nodes found, skipping Phase 2 OpenVPN test.")
+	}
+	
+	log.Println("Phase 2 test complete.")
 }
