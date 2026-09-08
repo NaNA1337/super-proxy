@@ -1,0 +1,78 @@
+{
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": 1080,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      },
+      "tag": "proxy"
+    }
+  ],
+  "log": {
+    "loglevel": "warning"
+  },
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "streamSettings": {
+        "sockopt": {
+          "mark": 100
+        }
+      },
+      "tag": "exit-0"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "streamSettings": {
+        "sockopt": {
+          "mark": 101
+        }
+      },
+      "tag": "exit-1"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "streamSettings": {
+        "sockopt": {
+          "mark": 102
+        }
+      },
+      "tag": "exit-2"
+    },
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ],
+  "routing": {
+    "balancers": [
+      {
+        "selector": [
+          "exit-"
+        ],
+        "strategy": {
+          "type": "random"
+        },
+        "tag": "vpn-balancer"
+      }
+    ],
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "balancerTag": "vpn-balancer",
+        "network": "tcp,udp",
+        "type": "field"
+      }
+    ]
+  }
+}

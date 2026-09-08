@@ -11,6 +11,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/region"
 	"github.com/NaNA1337/super-proxy/internal/routing"
+	"github.com/NaNA1337/super-proxy/internal/xray"
 	"gorm.io/gorm/clause"
 	"context"
 	"time"
@@ -110,4 +111,15 @@ func main() {
 	}
 	
 	log.Println("Phase 3 test complete.")
+
+	// PHASE 4: Xray Integration
+	log.Println("--- Starting Phase 4 Test: Xray Integration ---")
+	xrayConfigPath := "configs/xray_config.json"
+	log.Printf("Generating Xray static configuration to %s ...", xrayConfigPath)
+	if err := xray.GenerateConfig(3, xrayConfigPath); err != nil {
+		log.Printf("Failed to generate Xray config: %v", err)
+	} else {
+		log.Printf("Successfully generated Xray config with 3 slots and Balancer.")
+	}
+	log.Println("Phase 4 test complete.")
 }
