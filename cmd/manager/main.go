@@ -14,6 +14,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/routing"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/NaNA1337/super-proxy/internal/xray"
+	"github.com/NaNA1337/super-proxy/internal/api"
 	"gorm.io/gorm/clause"
 	"context"
 	"time"
@@ -144,7 +145,14 @@ func main() {
 	sched.Start()
 	
 	log.Println("Scheduler is running in background. Waiting 30 seconds to observe failover loops...")
+	
+	// PHASE 7: API and Metrics
+	log.Println("--- Starting Phase 7 Test: API and Metrics ---")
+	go func() {
+		api.StartServer(8080)
+	}()
+
 	time.Sleep(30 * time.Second)
 	sched.Stop()
-	log.Println("Phase 6 test complete.")
+	log.Println("Phase 6 and 7 test complete.")
 }
