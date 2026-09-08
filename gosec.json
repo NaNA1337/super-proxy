@@ -1,0 +1,476 @@
+{
+	"Golang errors": {},
+	"Issues": [
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "400",
+				"url": "https://cwe.mitre.org/data/definitions/400.html"
+			},
+			"rule_id": "G118",
+			"details": "context cancellation function returned by WithCancel/WithTimeout/WithDeadline is not called",
+			"file": "/root/super-proxy/internal/agentapi/operations.go",
+			"code": "104: \tupdateOpStatus(op, OpConnecting, \"\")\n105: \tctx, cancel := context.WithCancel(context.Background())\n106: \t// Save the cancel func if we need it? openvpn manager handles it via Stop()\n",
+			"line": "105",
+			"column": "35",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/root/super-proxy/internal/routing/route.go",
+			"code": "56: func runCmd(name string, args ...string) error {\n57: \tcmd := exec.Command(name, args...)\n58: \toutput, err := cmd.CombinedOutput()\n",
+			"line": "57",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with a potential tainted input or cmd arguments",
+			"file": "/root/super-proxy/internal/openvpn/manager.go",
+			"code": "61: \t// But we can add --disable-dco if we wanted. For now, let it try DCO if available.\n62: \tcmd := exec.CommandContext(ctxChild, \"openvpn\",\n63: \t\t\"--config\", tmpFile.Name(),\n64: \t\t\"--dev\", interfaceName,\n65: \t\t\"--auth-nocache\",\n66: \t\t\"--script-security\", \"2\",\n67: \t)\n68: \n",
+			"line": "62-67",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "LOW",
+			"cwe": {
+				"id": "400",
+				"url": "https://cwe.mitre.org/data/definitions/400.html"
+			},
+			"rule_id": "G112",
+			"details": "Potential Slowloris Attack because ReadHeaderTimeout is not configured in the http.Server",
+			"file": "/root/super-proxy/internal/agentapi/server.go",
+			"code": "43: \n44: \tserver := \u0026http.Server{\n45: \t\tAddr:    addr,\n46: \t\tHandler: mux,\n47: \t\tTLSConfig: \u0026tls.Config{\n48: \t\t\tCertificates: []tls.Certificate{*tlsCert},\n49: \t\t},\n50: \t}\n51: \n",
+			"line": "44-50",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/root/super-proxy/internal/xray/template.go",
+			"code": "89: \n90: \tif err := os.WriteFile(configPath, data, 0644); err != nil {\n91: \t\treturn fmt.Errorf(\"failed to write xray config: %w\", err)\n",
+			"line": "90",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/internal/agentapi/ratelimit.go",
+			"code": "79: \t\tif err != nil {\n80: \t\t\tlog.Printf(\"[AgentAPI] RateLimit warning: failed to parse remote addr %s\", r.RemoteAddr)\n81: \t\t\thttp.Error(w, \"Internal Server Error\", http.StatusInternalServerError)\n",
+			"line": "80",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/internal/agentapi/auth.go",
+			"code": "51: \t\tif r.Method != http.MethodGet {\n52: \t\t\tlog.Printf(\"[AgentAPI-Audit] Authenticated %s request from %s to %s\", r.Method, r.RemoteAddr, r.RequestURI)\n53: \t\t}\n",
+			"line": "52",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/internal/agentapi/auth.go",
+			"code": "44: \t\tif masterAPIKey == \"\" || subtle.ConstantTimeCompare([]byte(token), []byte(masterAPIKey)) != 1 {\n45: \t\t\tlog.Printf(\"[AgentAPI] 403 Forbidden (Invalid Token) - IP: %s, URI: %s\", r.RemoteAddr, r.RequestURI)\n46: \t\t\thttp.Error(w, \"Forbidden - Invalid Token\", http.StatusForbidden)\n",
+			"line": "45",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/internal/agentapi/auth.go",
+			"code": "35: \t\tif len(parts) != 2 || strings.ToLower(parts[0]) != \"bearer\" {\n36: \t\t\tlog.Printf(\"[AgentAPI] 401 Unauthorized (Malformed Header) - IP: %s, URI: %s\", r.RemoteAddr, r.RequestURI)\n37: \t\t\thttp.Error(w, \"Unauthorized - Malformed Bearer Token\", http.StatusUnauthorized)\n",
+			"line": "36",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/internal/agentapi/auth.go",
+			"code": "28: \t\tif authHeader == \"\" {\n29: \t\t\tlog.Printf(\"[AgentAPI] 401 Unauthorized (Missing Header) - IP: %s, URI: %s\", r.RemoteAddr, r.RequestURI)\n30: \t\t\thttp.Error(w, \"Unauthorized - Missing Bearer Token\", http.StatusUnauthorized)\n",
+			"line": "29",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/cmd/manager/main.go",
+			"code": "102: \t\t\t} else {\n103: \t\t\t\tlog.Printf(\"Health check result: ok=%v, duration=%v\", ok, dur)\n104: \t\t\t}\n",
+			"line": "103",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/cmd/manager/main.go",
+			"code": "94: \t\t\t// Try a health check (it will likely fail if openvpn didn't fully establish, but tests the logic)\n95: \t\t\tlog.Printf(\"Running health check on %s...\", tunnel.Interface)\n96: \t\t\tctxTimeout, cancelTimeout := context.WithTimeout(ctx, 10*time.Second)\n",
+			"line": "95",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/cmd/manager/main.go",
+			"code": "82: \t\t} else {\n83: \t\t\tlog.Printf(\"Tunnel spawned! Interface: %s. Wait 5s for interface to come up...\", tunnel.Interface)\n84: \t\t\ttime.Sleep(5 * time.Second)\n",
+			"line": "83",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/cmd/manager/main.go",
+			"code": "77: \n78: \t\tlog.Printf(\"Spawning tunnel for node %s (%s)\", testNode.ID, testNode.Country)\n79: \t\ttunnel, err := openvpn.StartTunnel(ctx, 0, testNode)\n",
+			"line": "78",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/cmd/manager/main.go",
+			"code": "66: \n67: \tlog.Printf(\"Successfully saved/updated %d nodes in SQLite database\", result.RowsAffected)\n68: \tlog.Println(\"Phase 1 initialization complete.\")\n",
+			"line": "67",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/cmd/manager/main.go",
+			"code": "53: \tfilteredNodes := region.FilterNodes(nodes, cfg.Region, minRequired)\n54: \tlog.Printf(\"Filtered down to %d nodes based on region policy (Primary: %s)\", len(filteredNodes), cfg.Region.Primary)\n55: \n",
+			"line": "54",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/cmd/manager/main.go",
+			"code": "48: \t}\n49: \tlog.Printf(\"Discovered %d nodes from VPN Gate\", len(nodes))\n50: \n",
+			"line": "49",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "117",
+				"url": "https://cwe.mitre.org/data/definitions/117.html"
+			},
+			"rule_id": "G706",
+			"details": "Log injection via taint analysis",
+			"file": "/root/super-proxy/cmd/manager/main.go",
+			"code": "35: \t}\n36: \tlog.Printf(\"Loaded config: Region Primary=%s\", cfg.Region.Primary)\n37: \n",
+			"line": "36",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/scheduler/scheduler.go",
+			"code": "168: \t\ttime.Sleep(5 * time.Second)\n169: \t\trouting.SetupSlotRouting(slot, tunnel.Interface)\n170: \t}()\n",
+			"line": "169",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/scheduler/scheduler.go",
+			"code": "128: \t\t\t\ttime.Sleep(5 * time.Second)\n129: \t\t\t\trouting.SetupSlotRouting(i, startedTunnel.Interface)\n130: \t\t\t\ts.ActiveSlots[i] = startedTunnel\n",
+			"line": "129",
+			"column": "5",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/scheduler/scheduler.go",
+			"code": "95: \t\t\tlog.Printf(\"[Scheduler] Slot %d health check failed: %v. Marking dead.\", slot, err)\n96: \t\t\trouting.ClearSlotRouting(slot)\n97: \t\t\ttunnel.Stop()\n",
+			"line": "96",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/scheduler/scheduler.go",
+			"code": "83: \t\t\tlog.Printf(\"[Scheduler] Slot %d tunnel %s is dead (process exited). Removing.\", slot, tunnel.Node.IP)\n84: \t\t\trouting.ClearSlotRouting(slot)\n85: \t\t\ttunnel.Stop()\n",
+			"line": "84",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/scheduler/scheduler.go",
+			"code": "61: \t\t\tfor slot, t := range s.ActiveSlots {\n62: \t\t\t\trouting.ClearSlotRouting(slot)\n63: \t\t\t\tt.Stop()\n",
+			"line": "62",
+			"column": "5",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/routing/route.go",
+			"code": "23: \t// 2. Clear old routes in the table\n24: \trunCmd(\"ip\", \"route\", \"flush\", \"table\", fmt.Sprintf(\"%d\", tableID))\n25: \n",
+			"line": "24",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/openvpn/manager.go",
+			"code": "100: \t\t// Clean up temp file\n101: \t\tos.Remove(tmpFile.Name())\n102: \t}()\n",
+			"line": "101",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/agentapi/operations.go",
+			"code": "134: \t\tupdateOpStatus(op, OpFailed, fmt.Sprintf(\"Health check failed on tun dev %s\", tunnel.Interface))\n135: \t\trouting.ClearSlotRouting(op.Slot)\n136: \t\ttunnel.Stop()\n",
+			"line": "135",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/agentapi/operations.go",
+			"code": "88: \tif oldTunnel, exists := sched.ActiveSlots[op.Slot]; exists {\n89: \t\trouting.ClearSlotRouting(op.Slot)\n90: \t\toldTunnel.Stop()\n",
+			"line": "89",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/internal/agentapi/handlers_read.go",
+			"code": "186: \tw.Header().Set(\"Content-Type\", \"application/json\")\n187: \tjson.NewEncoder(w).Encode(data)\n188: }\n",
+			"line": "187",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/root/super-proxy/cmd/manager/main.go",
+			"code": "106: \t\t\tlog.Printf(\"Stopping tunnel and clearing routing...\")\n107: \t\t\trouting.ClearSlotRouting(0)\n108: \t\t\ttunnel.Stop()\n",
+			"line": "107",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		}
+	],
+	"Stats": {
+		"files": 19,
+		"lines": 1794,
+		"nosec": 0,
+		"found": 29
+	},
+	"GosecVersion": "dev"
+}

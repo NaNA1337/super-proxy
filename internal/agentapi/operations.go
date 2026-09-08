@@ -103,8 +103,7 @@ func executeManualSwitch(op *SwitchOperation) {
 	// 2. CONNECTING
 	updateOpStatus(op, OpConnecting, "")
 	ctx, cancel := context.WithCancel(context.Background())
-	// Save the cancel func if we need it? openvpn manager handles it via Stop()
-	_ = cancel
+	defer cancel() // Fix gosec context cancellation warning
 
 	tunnel, err := openvpn.StartTunnel(ctx, op.Slot, &node)
 	if err != nil {

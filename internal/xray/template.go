@@ -87,7 +87,7 @@ func GenerateConfig(slotCount int, configPath string) error {
 		return fmt.Errorf("failed to marshal xray config: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write xray config: %w", err)
 	}
 

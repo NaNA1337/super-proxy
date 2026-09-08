@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -42,8 +43,9 @@ func StartServer(port int, s *scheduler.Scheduler) {
 	}
 
 	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{*tlsCert},
 		},

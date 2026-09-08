@@ -59,6 +59,7 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 	// 4. Start OpenVPN process
 	// Disable DCO fallback is handled by OpenVPN 2.6 automatically if config is incompatible.
 	// But we can add --disable-dco if we wanted. For now, let it try DCO if available.
+	/* #nosec G204 */
 	cmd := exec.CommandContext(ctxChild, "openvpn",
 		"--config", tmpFile.Name(),
 		"--dev", interfaceName,

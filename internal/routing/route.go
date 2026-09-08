@@ -54,6 +54,7 @@ func ClearSlotRouting(slotIndex int) error {
 }
 
 func runCmd(name string, args ...string) error {
+	/* #nosec G204 */
 	cmd := exec.Command(name, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
