@@ -1,0 +1,37 @@
+2026/09/08 04:10:00 Starting Xray Egress Manager (Phase 1)
+2026/09/08 04:10:00 Loaded config: Region Primary=JP
+2026/09/08 04:10:00 Database initialized successfully at xray_manager.db
+2026/09/08 04:10:00 Fetching VPN Gate data from http://www.vpngate.net/api/iphone/
+2026/09/08 04:10:00 Discovered 96 nodes from VPN Gate
+2026/09/08 04:10:00 Filtered down to 49 nodes based on region policy (Primary: JP)
+2026/09/08 04:10:00 Successfully saved/updated 49 nodes in SQLite database
+2026/09/08 04:10:00 Phase 1 initialization complete.
+2026/09/08 04:10:00 --- Starting Phase 2 Test: OpenVPN Lifecycle ---
+2026/09/08 04:10:00 Spawning tunnel for node 219.100.37.179 (JP)
+2026/09/08 04:10:00 [Slot 0] Starting OpenVPN for Node 219.100.37.179 on tun0
+2026-09-08 04:10:00 DEPRECATED OPTION: --persist-key option ignored. Keys are now always persisted across restarts. 
+2026-09-08 04:10:00 Note: cipher 'AES-128-CBC' in --data-ciphers is not supported by ovpn-dco, disabling data channel offload.
+2026-09-08 04:10:00 OpenVPN 2.7.0 x86_64-pc-linux-gnu [SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] [PKCS11] [MH/PKTINFO] [AEAD] [DCO]
+2026-09-08 04:10:00 library versions: OpenSSL 3.5.5 27 Jan 2026, LZO 2.10
+2026-09-08 04:10:00 DCO version: N/A
+2026-09-08 04:10:00 WARNING: No server certificate verification method has been enabled.  See http://openvpn.net/howto.html#mitm for more info.
+2026-09-08 04:10:00 TCP/UDP: Preserving recently used remote address: [AF_INET]219.100.37.179:443
+2026-09-08 04:10:00 Socket Buffers: R=[87380->87380] S=[87380->87380]
+2026-09-08 04:10:00 Attempting to establish TCP connection with [AF_INET]219.100.37.179:443
+2026-09-08 04:10:00 TCP connection established with [AF_INET]219.100.37.179:443
+2026-09-08 04:10:00 TCPv4_CLIENT link local: (not bound)
+2026-09-08 04:10:00 TCPv4_CLIENT link remote: [AF_INET]219.100.37.179:443
+2026-09-08 04:10:00 TLS: Initial packet from [AF_INET]219.100.37.179:443, sid=df2bbb24 057fd4f6
+2026-09-08 04:10:00 VERIFY OK: depth=3, C=US, O=Internet Security Research Group, CN=ISRG Root X1
+2026-09-08 04:10:00 VERIFY OK: depth=2, C=US, O=ISRG, CN=Root YR
+2026-09-08 04:10:00 VERIFY OK: depth=1, C=US, O=Let's Encrypt, CN=YR1
+2026-09-08 04:10:00 VERIFY OK: depth=0, CN=opengw.net
+2026-09-08 04:10:00 Control Channel: TLSv1.3, cipher TLSv1.3 TLS_AES_256_GCM_SHA384, peer certificate: 2048 bits RSA, signature: RSA-SHA256, peer temporary key: 253 bits X25519, peer signing digest/type: rsa_pss_rsae_sha256 RSASSA-PSS, key agreement: x25519
+2026-09-08 04:10:00 [opengw.net] Peer Connection Initiated with [AF_INET]219.100.37.179:443
+2026-09-08 04:10:00 TLS: move_session: dest=TM_ACTIVE src=TM_INITIAL reinit_src=1
+2026-09-08 04:10:00 TLS: tls_multi_process: initial untrusted session promoted to trusted
+2026-09-08 04:10:01 SENT CONTROL [opengw.net]: 'PUSH_REQUEST' (status=1)
+2026/09/08 04:10:02 Tunnel spawned! Interface: tun0. Wait 5s for interface to come up...
+2026-09-08 04:10:06 SENT CONTROL [opengw.net]: 'PUSH_REQUEST' (status=1)
+2026-09-08 04:10:07 AUTH: Received control message: AUTH_FAILED
+2026-09-08 04:10:07 SIGTERM[soft,auth-failure] received, process exiting

@@ -18,11 +18,12 @@ type Scheduler struct {
 	MaxActive    int
 	MaxStandby   int
 	RepEngine    *reputation.Engine
-	ActiveSlots  map[int]*openvpn.Tunnel
-	StandbyNodes []*openvpn.Tunnel
-	mu           sync.Mutex
-	ctx          context.Context
-	cancel       context.CancelFunc
+	ActiveSlots    map[int]*openvpn.Tunnel
+	StandbyNodes   []*openvpn.Tunnel
+	ManualOverride map[int]bool
+	Mu             sync.Mutex
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine) *Scheduler {
@@ -30,10 +31,11 @@ func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine) *Sche
 	return &Scheduler{
 		MaxActive:   maxActive,
 		MaxStandby:  maxStandby,
-		RepEngine:   repEngine,
-		ActiveSlots: make(map[int]*openvpn.Tunnel),
-		ctx:         ctx,
-		cancel:      cancel,
+		RepEngine:      repEngine,
+		ActiveSlots:    make(map[int]*openvpn.Tunnel),
+		ManualOverride: make(map[int]bool),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 }
 
@@ -55,12 +57,12 @@ func (s *Scheduler) monitorLoop() {
 		select {
 		case <-s.ctx.Done():
 			// Cleanup all tunnels
-			s.mu.Lock()
+			s.Mu.Lock()
 			for slot, t := range s.ActiveSlots {
 				routing.ClearSlotRouting(slot)
 				t.Stop()
 			}
-			s.mu.Unlock()
+			s.Mu.Unlock()
 			return
 		case <-ticker.C:
 			s.reconcile()
@@ -69,11 +71,14 @@ func (s *Scheduler) monitorLoop() {
 }
 
 func (s *Scheduler) reconcile() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
 
 	// 1. Check health of active slots
 	for slot, tunnel := range s.ActiveSlots {
+		if s.ManualOverride[slot] {
+			continue // Skip health reconciliation if slot is locked by manual switch
+		}
 		if !tunnel.IsActive {
 			log.Printf("[Scheduler] Slot %d tunnel %s is dead (process exited). Removing.", slot, tunnel.Node.IP)
 			routing.ClearSlotRouting(slot)
@@ -96,6 +101,9 @@ func (s *Scheduler) reconcile() {
 
 	// 2. Fill empty active slots from standby pool
 	for i := 0; i < s.MaxActive; i++ {
+		if s.ManualOverride[i] {
+			continue // Skip filling if manually overridden (Wait for manual op to finish)
+		}
 		if _, ok := s.ActiveSlots[i]; !ok {
 			if len(s.StandbyNodes) > 0 {
 				log.Printf("[Scheduler] Promoting standby tunnel to slot %d", i)
