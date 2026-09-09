@@ -12,11 +12,13 @@ import (
 type DCOStatus string
 
 const (
-	DCOStatusSupported DCOStatus = "DCO_SUPPORTED"
-	DCOStatusRequested DCOStatus = "DCO_REQUESTED"
-	DCOStatusActive    DCOStatus = "DCO_ACTIVE"
-	DCOStatusFailed    DCOStatus = "DCO_FAILED"
-	DCOStatusDisabled  DCOStatus = "DCO_DISABLED"
+	DCOStatusSupported   DCOStatus = "DCO_SUPPORTED"
+	DCOStatusRequested   DCOStatus = "DCO_STATUS=REQUESTED"
+	DCOStatusActive      DCOStatus = "DCO_STATUS=ACTIVE"
+	DCOStatusFallback    DCOStatus = "DCO_STATUS=FALLBACK"
+	DCOStatusFailed      DCOStatus = "DCO_STATUS=FAILED"
+	DCOStatusUnavailable DCOStatus = "DCO_STATUS=UNAVAILABLE"
+	DCOStatusDisabled    DCOStatus = "DCO_STATUS=DISABLED"
 )
 
 // OpenVPNVersion holds parsed version info
@@ -121,7 +123,10 @@ func ParseDCOLogLine(line string) DCOStatus {
 	if strings.Contains(lineLower, "cannot open") || strings.Contains(lineLower, "dco failed") || strings.Contains(lineLower, "dco error") {
 		return DCOStatusFailed
 	}
-	if strings.Contains(lineLower, "--disable-dco is present") || strings.Contains(lineLower, "dco disabled") {
+	if strings.Contains(lineLower, "falling back to userspace") || strings.Contains(lineLower, "fallback to tun") || strings.Contains(lineLower, "falling back to standard") {
+		return DCOStatusFallback
+	}
+	if strings.Contains(lineLower, "--disable-dco is present") || strings.Contains(lineLower, "dco disabled") || strings.Contains(lineLower, "dco is disabled") {
 		return DCOStatusDisabled
 	}
 	if strings.Contains(lineLower, "using dco") || strings.Contains(lineLower, "dco device opened") || strings.Contains(lineLower, "dco device ovpn") {

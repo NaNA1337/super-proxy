@@ -22,11 +22,28 @@ var AllowedTransitions = map[string]map[string]bool{
 		models.StatusStale:             true,
 	},
 	models.StatusReputationChecked: {
+		models.StatusConnecting: true,
+		models.StatusHealthy:    true,
+		models.StatusQualified:  true,
+		models.StatusFailed:     true,
+	},
+	models.StatusConnecting: {
+		models.StatusHealthCheck: true,
+		models.StatusHealthy:     true,
+		models.StatusFailed:      true,
+	},
+	models.StatusHealthCheck: {
+		models.StatusSpeedTest: true,
 		models.StatusHealthy:   true,
 		models.StatusQualified: true,
 		models.StatusFailed:    true,
 	},
 	models.StatusHealthy: {
+		models.StatusSpeedTest: true,
+		models.StatusQualified: true,
+		models.StatusFailed:    true,
+	},
+	models.StatusSpeedTest: {
 		models.StatusQualified: true,
 		models.StatusFailed:    true,
 	},

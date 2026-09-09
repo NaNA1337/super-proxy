@@ -2,11 +2,13 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/NaNA1337/super-proxy/internal/benchmark"
 	"github.com/NaNA1337/super-proxy/internal/config"
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/health"
@@ -14,6 +16,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/routing"
+	"github.com/NaNA1337/super-proxy/internal/xray"
 )
 
 const drainingTimeout = 30 * time.Second
@@ -30,6 +33,9 @@ type Scheduler struct {
 	StandbyNodes     []*openvpn.Tunnel
 	Slots            *SlotManager
 	ManualOverride   map[int]bool
+	XraySupervisor   *xray.Supervisor
+	Benchmarker      func(ctx context.Context, interfaceName string) (*models.PerformanceMetrics, error)
+	ScoringEngine    *ScoringEngine
 	Mu               sync.Mutex
 	ctx              context.Context
 	cancel           context.CancelFunc
@@ -50,12 +56,21 @@ func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine, regio
 		drainingTunIPs:   make(map[int]string),
 		Slots:            NewSlotManager(maxActive),
 		ManualOverride:   make(map[int]bool),
+		Benchmarker:      benchmark.BenchmarkInterface,
+		ScoringEngine:    NewScoringEngine(config.ScoringConfig{}),
 		ctx:              ctx,
 		cancel:           cancel,
 	}
 	// Start virtual slot counter after active + standby range
 	s.standbySlotCount.Store(int64(maxActive + maxStandby + 10))
 	return s
+}
+
+// SetXraySupervisor connects the Xray supervisor to dynamically coordinate active egress slots.
+func (s *Scheduler) SetXraySupervisor(xsup *xray.Supervisor) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.XraySupervisor = xsup
 }
 
 func (s *Scheduler) Start() {
@@ -189,7 +204,16 @@ func (s *Scheduler) reconcileActiveSlots() {
 					sc.Mu.Lock()
 					sc.ActiveTunnel = newTunnel
 					sc.State = SlotActive
+					sc.OutboundActive = true
 					sc.Mu.Unlock()
+				}
+
+				// Dynamically add to Xray active-set so new connections can enter this slot
+				if s.XraySupervisor != nil {
+					tag := fmt.Sprintf("exit-%d", i)
+					if err := s.XraySupervisor.EnableOutbound(tag, routing.BaseTableID+i); err != nil {
+						log.Printf("[Scheduler] Warning: failed to enable Xray outbound %s: %v", tag, err)
+					}
 				}
 			} else {
 				log.Printf("[Scheduler] Slot %d is empty, but no standby available.", i)
@@ -213,7 +237,15 @@ func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel)
 	tunnel.DrainingStartedAt = time.Now()
 	tunnel.Mu.Unlock()
 
-	// 1. Isolate into dedicated Draining Table (200 + slot)
+	// 1. Immediately remove outbound from Xray active-set so NO NEW connections enter draining slot
+	if s.XraySupervisor != nil {
+		tag := fmt.Sprintf("exit-%d", slot)
+		if err := s.XraySupervisor.DisableOutbound(tag); err != nil {
+			log.Printf("[Scheduler] Warning: failed to disable Xray outbound %s: %v", tag, err)
+		}
+	}
+
+	// 2. Isolate existing connections into dedicated Draining Table (200 + slot)
 	drainingTableID := 200 + slot
 	tunIP, _ := routing.GetInterfaceIP(tunnel.Interface)
 	if err := routing.SetupDrainingRouting(drainingTableID, tunnel.Interface, tunIP); err != nil {
@@ -223,10 +255,10 @@ func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel)
 	s.drainingTableIDs[slot] = drainingTableID
 	s.drainingTunIPs[slot] = tunIP
 
-	// 2. FSM state transition
+	// 3. FSM state transition
 	_ = TransitionNode(database.DB, tunnel.Node, models.StatusDraining)
 
-	// 3. Move from active to draining map
+	// 4. Move from active to draining map
 	delete(s.ActiveSlots, slot)
 	s.DrainingSlots[slot] = tunnel
 
@@ -237,10 +269,11 @@ func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel)
 		sc.DrainingTunnel = tunnel
 		sc.DrainingTableID = drainingTableID
 		sc.State = SlotDraining
+		sc.OutboundActive = false
 		sc.Mu.Unlock()
 	}
 
-	log.Printf("[Scheduler] Slot %d moved to DRAINING state (dev %s, tunIP %s, table %d)",
+	log.Printf("[Scheduler] Slot %d moved to DRAINING state (dev %s, tunIP %s, table %d, Xray outbound disabled)",
 		slot, tunnel.Interface, tunIP, drainingTableID)
 }
 
@@ -271,13 +304,14 @@ func (s *Scheduler) cleanupDrainingSlots() {
 
 		// Check remaining connections by mark and tunIP
 		count, err := GetActiveConnectionCount(slot, tunIP)
-		if err != nil {
-			log.Printf("[Scheduler] Warning: Failed to check connections for slot %d: %v", slot, err)
-			count = 0 // Fallback to safe kill if conntrack is entirely broken
+		if err != nil || count == ConnectionCountUnknown {
+			log.Printf("[Scheduler] Warning: conntrack unavailable for slot %d (%v); keeping tunnel draining until timeout (elapsed: %.1fs)",
+				slot, err, elapsed.Seconds())
+			continue // DO NOT kill the tunnel prematurely on conntrack failure
 		}
 
 		if count > 0 {
-			log.Printf("[Scheduler] %s", FormatDrainingStatus(slot, count))
+			log.Printf("[Scheduler] %s (elapsed: %.1fs)", FormatDrainingStatus(slot, count), elapsed.Seconds())
 			continue // Keep draining
 		}
 
@@ -315,48 +349,81 @@ func (s *Scheduler) maintainStandbyPool() {
 	// Use monotonically increasing counter for standby virtual slot IDs to avoid collisions
 	standbyVirtualSlot := int(s.standbySlotCount.Add(1))
 
-	// Build region filter for DB query
-	allowedCountries := []string{s.RegionConfig.Primary}
-	allowedCountries = append(allowedCountries, s.RegionConfig.Fallback...)
-
-	var node models.Node
-	// Strict Lifecycle + Region filter
-	query := database.DB.Where("status = ?", models.StatusDiscovered)
-	if len(allowedCountries) > 0 && allowedCountries[0] != "" {
-		query = query.Where("country IN ?", allowedCountries)
+	// Select best candidate node obeying strict Primary/Fallback threshold policy
+	selection, err := s.SelectNextCandidate()
+	if err != nil || selection == nil || selection.Node == nil {
+		return // No qualified candidates available
 	}
-	// Exclude nodes that have failed too many times
-	query = query.Where("fail_count < ?", 3)
-	result := query.Order("score DESC").First(&node)
-	if result.Error != nil {
-		return // No nodes available
-	}
+	node := *selection.Node
 
-	log.Printf("[Scheduler] Evaluating node %s (%s) for standby pool", node.IP, node.Country)
+	log.Printf("[Scheduler] Evaluating node %s (%s, score=%d, fallback=%v) for standby pool",
+		node.IP, node.Country, node.Score, selection.IsFallbackNode)
+
+	// Prefix Intelligence check
+	badLimit := 3
+	if s.ScoringEngine != nil && s.ScoringEngine.cfg.PrefixBadLimit > 0 {
+		badLimit = s.ScoringEngine.cfg.PrefixBadLimit
+	}
+	_, prefixPenalty, prefixReason := reputation.EvaluatePrefixRisk(database.DB, node.IP, badLimit)
 
 	// Reputation Check
 	res, _ := s.RepEngine.EvaluateIP(s.ctx, node.IP)
 	if res.HardReject {
+		_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, true, true)
+		log.Printf("[Scheduler] Candidate %s REJECTED by reputation hard-reject: %s", node.IP, res.ProviderReason)
 		_ = TransitionNode(database.DB, &node, models.StatusFailed)
 		return
 	}
 
-	// Soft penalty persisted to DB
-	if res.ScorePenalty > 0 {
-		node.Score -= res.ScorePenalty
-		database.DB.Model(&node).Update("score", node.Score)
+	_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, res.ScorePenalty > 0, false)
+
+	// Update node reputation and network intelligence
+	node.Reputation.FraudScore = res.ScorePenalty
+	node.Reputation.Status = string(res.Status)
+	node.Reputation.ProviderName = res.ProviderReason
+	node.NetClass = res.NetworkInfo
+
+	// Evaluate candidate using unified ScoringEngine
+	if s.ScoringEngine != nil {
+		scoringRes := s.ScoringEngine.EvaluateNode(&node, !selection.IsFallbackNode, prefixPenalty, prefixReason)
+		log.Printf("[Scheduler] %s", scoringRes.Explanation)
+		if !scoringRes.Allowed {
+			log.Printf("[Scheduler] Candidate %s REJECTED by scoring engine: final score %d", node.IP, scoringRes.FinalScore)
+			_ = TransitionNode(database.DB, &node, models.StatusFailed)
+			return
+		}
+		node.Score = scoringRes.FinalScore
 	}
-	database.DB.Model(&node).Updates(map[string]interface{}{
-		"rep_fraud_score":   res.ScorePenalty,
-		"rep_provider_name": res.ProviderReason,
-	})
+
+	// Persist reputation & network intelligence to DB
+	if database.DB != nil {
+		database.DB.Model(&node).Updates(map[string]interface{}{
+			"score":             node.Score,
+			"rep_status":        node.Reputation.Status,
+			"rep_fraud_score":   node.Reputation.FraudScore,
+			"rep_provider_name": node.Reputation.ProviderName,
+			"net_asn":           node.NetClass.ASN,
+			"net_isp":           node.NetClass.ISP,
+			"net_organization":  node.NetClass.Organization,
+			"net_network_type":  node.NetClass.NetworkType,
+			"net_is_vpn":        node.NetClass.IsVPN,
+			"net_is_proxy":      node.NetClass.IsProxy,
+			"net_is_tor":        node.NetClass.IsTor,
+			"net_is_hosting":    node.NetClass.IsHosting,
+		})
+	}
 
 	if err := TransitionNode(database.DB, &node, models.StatusReputationChecked); err != nil {
 		log.Printf("[Scheduler] FSM transition error: %v", err)
 		return
 	}
 
-	// Connect
+	// 1. CONNECTING
+	if err := TransitionNode(database.DB, &node, models.StatusConnecting); err != nil {
+		log.Printf("[Scheduler] FSM connecting error: %v", err)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
 	tunnel, err := openvpn.StartTunnel(ctx, standbyVirtualSlot, &node)
@@ -367,21 +434,65 @@ func (s *Scheduler) maintainStandbyPool() {
 
 	time.Sleep(5 * time.Second)
 
+	// 2. HEALTH_CHECK
+	if err := TransitionNode(database.DB, &node, models.StatusHealthCheck); err != nil {
+		log.Printf("[Scheduler] FSM health check error: %v", err)
+	}
+
 	// Verify the tunnel without polluting main route table
 	_ = routing.SetupSlotRouting(standbyVirtualSlot, tunnel.Interface)
 	hRes := health.VerifyTunnel(ctx, standbyVirtualSlot, tunnel.Interface, routing.BaseTableID+standbyVirtualSlot, &node)
-	_ = routing.ClearSlotRouting(standbyVirtualSlot) // Remove temp routing
 
 	if !hRes.TunnelHealthy || hRes.Error != nil {
+		_ = routing.ClearSlotRouting(standbyVirtualSlot)
 		tunnel.Stop()
 		_ = TransitionNode(database.DB, &node, models.StatusFailed)
 		return
 	}
 
-	// Transition to QUALIFIED, then to STANDBY
+	// 3. SPEED_TEST
+	if err := TransitionNode(database.DB, &node, models.StatusSpeedTest); err != nil {
+		log.Printf("[Scheduler] FSM speed test error: %v", err)
+	}
+
+	benchFn := s.Benchmarker
+	if benchFn != nil {
+		benchCtx, benchCancel := context.WithTimeout(s.ctx, 20*time.Second)
+		perf, err := benchFn(benchCtx, tunnel.Interface)
+		benchCancel()
+
+		_ = routing.ClearSlotRouting(standbyVirtualSlot) // Remove temp routing
+
+		if err != nil || perf == nil {
+			log.Printf("[Scheduler] Speed test failed for node %s on %s: %v", node.IP, tunnel.Interface, err)
+			tunnel.Stop()
+			_ = TransitionNode(database.DB, &node, models.StatusFailed)
+			return
+		}
+
+		node.Performance = *perf
+		if database.DB != nil {
+			database.DB.Model(&node).Updates(map[string]interface{}{
+				"perf_rtt_ms":          perf.RTT,
+				"perf_throughput_bps":  perf.Throughput,
+				"perf_download_bps":    perf.DownloadSpeed,
+				"perf_upload_bps":      perf.UploadSpeed,
+				"perf_upload_status":   perf.UploadStatus,
+				"perf_packet_loss_pct": perf.PacketLoss,
+				"perf_duration_ms":     perf.DurationMs,
+				"perf_last_checked":    perf.LastChecked,
+			})
+		}
+	} else {
+		_ = routing.ClearSlotRouting(standbyVirtualSlot)
+	}
+
+	// 4. QUALIFIED
 	if err := TransitionNode(database.DB, &node, models.StatusQualified); err != nil {
 		log.Printf("[Scheduler] FSM qualified error: %v", err)
 	}
+
+	// 5. STANDBY
 	if err := TransitionNode(database.DB, &node, models.StatusStandby); err != nil {
 		log.Printf("[Scheduler] FSM standby error: %v", err)
 	}
@@ -393,6 +504,6 @@ func (s *Scheduler) maintainStandbyPool() {
 	s.Mu.Lock()
 	s.StandbyNodes = append(s.StandbyNodes, tunnel)
 	s.Mu.Unlock()
-	log.Printf("[Scheduler] Successfully added tunnel %s to warm standby pool (Node %s: QUALIFIED -> STANDBY).",
+	log.Printf("[Scheduler] Successfully added tunnel %s to warm standby pool (Node %s: CONNECTING -> HEALTH_CHECK -> SPEED_TEST -> QUALIFIED -> STANDBY).",
 		tunnel.Interface, node.IP)
 }

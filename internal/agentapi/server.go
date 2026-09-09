@@ -11,8 +11,27 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// StartServer initializes and starts the Agent API Control Plane
+// StartServer initializes and starts the Agent API Control Plane bound to localhost by default.
 func StartServer(port int, schedulerInstance *scheduler.Scheduler, configKey string) *http.Server {
+	return StartServerWithAddr("127.0.0.1", port, schedulerInstance, configKey)
+}
+
+// StartServerWithAddr initializes and starts the Agent API Control Plane on a specific address.
+func StartServerWithAddr(listenAddr string, port int, schedulerInstance *scheduler.Scheduler, configKey string) *http.Server {
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1"
+	}
+	if port <= 0 {
+		port = 60000
+	}
+
+	if listenAddr == "0.0.0.0" || listenAddr == "::" {
+		if configKey == "" {
+			log.Fatalf("[AgentAPI] FATAL: Binding to public address %s without an API authentication key is strictly prohibited!", listenAddr)
+		}
+		log.Printf("[AgentAPI] WARNING: Binding to PUBLIC address %s:%d! Enforcing mandatory TLS, Bearer token authentication, and IP rate limiting.", listenAddr, port)
+	}
+
 	SetScheduler(schedulerInstance)
 	InitAuth(configKey)
 
@@ -37,7 +56,7 @@ func StartServer(port int, schedulerInstance *scheduler.Scheduler, configKey str
 	// Metrics must be authenticated
 	mux.Handle("/metrics", secureChain(promhttp.Handler()))
 
-	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	addr := fmt.Sprintf("%s:%d", listenAddr, port)
 
 	// Generate in-memory self-signed TLS cert
 	tlsCert, err := LoadOrGenerateCert("configs/cert.pem", "configs/key.pem")

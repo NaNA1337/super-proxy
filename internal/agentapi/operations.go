@@ -192,7 +192,15 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 		sc.Mu.Lock()
 		sc.ActiveTunnel = tunnel
 		sc.State = scheduler.SlotActive
+		sc.OutboundActive = true
 		sc.Mu.Unlock()
+	}
+
+	if sched.XraySupervisor != nil {
+		tag := fmt.Sprintf("exit-%d", op.Slot)
+		if err := sched.XraySupervisor.EnableOutbound(tag, routing.BaseTableID+op.Slot); err != nil {
+			log.Printf("[Operation-%s] Warning: failed to enable Xray outbound %s: %v", op.ID, tag, err)
+		}
 	}
 
 	lease.Release()

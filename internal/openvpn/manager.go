@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
@@ -30,6 +31,10 @@ type Tunnel struct {
 	DrainingStartedAt time.Time
 	tmpConfigPath     string
 	cleanupOnce       sync.Once
+
+	// Lifecycle synchronization: single waiter goroutine owns cmd.Wait()
+	doneChan          chan struct{}
+	exitErr           error
 }
 
 // StartTunnel decodes config, injects route-nopull, and starts the OpenVPN process
@@ -82,6 +87,12 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 
 	/* #nosec G204 */
 	cmd := exec.CommandContext(ctxChild, "openvpn", args...)
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return cmd.Process.Signal(syscall.SIGTERM)
+		}
+		return nil
+	}
 
 	stdoutPipe, _ := cmd.StdoutPipe()
 	stderrPipe, _ := cmd.StderrPipe()
@@ -112,6 +123,7 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 		State:         "ACTIVE",
 		DCOStatus:     initialDCO,
 		tmpConfigPath: tmpFile.Name(),
+		doneChan:      make(chan struct{}),
 	}
 
 	scanLog := func(r io.Reader) {
@@ -136,10 +148,12 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 		go scanLog(stderrPipe)
 	}
 
-	// Wait for process in background
+	// Sole waiter goroutine: exclusive owner of cmd.Wait()
 	go func() {
+		defer close(tunnel.doneChan)
 		err := cmd.Wait()
 		tunnel.Mu.Lock()
+		tunnel.exitErr = err
 		tunnel.State = "FAILED"
 		tunnel.Mu.Unlock()
 		if err != nil {
@@ -147,7 +161,7 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 		} else {
 			log.Printf("[Slot %d] OpenVPN process exited gracefully", slotIndex)
 		}
-		// Run cleanup exactly once (coordinated with Stop())
+		// Run cleanup exactly once
 		tunnel.cleanup()
 	}()
 
@@ -177,29 +191,40 @@ func (t *Tunnel) cleanup() {
 }
 
 // Stop terminates the OpenVPN process and waits for cleanup to complete.
+// Strictly adheres to the single-waiter lifecycle contract (never calls cmd.Wait()).
 func (t *Tunnel) Stop() {
 	if t.Cancel != nil {
 		t.Cancel()
 	}
-	// Wait for the process to actually exit (with a timeout)
-	done := make(chan struct{})
-	go func() {
-		if t.Cmd != nil && t.Cmd.Process != nil {
-			t.Cmd.Wait() //nolint:errcheck // already handled in goroutine
-		}
-		close(done)
-	}()
 
 	select {
-	case <-done:
-		// Process exited cleanly
-	case <-time.After(10 * time.Second):
-		log.Printf("[Slot %d] Warning: OpenVPN process did not exit within 10s after cancel, force killing", t.SlotIndex)
+	case <-t.doneChan:
+		// Process exited cleanly via context cancellation
+	case <-time.After(5 * time.Second):
+		log.Printf("[Slot %d] Warning: OpenVPN process did not exit within 5s after cancel, force killing (SIGKILL)", t.SlotIndex)
 		if t.Cmd != nil && t.Cmd.Process != nil {
-			t.Cmd.Process.Kill() //nolint:errcheck
+			_ = t.Cmd.Process.Kill()
+		}
+		select {
+		case <-t.doneChan:
+			log.Printf("[Slot %d] OpenVPN process exited after SIGKILL", t.SlotIndex)
+		case <-time.After(5 * time.Second):
+			log.Printf("[Slot %d] Error: OpenVPN process could not be reaped after SIGKILL", t.SlotIndex)
 		}
 	}
 
-	// Ensure cleanup runs even if the background goroutine hasn't run yet
+	// Ensure cleanup has run
 	t.cleanup()
+}
+
+// Done returns a channel that is closed when the OpenVPN process exits.
+func (t *Tunnel) Done() <-chan struct{} {
+	return t.doneChan
+}
+
+// ExitError returns the error from cmd.Wait() after Done() is closed.
+func (t *Tunnel) ExitError() error {
+	t.Mu.Lock()
+	defer t.Mu.Unlock()
+	return t.exitErr
 }

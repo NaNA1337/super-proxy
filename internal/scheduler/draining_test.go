@@ -8,6 +8,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
+	"github.com/NaNA1337/super-proxy/internal/xray"
 )
 
 func TestDraining_LifecycleAndState(t *testing.T) {
@@ -135,5 +136,99 @@ func TestDraining_StandbyPromotionDoesNotOverwriteDraining(t *testing.T) {
 	// Slot 0 active table is 100, draining table is 200
 	if sched.drainingTableIDs[0] != 200 {
 		t.Fatalf("Expected draining table 200, got %d", sched.drainingTableIDs[0])
+	}
+}
+
+func TestDraining_XrayActiveSetCoordination(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := tempDir + "/xray_drain_test.json"
+	apiPort := 10095
+	socksPort := 10895
+
+	if err := xray.GenerateConfigWithOptions(xray.ConfigOptions{
+		SlotCount:   2,
+		ConfigPath:  configPath,
+		ApiPort:     apiPort,
+		SocksListen: "127.0.0.1",
+		SocksPort:   socksPort,
+	}); err != nil {
+		t.Fatalf("failed to generate test config: %v", err)
+	}
+
+	xsup := xray.NewSupervisor(configPath, apiPort, "127.0.0.1", socksPort, 2)
+	if err := xsup.Start(); err != nil {
+		t.Fatalf("failed to start xray: %v", err)
+	}
+	defer xsup.Stop()
+
+	rep := reputation.NewEngine()
+	reg := config.RegionConfig{Primary: "JP"}
+	sched := NewScheduler(2, 2, rep, reg)
+	sched.SetXraySupervisor(xsup)
+
+	mockTunnel := &openvpn.Tunnel{
+		ID:        "slot-0",
+		SlotIndex: 0,
+		Interface: "tun0",
+		Node: &models.Node{
+			ID:     "node-xray-1",
+			IP:     "192.0.2.1",
+			Status: models.StatusActive,
+		},
+		State: "ACTIVE",
+	}
+	sched.ActiveSlots[0] = mockTunnel
+
+	// Initially exit-0 is active in Xray
+	if !xsup.IsOutboundActive("exit-0") {
+		t.Fatalf("expected exit-0 to be active initially")
+	}
+
+	// Move slot 0 to DRAINING
+	sched.TransitionToDraining(0, mockTunnel)
+
+	// In Xray, exit-0 MUST be immediately disabled so new connections do not enter draining tunnel
+	if xsup.IsOutboundActive("exit-0") {
+		t.Fatalf("expected exit-0 to be disabled in Xray active set after TransitionToDraining")
+	}
+
+	// Slot controller must also reflect OutboundActive == false
+	sc, err := sched.Slots.GetSlot(0)
+	if err != nil {
+		t.Fatalf("failed to get slot 0: %v", err)
+	}
+	sc.Mu.RLock()
+	outboundActive := sc.OutboundActive
+	sc.Mu.RUnlock()
+	if outboundActive {
+		t.Fatalf("expected SlotController.OutboundActive to be false")
+	}
+
+	// Simulate standby promotion to slot 0
+	standbyTunnel := &openvpn.Tunnel{
+		ID:        "slot-16",
+		SlotIndex: 16,
+		Interface: "lo",
+		Node: &models.Node{
+			ID:     "node-xray-2",
+			IP:     "192.0.2.2",
+			Status: models.StatusStandby,
+		},
+		State: "ACTIVE",
+	}
+	sched.StandbyNodes = append(sched.StandbyNodes, standbyTunnel)
+
+	sched.reconcileActiveSlots()
+
+	// After promotion, exit-0 MUST be restored to active set in Xray
+	if !xsup.IsOutboundActive("exit-0") {
+		t.Fatalf("expected exit-0 to be re-enabled in Xray active set after standby promotion")
+	}
+
+	sc.Mu.RLock()
+	outboundActiveAfter := sc.OutboundActive
+	sc.Mu.RUnlock()
+	if !outboundActiveAfter {
+		t.Fatalf("expected SlotController.OutboundActive to be true after standby promotion")
 	}
 }

@@ -18,8 +18,8 @@ func InitDatabase(dbPath string) error {
 		return err
 	}
 
-	// Auto-migrate the Node model
-	err = DB.AutoMigrate(&models.Node{})
+	// Auto-migrate models
+	err = DB.AutoMigrate(&models.Node{}, &models.PrefixIntelligence{})
 	if err != nil {
 		return err
 	}

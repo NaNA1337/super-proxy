@@ -39,6 +39,7 @@ type SlotController struct {
 	ActiveTunnel    *openvpn.Tunnel
 	DrainingTunnel  *openvpn.Tunnel
 	DrainingTableID int
+	OutboundActive  bool
 	UpdatedAt       time.Time
 }
 

@@ -22,6 +22,10 @@ func TestDCO_LogParser(t *testing.T) {
 			expected: DCOStatusFailed,
 		},
 		{
+			logLine:  "Data Channel Offload not available, falling back to userspace OpenVPN",
+			expected: DCOStatusFallback,
+		},
+		{
 			logLine:  "Initialization Sequence Completed",
 			expected: "",
 		},
