@@ -28,8 +28,8 @@ type DiscoveryConfig struct {
 }
 
 type ReputationConfig struct {
-	Enabled bool `mapstructure:"enabled"`
-	// Providers will be added in Phase 5
+	Enabled bool   `mapstructure:"enabled"`
+	APIKey  string `mapstructure:"api_key"` // AbuseIPDB API key
 }
 
 // LoadConfig loads the configuration from file and environment variables

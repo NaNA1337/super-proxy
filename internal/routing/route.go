@@ -5,12 +5,19 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 )
 
 const BaseTableID = 100
 
-var cachedGateway string
-var cachedIface string
+var (
+	cachedGateway  string
+	cachedIface    string
+	cacheTime      time.Time
+	cacheTTL       = 60 * time.Second
+	gatewayCacheMu sync.Mutex
+)
 
 // SetupSlotRouting configures policy routing for a specific slot and interface
 func SetupSlotRouting(slotIndex int, interfaceName string) error {
@@ -36,6 +43,11 @@ func SetupSlotRouting(slotIndex int, interfaceName string) error {
 	}
 	runCmd("ip", "-6", "route", "add", "blackhole", "default", "table", fmt.Sprintf("%d", tableID))
 
+	// 5. CONNMARK rules for connection tracking (required for DRAINING)
+	if err := SetupConnmarkRules(slotIndex); err != nil {
+		log.Printf("[Slot %d] Warning: failed to setup CONNMARK rules: %v", slotIndex, err)
+	}
+
 	log.Printf("[Slot %d] Routing setup complete: fwmark %d -> table %d -> dev %s", slotIndex, fwmark, tableID, interfaceName)
 	return nil
 }
@@ -44,6 +56,9 @@ func SetupSlotRouting(slotIndex int, interfaceName string) error {
 func ClearSlotRouting(slotIndex int) error {
 	tableID := BaseTableID + slotIndex
 	fwmark := tableID
+
+	// Clean up CONNMARK rules first
+	ClearConnmarkRules(slotIndex)
 
 	if err := runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", tableID)); err != nil {
 		log.Printf("[Slot %d] Note: failed to flush route table: %v", slotIndex, err)
@@ -62,9 +77,13 @@ func ClearSlotRouting(slotIndex int) error {
 	return nil
 }
 
-// GetDefaultGateway finds the default gateway and physical interface of the main table
+// GetDefaultGateway finds the default gateway and physical interface of the main table.
+// Results are cached with a TTL to handle network changes (DHCP renewal, failover).
 func GetDefaultGateway() (string, string, error) {
-	if cachedGateway != "" && cachedIface != "" {
+	gatewayCacheMu.Lock()
+	defer gatewayCacheMu.Unlock()
+
+	if cachedGateway != "" && cachedIface != "" && time.Since(cacheTime) < cacheTTL {
 		return cachedGateway, cachedIface, nil
 	}
 
@@ -92,6 +111,7 @@ func GetDefaultGateway() (string, string, error) {
 
 	cachedGateway = gw
 	cachedIface = iface
+	cacheTime = time.Now()
 	return gw, iface, nil
 }
 

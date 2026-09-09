@@ -1,9 +1,11 @@
 package agentapi
 
 import (
+	"crypto/subtle"
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,19 +13,19 @@ import (
 )
 
 type ClientLimiter struct {
-	limiter *rate.Limiter
+	limiter  *rate.Limiter
 	lastSeen time.Time
 }
 
 var (
-	mu sync.Mutex
+	rlMu sync.Mutex
 	// Key is IP address string
 	visitors = make(map[string]*ClientLimiter)
-	
+
 	// Unauthenticated config: 5 req/sec, burst of 10
 	unauthLimit = rate.Limit(5)
 	unauthBurst = 10
-	
+
 	// Authenticated config: 50 req/sec, burst of 100
 	authLimit = rate.Limit(50)
 	authBurst = 100
@@ -33,9 +35,22 @@ func init() {
 	go cleanupVisitors()
 }
 
+// isTokenValid performs a quick check if the provided token matches the master key.
+// Used by the rate limiter (which runs before auth middleware) to determine the rate bucket.
+func isTokenValid(authHeader string) bool {
+	if masterAPIKey == "" || authHeader == "" {
+		return false
+	}
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(masterAPIKey)) == 1
+}
+
 func getVisitorLimiter(ip string, isAuthenticated bool) *rate.Limiter {
-	mu.Lock()
-	defer mu.Unlock()
+	rlMu.Lock()
+	defer rlMu.Unlock()
 
 	v, exists := visitors[ip]
 	if !exists {
@@ -63,13 +78,13 @@ func getVisitorLimiter(ip string, isAuthenticated bool) *rate.Limiter {
 func cleanupVisitors() {
 	for {
 		time.Sleep(1 * time.Minute)
-		mu.Lock()
+		rlMu.Lock()
 		for ip, v := range visitors {
 			if time.Since(v.lastSeen) > 3*time.Minute {
 				delete(visitors, ip)
 			}
 		}
-		mu.Unlock()
+		rlMu.Unlock()
 	}
 }
 
@@ -82,14 +97,14 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Auth status is populated in Context by AuthMiddleware if it runs first.
-		// Alternatively, we check it here loosely just to decide the bucket.
-		// Note: true authentication enforcement happens in AuthMiddleware.
+		// Actually validate the token to determine the correct rate bucket
+		// (not just check for header presence, which can be spoofed)
 		authHeader := r.Header.Get("Authorization")
-		isAuthenticatedAttempt := authHeader != ""
+		isAuthenticated := isTokenValid(authHeader)
 
-		limiter := getVisitorLimiter(ip, isAuthenticatedAttempt)
+		limiter := getVisitorLimiter(ip, isAuthenticated)
 		if !limiter.Allow() {
+			log.Printf("[AgentAPI] 429 Too Many Requests - IP: %s, Authenticated: %v", ip, isAuthenticated)
 			http.Error(w, "429 Too Many Requests", http.StatusTooManyRequests)
 			return
 		}

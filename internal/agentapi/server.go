@@ -18,9 +18,10 @@ func StartServer(port int, schedulerInstance *scheduler.Scheduler) *http.Server 
 
 	mux := http.NewServeMux()
 
-	// Define middleware chain: Authentication FIRST, then Rate Limit (P1-10)
+	// Middleware chain: Rate Limit FIRST (outer), then Authentication (inner)
+	// This ensures unauthenticated brute-force attempts are rate-limited
 	secureChain := func(h http.Handler) http.Handler {
-		return authMiddleware(rateLimitMiddleware(h))
+		return rateLimitMiddleware(authMiddleware(h))
 	}
 
 	mux.Handle("/api/v1/status", secureChain(http.HandlerFunc(handleStatus)))
@@ -32,12 +33,12 @@ func StartServer(port int, schedulerInstance *scheduler.Scheduler) *http.Server 
 	mux.Handle("/api/v1/nodes/", secureChain(http.HandlerFunc(handleNodeDetails)))
 	mux.Handle("/api/v1/operations/", secureChain(http.HandlerFunc(handleOperationStatus)))
 	mux.Handle("/api/v1/slots/", secureChain(http.HandlerFunc(handleSlotAction)))
-	
+
 	// P1-11: Metrics must be authenticated
 	mux.Handle("/metrics", secureChain(promhttp.Handler()))
 
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
-	
+
 	// Generate in-memory self-signed TLS cert
 	tlsCert, err := LoadOrGenerateCert("configs/cert.pem", "configs/key.pem")
 	if err != nil {
@@ -59,6 +60,6 @@ func StartServer(port int, schedulerInstance *scheduler.Scheduler) *http.Server 
 			log.Fatalf("[AgentAPI] Failed to start server: %v", err)
 		}
 	}()
-	
+
 	return server
 }
