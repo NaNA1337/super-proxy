@@ -15,9 +15,9 @@ import (
 )
 
 type Scheduler struct {
-	MaxActive    int
-	MaxStandby   int
-	RepEngine    *reputation.Engine
+	MaxActive      int
+	MaxStandby     int
+	RepEngine      *reputation.Engine
 	ActiveSlots    map[int]*openvpn.Tunnel
 	StandbyNodes   []*openvpn.Tunnel
 	ManualOverride map[int]bool
@@ -29,8 +29,8 @@ type Scheduler struct {
 func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		MaxActive:   maxActive,
-		MaxStandby:  maxStandby,
+		MaxActive:      maxActive,
+		MaxStandby:     maxStandby,
 		RepEngine:      repEngine,
 		ActiveSlots:    make(map[int]*openvpn.Tunnel),
 		ManualOverride: make(map[int]bool),
@@ -51,37 +51,51 @@ func (s *Scheduler) Stop() {
 
 func (s *Scheduler) monitorLoop() {
 	ticker := time.NewTicker(10 * time.Second)
+	staleTicker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
+	defer staleTicker.Stop()
 
 	for {
 		select {
 		case <-s.ctx.Done():
-			// Cleanup all tunnels
 			s.Mu.Lock()
 			for slot, t := range s.ActiveSlots {
 				routing.ClearSlotRouting(slot)
 				t.Stop()
 			}
+			for _, t := range s.StandbyNodes {
+				t.Stop()
+			}
 			s.Mu.Unlock()
 			return
 		case <-ticker.C:
-			s.reconcile()
+			s.reconcileActiveSlots()
+			s.maintainStandbyPool()
+		case <-staleTicker.C:
+			s.cleanStaleNodes()
 		}
 	}
 }
 
-func (s *Scheduler) reconcile() {
+func (s *Scheduler) cleanStaleNodes() {
+	// P1-3: Mark nodes unseen for 24 hours as STALE
+	database.DB.Model(&models.Node{}).
+		Where("last_seen < ? AND status != ?", time.Now().Add(-24*time.Hour), models.StatusStale).
+		Update("status", models.StatusStale)
+}
+
+func (s *Scheduler) reconcileActiveSlots() {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 
 	// 1. Check health of active slots
 	for slot, tunnel := range s.ActiveSlots {
 		if s.ManualOverride[slot] {
-			continue // Skip health reconciliation if slot is locked by manual switch
+			continue
 		}
 		if tunnel.State != string(SlotActive) {
 			if tunnel.State == string(SlotDraining) {
-				// Handle draining... wait until connections drop, for now just kill it after 10s
+				// TODO: P2 Connection Tracking check, for now simple timeout
 				log.Printf("[Scheduler] Slot %d is draining, forcing kill.", slot)
 			} else {
 				log.Printf("[Scheduler] Slot %d tunnel %s is dead (State: %s). Removing.", slot, tunnel.Node.IP, tunnel.State)
@@ -93,88 +107,103 @@ func (s *Scheduler) reconcile() {
 		}
 
 		ctxTimeout, cancel := context.WithTimeout(s.ctx, 10*time.Second)
-		res := health.PerformLayeredCheck(ctxTimeout, tunnel.Interface, "", routing.BaseTableID+slot)
+		res := health.VerifyTunnel(ctxTimeout, slot, tunnel.Interface, routing.BaseTableID+slot, tunnel.Node)
 		cancel()
 
-		if res.Error != nil {
-			log.Printf("[Scheduler] Slot %d health check failed: %v. Marking dead.", slot, res.Error)
+		if !res.TunnelHealthy || res.Error != nil {
+			log.Printf("[Scheduler] Slot %d health check failed (Healthy=%v, Err=%v). Marking dead.", slot, res.TunnelHealthy, res.Error)
 			routing.ClearSlotRouting(slot)
 			tunnel.Stop()
 			delete(s.ActiveSlots, slot)
 		}
 	}
 
-	// 2. Fill empty active slots from standby pool
+	// 2. Fill empty active slots from standby pool (P1-2: True Warm Standby)
 	for i := 0; i < s.MaxActive; i++ {
 		if s.ManualOverride[i] {
-			continue // Skip filling if manually overridden (Wait for manual op to finish)
+			continue
 		}
 		
-		tunnel, exists := s.ActiveSlots[i]
-		if !exists || tunnel.State != string(SlotActive) {
+		_, exists := s.ActiveSlots[i]
+		if !exists {
 			if len(s.StandbyNodes) > 0 {
-				log.Printf("[Scheduler] Promoting standby tunnel to slot %d", i)
 				newTunnel := s.StandbyNodes[0]
 				s.StandbyNodes = s.StandbyNodes[1:]
 				
-				// Re-assign slot index
+				log.Printf("[Scheduler] Promoting standby tunnel (%s) to active slot %d", newTunnel.Interface, i)
+				
+				// Re-assign the slot index for routing purposes but DON'T restart OpenVPN
 				newTunnel.SlotIndex = i
-				// Because the tunnel interface might change, for simplicity in Phase 6 we assume
-				// the standby tunnel was started with the correct interface OR we restart it.
-				// Since tunX is tied to slot index, we MUST restart the OpenVPN process for the correct slot.
-				newTunnel.Stop()
 				
-				log.Printf("[Scheduler] Starting new OpenVPN for slot %d with node %s", i, newTunnel.Node.IP)
-				startedTunnel, err := openvpn.StartTunnel(s.ctx, i, newTunnel.Node)
-				if err != nil {
-					log.Printf("[Scheduler] Failed to start tunnel for slot %d: %v", i, err)
-					continue
-				}
+				// Ensure route table for the slot routes via this tunnel's interface
+				routing.SetupSlotRouting(i, newTunnel.Interface)
 				
-				// Wait and apply routing
-				time.Sleep(5 * time.Second)
-				routing.SetupSlotRouting(i, startedTunnel.Interface)
-				s.ActiveSlots[i] = startedTunnel
+				database.DB.Model(newTunnel.Node).Update("status", models.StatusActive)
+				s.ActiveSlots[i] = newTunnel
 			} else {
-				// No standby available, try to spawn directly from DB
-				s.spawnNewActive(i)
+				log.Printf("[Scheduler] Slot %d is empty, but no standby available.", i)
 			}
 		}
 	}
 }
 
-func (s *Scheduler) spawnNewActive(slot int) {
-	// Find a node from DB
-	var node models.Node
-	result := database.DB.Where("status = ?", "DISCOVERED").Order("score DESC").First(&node)
-	if result.Error != nil {
-		log.Printf("[Scheduler] No nodes available in DB to spawn slot %d", slot)
+func (s *Scheduler) maintainStandbyPool() {
+	s.Mu.Lock()
+	standbyCount := len(s.StandbyNodes)
+	s.Mu.Unlock()
+
+	if standbyCount >= s.MaxStandby {
 		return
 	}
 
-	// Reputation check
+	// Calculate a virtual slot index for standby interfaces (e.g. 100, 101...) to avoid collision
+	standbyVirtualSlot := s.MaxActive + standbyCount
+
+	var node models.Node
+	// P1-1: Strict Lifecycle
+	result := database.DB.Where("status = ?", models.StatusDiscovered).Order("score DESC").First(&node)
+	if result.Error != nil {
+		return // No nodes available
+	}
+
+	log.Printf("[Scheduler] Evaluating node %s for standby pool", node.IP)
+
+	// P1-4: Reputation Check
 	res, _ := s.RepEngine.EvaluateIP(s.ctx, node.IP)
 	if res.HardReject {
-		log.Printf("[Scheduler] Node %s rejected by reputation engine. Marking FAILED.", node.IP)
-		database.DB.Model(&node).Update("status", "FAILED")
+		database.DB.Model(&node).Update("status", models.StatusFailed)
 		return
 	}
+	database.DB.Model(&node).Update("status", models.StatusReputationChecked)
 
-	log.Printf("[Scheduler] Spawning new active tunnel for slot %d with node %s", slot, node.IP)
-	tunnel, err := openvpn.StartTunnel(s.ctx, slot, &node)
+	// Connect
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	tunnel, err := openvpn.StartTunnel(ctx, standbyVirtualSlot, &node)
 	if err != nil {
-		log.Printf("[Scheduler] Failed to start tunnel for slot %d: %v", slot, err)
-		database.DB.Model(&node).Update("status", "FAILED")
+		database.DB.Model(&node).Update("status", models.StatusFailed)
 		return
 	}
+
+	time.Sleep(5 * time.Second)
+
+	// To verify the tunnel without polluting main route table, we temporarily assign it to its virtual table
+	routing.SetupSlotRouting(standbyVirtualSlot, tunnel.Interface)
+	hRes := health.VerifyTunnel(ctx, standbyVirtualSlot, tunnel.Interface, routing.BaseTableID+standbyVirtualSlot, &node)
+	routing.ClearSlotRouting(standbyVirtualSlot) // Remove temp routing
+
+	if !hRes.TunnelHealthy || hRes.Error != nil {
+		tunnel.Stop()
+		database.DB.Model(&node).Update("status", models.StatusFailed)
+		return
+	}
+
+	// P1-1: Qualified and Standby
+	database.DB.Model(&node).Update("status", models.StatusStandby)
+	tunnel.State = string(SlotActive) // The process itself is active
 	
-	database.DB.Model(&node).Update("status", "ACTIVE")
-
-	// Wait and apply routing
-	go func() {
-		time.Sleep(5 * time.Second)
-		routing.SetupSlotRouting(slot, tunnel.Interface)
-	}()
-
-	s.ActiveSlots[slot] = tunnel
+	s.Mu.Lock()
+	s.StandbyNodes = append(s.StandbyNodes, tunnel)
+	s.Mu.Unlock()
+	log.Printf("[Scheduler] Successfully added tunnel %s to warm standby pool.", tunnel.Interface)
 }

@@ -87,7 +87,7 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 			Users:       users,
 			Message:     record[13],
 			OpenVPN:     record[14], // Base64 encoded
-			Status:      "DISCOVERED",
+			Status:      models.StatusDiscovered,
 			LastSeen:    now,
 			FirstSeen:   now,
 			FailCount:   0,

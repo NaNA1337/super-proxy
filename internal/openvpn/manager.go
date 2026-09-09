@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
+	"github.com/NaNA1337/super-proxy/internal/routing"
 )
 
 type Tunnel struct {
@@ -68,6 +69,11 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 		args = append(args, "--disable-dco")
 	}
 
+	// Prevent routing recursion (P0-5)
+	if err := routing.AddEndpointBypassRule(node.IP); err != nil {
+		log.Printf("[Slot %d] Warning: failed to add bypass rule for %s", slotIndex, node.IP)
+	}
+
 	/* #nosec G204 */
 	cmd := exec.CommandContext(ctxChild, "openvpn", args...)
 
@@ -104,6 +110,8 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 		}
 		// Clean up temp file
 		os.Remove(tmpFile.Name())
+		// Clean up endpoint routing bypass (P0-5)
+		routing.RemoveEndpointBypassRule(node.IP)
 	}()
 
 	// Wait a bit to ensure it doesn't immediately crash

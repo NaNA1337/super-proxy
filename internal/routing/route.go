@@ -26,6 +26,12 @@ func SetupSlotRouting(slotIndex int, interfaceName string) error {
 		return fmt.Errorf("failed to add default route for %s: %w", interfaceName, err)
 	}
 
+	// 4. IPv6 Leak Protection (P1-13)
+	if err := runCmd("ip", "-6", "rule", "add", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
+		log.Printf("[Slot %d] Note: ip -6 rule add returned: %v", slotIndex, err)
+	}
+	runCmd("ip", "-6", "route", "add", "blackhole", "default", "table", fmt.Sprintf("%d", tableID))
+
 	log.Printf("[Slot %d] Routing setup complete: fwmark %d -> table %d -> dev %s", slotIndex, fwmark, tableID, interfaceName)
 	return nil
 }
@@ -41,6 +47,11 @@ func ClearSlotRouting(slotIndex int) error {
 
 	if err := runCmd("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
 		log.Printf("[Slot %d] Note: ip rule del returned: %v", slotIndex, err)
+	}
+
+	// Clean up IPv6 rule (P1-13)
+	if err := runCmd("ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
+		log.Printf("[Slot %d] Note: ip -6 rule del returned: %v", slotIndex, err)
 	}
 
 	log.Printf("[Slot %d] Routing cleared.", slotIndex)

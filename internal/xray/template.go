@@ -50,7 +50,7 @@ func GenerateConfig(slotCount int, configPath string) error {
 			{
 				"tag":      "proxy",
 				"port":     1080,
-				"listen":   "0.0.0.0",
+				"listen":   "127.0.0.1",
 				"protocol": "socks",
 				"settings": map[string]interface{}{
 					"auth": "noauth",

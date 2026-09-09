@@ -93,14 +93,15 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if already locked by another operation
+	// Check if already locked by another operation AND reserve it atomically (P1-8)
 	sched.Mu.Lock()
-	isLocked := sched.ManualOverride[slot]
-	sched.Mu.Unlock()
-	if isLocked {
-		http.Error(w, "Slot is currently locked by another manual operation", http.StatusLocked)
+	if sched.ManualOverride[slot] {
+		sched.Mu.Unlock()
+		http.Error(w, "409 SLOT_BUSY: Slot is currently locked by another manual operation", http.StatusConflict)
 		return
 	}
+	sched.ManualOverride[slot] = true
+	sched.Mu.Unlock()
 
 	// Create async operation
 	op := createSwitchOperation(slot, req.NodeID)

@@ -4,6 +4,21 @@ import (
 	"time"
 )
 
+const (
+	StatusNew               = "NEW"
+	StatusDiscovered        = "DISCOVERED"
+	StatusReputationChecked = "REPUTATION_CHECKED"
+	StatusHealthy           = "HEALTHY"
+	StatusQualified         = "QUALIFIED"
+	StatusStandby           = "STANDBY"
+	StatusActive            = "ACTIVE"
+	StatusDraining          = "DRAINING"
+	StatusFailed            = "FAILED"
+	StatusCooldown          = "COOLDOWN"
+	StatusDead              = "DEAD"
+	StatusStale             = "STALE"
+)
+
 // Node represents a VPN Gate node
 type Node struct {
 	ID        string    `gorm:"primaryKey" json:"id"`

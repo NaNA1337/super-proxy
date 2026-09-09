@@ -3,25 +3,32 @@ package main
 import (
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/NaNA1337/super-proxy/internal/agentapi"
 	"github.com/NaNA1337/super-proxy/internal/config"
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/discovery"
-	"github.com/NaNA1337/super-proxy/internal/health"
-	"github.com/NaNA1337/super-proxy/internal/openvpn"
-	"github.com/NaNA1337/super-proxy/internal/region"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/routing"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/NaNA1337/super-proxy/internal/xray"
-	"github.com/NaNA1337/super-proxy/internal/agentapi"
 	"gorm.io/gorm/clause"
-	"context"
-	"time"
 )
 
 func main() {
-	log.Println("Starting Xray Egress Manager (Phase 1)")
+	log.Println("Starting Super-Proxy Egress Manager Daemon...")
+
+	// P2: Routing Diagnostics Command
+	if len(os.Args) > 1 && os.Args[1] == "diagnose" {
+		if len(os.Args) > 2 && os.Args[2] == "routing" {
+			routing.Diagnose()
+			return
+		}
+		log.Println("Usage: super-proxy diagnose routing")
+		return
+	}
 
 	// 1. Load Configuration
 	cfgPath := "configs/config.example.yaml"
@@ -41,118 +48,58 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
-	// 3. Discover Nodes
+	// 3. Initialize Reputation Engine
+	repEngine := reputation.NewEngine()
+	// TODO: Configure actual provider if API keys present in cfg
+
+	// 4. Initial Discovery (Bootstrap pool if empty)
 	nodes, err := discovery.FetchAndParseNodes(cfg.Discovery.URL)
 	if err != nil {
-		log.Fatalf("Failed to fetch nodes: %v", err)
-	}
-	log.Printf("Discovered %d nodes from VPN Gate", len(nodes))
-
-	// 4. Region Filter
-	minRequired := 10 // Example requirement
-	filteredNodes := region.FilterNodes(nodes, cfg.Region, minRequired)
-	log.Printf("Filtered down to %d nodes based on region policy (Primary: %s)", len(filteredNodes), cfg.Region.Primary)
-
-	// 5. Save to Database
-	// We use clause.OnConflict to update existing nodes or insert new ones
-	result := database.DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"score", "ping", "speed", "uptime", "sessions", "last_seen"}),
-	}).Create(&filteredNodes)
-
-	if result.Error != nil {
-		log.Fatalf("Failed to save nodes to database: %v", result.Error)
-	}
-
-	log.Printf("Successfully saved/updated %d nodes in SQLite database", result.RowsAffected)
-	log.Println("Phase 1 initialization complete.")
-
-	// PHASE 2 TEST
-	log.Println("--- Starting Phase 2 Test: OpenVPN Lifecycle ---")
-	if len(filteredNodes) > 0 {
-		testNode := &filteredNodes[0]
-		
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		log.Printf("Spawning tunnel for node %s (%s)", testNode.ID, testNode.Country)
-		tunnel, err := openvpn.StartTunnel(ctx, 0, testNode)
-		if err != nil {
-			log.Printf("Failed to start tunnel: %v", err)
-		} else {
-			log.Printf("Tunnel spawned! Interface: %s. Wait 5s for interface to come up...", tunnel.Interface)
-			time.Sleep(5 * time.Second)
-
-			// PHASE 3: Apply Routing
-			log.Printf("Applying policy routing for slot 0...")
-			if err := routing.SetupSlotRouting(0, tunnel.Interface); err != nil {
-				log.Printf("Failed to setup routing (expected if tun0 not ready): %v", err)
-			} else {
-				log.Printf("Routing applied successfully.")
-			}
-
-			// Try a health check (it will likely fail if openvpn didn't fully establish, but tests the logic)
-			log.Printf("Running health check on %s...", tunnel.Interface)
-			ctxTimeout, cancelTimeout := context.WithTimeout(ctx, 10*time.Second)
-			ok, dur, err := health.CheckTunnelConnectivity(ctxTimeout, tunnel.Interface, "http://1.1.1.1")
-			cancelTimeout()
-			
-			if err != nil {
-				log.Printf("Health check failed (expected if VPN not connected): %v", err)
-			} else {
-				log.Printf("Health check result: ok=%v, duration=%v", ok, dur)
-			}
-
-			log.Printf("Stopping tunnel and clearing routing...")
-			routing.ClearSlotRouting(0)
-			tunnel.Stop()
-			time.Sleep(1 * time.Second)
-			log.Printf("Tunnel stopped.")
-		}
+		log.Printf("Warning: Failed initial VPN Gate fetch (will retry later): %v", err)
 	} else {
-		log.Println("No nodes found, skipping OpenVPN/Routing tests.")
+		// Save to Database
+		database.DB.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"country", "country_long", "sessions", "last_seen"}),
+		}).Create(&nodes)
+		log.Printf("Bootstrapped %d nodes into database.", len(nodes))
 	}
-	
-	log.Println("Phase 3 test complete.")
 
-	// PHASE 4: Xray Integration
-	log.Println("--- Starting Phase 4 Test: Xray Integration ---")
+	// 5. Initialize Xray Config (Create dynamic load balancing outbounds)
 	xrayConfigPath := "configs/xray_config.json"
 	log.Printf("Generating Xray static configuration to %s ...", xrayConfigPath)
 	if err := xray.GenerateConfig(3, xrayConfigPath); err != nil {
-		log.Printf("Failed to generate Xray config: %v", err)
-	} else {
-		log.Printf("Successfully generated Xray config with 3 slots and Balancer.")
+		log.Fatalf("Failed to generate Xray config: %v", err)
 	}
-	// PHASE 5: Reputation Engine
-	log.Println("--- Starting Phase 5 Test: Reputation Engine ---")
-	repEngine := reputation.NewEngine()
-	
-	// Test a clean IP
-	cleanIP := "219.100.37.179"
-	res, _ := repEngine.EvaluateIP(context.Background(), cleanIP)
-	log.Printf("Reputation for %s (Prefix %s): HardReject=%v, Penalty=%d, Reason: %s", 
-		cleanIP, reputation.AnalyzePrefix(cleanIP), res.HardReject, res.ScorePenalty, res.ProviderReason)
 
-	// Test a malicious IP (ends in .66 for dummy trigger)
-	malIP := "192.168.1.66"
-	res2, _ := repEngine.EvaluateIP(context.Background(), malIP)
-	log.Printf("Reputation for %s (Prefix %s): HardReject=%v, Penalty=%d, Reason: %s", 
-		malIP, reputation.AnalyzePrefix(malIP), res2.HardReject, res2.ScorePenalty, res2.ProviderReason)
-	// PHASE 6: Scheduler
-	log.Println("--- Starting Phase 6 Test: Scheduler ---")
+	// 6. Initialize Scheduler (which handles OpenVPN and Routing)
+	// We run 3 active exits and 2 standby tunnels for fast failover
 	sched := scheduler.NewScheduler(3, 2, repEngine)
 	sched.Start()
-	
-	log.Println("Scheduler is running in background. Waiting 30 seconds to observe failover loops...")
-	
-	// PHASE 7: Agent API Adapter
-	log.Println("--- Starting Phase 7 Test: Agent API ---")
-	go func() {
-		agentapi.StartServer(60000, sched)
-	}()
+	log.Println("Scheduler Engine started.")
 
-	time.Sleep(30 * time.Second)
+	// 7. Initialize Agent API
+	agentapi.InitAuth()
+	apiServer := agentapi.StartServer(60000, sched)
+	log.Println("Agent API Server listening on port 60000.")
+
+	// 8. Wait for Interrupt for Graceful Shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Interrupt signal received. Initiating graceful shutdown...")
+
+	// 9. Shutdown sequence
+	// Shutdown API first so no new switch commands come in
+	if apiServer != nil {
+		if err := apiServer.Close(); err != nil {
+			log.Printf("API Server shutdown error: %v", err)
+		}
+	}
+	
+	// Stop scheduler and all its managed tunnels and routes
 	sched.Stop()
-	log.Println("Phase 6 and 7 test complete.")
+	
+	log.Println("Super-Proxy Daemon cleanly exited.")
 }

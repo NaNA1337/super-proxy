@@ -10,27 +10,33 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/NaNA1337/super-proxy/internal/models"
 )
 
-// LayeredHealthResult stores the result of the layered health check
-type LayeredHealthResult struct {
-	ProcessAlive bool
-	TunUp        bool
-	RouteReady   bool
-	TCPReady     bool
-	DNSReady     bool
-	ExitIPValid  bool
-	
-	RTT        int     // in ms
-	PacketLoss float64 // percentage
-	
-	Error error
+// VerifyResult defines the strict, unified output format of the health check
+type VerifyResult struct {
+	TunnelHealthy     bool
+	Interface         string
+	ObservedExitIP    string
+	ExpectedExitIP    string
+	ExitIPMatch       bool
+	DNSOK             bool
+	TCPConnectivity   bool
+	HTTPSConnectivity bool
+	Latency           time.Duration
+	PacketLoss        float64
+	Error             error
 }
 
-// PerformLayeredCheck executes the health check chain
-func PerformLayeredCheck(ctx context.Context, interfaceName string, expectedExitIP string, tableID int) *LayeredHealthResult {
-	res := &LayeredHealthResult{}
-	
+// VerifyTunnel is the ONLY official path for validating if a tunnel is ready for ACTIVE state.
+// It executes Process -> tun -> Route -> TCP/HTTPS -> DNS -> Exit IP validation.
+func VerifyTunnel(ctx context.Context, slot int, interfaceName string, tableID int, node *models.Node) *VerifyResult {
+	res := &VerifyResult{
+		Interface:      interfaceName,
+		ExpectedExitIP: node.IP,
+	}
+
 	// 1. Process/Tun check
 	/* #nosec G204 */
 	cmd := exec.CommandContext(ctx, "ip", "link", "show", "dev", interfaceName)
@@ -38,8 +44,6 @@ func PerformLayeredCheck(ctx context.Context, interfaceName string, expectedExit
 		res.Error = fmt.Errorf("tun interface %s is not up: %w", interfaceName, err)
 		return res
 	}
-	res.ProcessAlive = true
-	res.TunUp = true
 
 	// 2. Route Check
 	/* #nosec G204 */
@@ -49,14 +53,14 @@ func PerformLayeredCheck(ctx context.Context, interfaceName string, expectedExit
 		res.Error = fmt.Errorf("routing table %d does not have default route to %s", tableID, interfaceName)
 		return res
 	}
-	res.RouteReady = true
 
-	// 3. Setup Dialer
+	// 3. Setup Dialer to force traffic through the specific TUN interface
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
 		Control: func(network, address string, c syscall.RawConn) error {
 			var controlErr error
 			err := c.Control(func(fd uintptr) {
+				// Requires CAP_NET_RAW / root
 				controlErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, interfaceName)
 			})
 			if err != nil {
@@ -66,7 +70,6 @@ func PerformLayeredCheck(ctx context.Context, interfaceName string, expectedExit
 		},
 	}
 
-	// 4. TCP/HTTPS Check
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext:       dialer.DialContext,
@@ -75,42 +78,38 @@ func PerformLayeredCheck(ctx context.Context, interfaceName string, expectedExit
 		Timeout: 10 * time.Second,
 	}
 
-	// We use ipify to check both HTTPS connectivity and Exit IP at once
+	// 4. DNS + HTTPS + Exit IP Validation via ipify
 	start := time.Now()
 	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.ipify.org?format=json", nil)
 	resp, err := client.Do(req)
 	duration := time.Since(start)
-	
+
 	if err != nil {
-		res.Error = fmt.Errorf("TCP/HTTPS connection failed on %s: %w", interfaceName, err)
+		res.Error = fmt.Errorf("TCP/HTTPS/DNS connection failed on %s: %w", interfaceName, err)
 		return res
 	}
 	defer resp.Body.Close()
-	
-	res.TCPReady = true
-	res.DNSReady = true // implicitly passed if we resolved api.ipify.org
-	res.RTT = int(duration.Milliseconds())
-	
+
+	res.TCPConnectivity = true
+	res.HTTPSConnectivity = true
+	res.DNSOK = true // implicitly passed if api.ipify.org resolved
+	res.Latency = duration
+
 	var ipify struct {
 		IP string `json:"ip"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&ipify); err == nil {
-		if ipify.IP == expectedExitIP {
-			res.ExitIPValid = true
-		} else {
-			res.Error = fmt.Errorf("exit IP mismatch: expected %s, got %s", expectedExitIP, ipify.IP)
-		}
+	if err := json.NewDecoder(resp.Body).Decode(&ipify); err != nil {
+		res.Error = fmt.Errorf("failed to decode ipify response: %w", err)
+		return res
+	}
+
+	res.ObservedExitIP = ipify.IP
+	if res.ObservedExitIP == res.ExpectedExitIP {
+		res.ExitIPMatch = true
+		res.TunnelHealthy = true
+	} else {
+		res.Error = fmt.Errorf("exit IP mismatch: expected %s, got %s", res.ExpectedExitIP, res.ObservedExitIP)
 	}
 
 	return res
-}
-
-// Deprecated: CheckTunnelConnectivity is replaced by PerformLayeredCheck
-func CheckTunnelConnectivity(ctx context.Context, interfaceName string, testURL string) (bool, time.Duration, error) {
-	// Wrapper to not break older code instantly, though we should migrate it
-	res := PerformLayeredCheck(ctx, interfaceName, "", 0)
-	if res.Error != nil && res.Error.Error() != "exit IP mismatch: expected , got " { // ignore exit ip check
-		return false, 0, res.Error
-	}
-	return true, time.Duration(res.RTT) * time.Millisecond, nil
 }

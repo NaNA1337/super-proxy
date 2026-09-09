@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 )
 
@@ -28,11 +27,7 @@ type Engine struct {
 
 func NewEngine() *Engine {
 	return &Engine{
-		providers: []Provider{
-			// We can initialize Dummy/Mock providers here. 
-			// Real ones will require API keys from config.
-			&DummyProvider{},
-		},
+		providers: []Provider{}, // DummyProvider removed for production
 	}
 }
 
@@ -75,7 +70,12 @@ func (e *Engine) EvaluateIP(ctx context.Context, ip string) (*Result, error) {
 
 	wg.Wait()
 
-	if len(errors) == len(e.providers) && len(e.providers) > 0 {
+	if len(e.providers) == 0 {
+		finalResult.ProviderReason = "UNKNOWN (No Providers Configured)"
+		return finalResult, nil
+	}
+
+	if len(errors) == len(e.providers) {
 		return nil, fmt.Errorf("all reputation providers failed: %v", errors)
 	}
 
@@ -97,27 +97,15 @@ func AnalyzePrefix(ipStr string) string {
 	return fmt.Sprintf("%d.%d.%d.0/24", ip[0], ip[1], ip[2])
 }
 
-// DummyProvider is a stub for testing
-type DummyProvider struct{}
+// NullProvider explicitly returns UNKNOWN for testing P1-4
+type NullProvider struct{}
 
-func (d *DummyProvider) Name() string {
-	return "DummyAbuseIPDB"
-}
-
-func (d *DummyProvider) CheckIP(ctx context.Context, ip string) (*Result, error) {
-	// Fake logic: if IP ends with .66, hard reject
-	if strings.HasSuffix(ip, ".66") {
-		return &Result{
-			IP:             ip,
-			HardReject:     true,
-			ScorePenalty:   1000,
-			ProviderReason: "recent high confidence attack detected",
-		}, nil
-	}
+func (n *NullProvider) Name() string { return "NullProvider" }
+func (n *NullProvider) CheckIP(ctx context.Context, ip string) (*Result, error) {
 	return &Result{
 		IP:             ip,
 		HardReject:     false,
 		ScorePenalty:   0,
-		ProviderReason: "clean",
+		ProviderReason: "UNKNOWN",
 	}, nil
 }

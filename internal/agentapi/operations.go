@@ -80,9 +80,7 @@ func executeManualSwitch(op *SwitchOperation) {
 	// 1. PREPARING
 	updateOpStatus(op, OpPreparing, "")
 	
-	// Lock the scheduler for this slot
 	sched.Mu.Lock()
-	sched.ManualOverride[op.Slot] = true
 	
 	// Clean up old tunnel if it exists
 	if oldTunnel, exists := sched.ActiveSlots[op.Slot]; exists {
@@ -126,11 +124,10 @@ func executeManualSwitch(op *SwitchOperation) {
 	}
 
 	// Perform health check
-	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer checkCancel()
-	ok, _, err := health.CheckTunnelConnectivity(checkCtx, tunnel.Interface, "http://1.1.1.1")
-	if !ok || err != nil {
-		updateOpStatus(op, OpFailed, fmt.Sprintf("Health check failed on tun dev %s", tunnel.Interface))
+	res := health.VerifyTunnel(ctx, op.Slot, tunnel.Interface, routing.BaseTableID+op.Slot, &node)
+
+	if !res.TunnelHealthy || res.Error != nil {
+		updateOpStatus(op, OpFailed, fmt.Sprintf("Health check failed on tun dev %s: %v", tunnel.Interface, res.Error))
 		routing.ClearSlotRouting(op.Slot)
 		tunnel.Stop()
 		releaseSlot(op.Slot)

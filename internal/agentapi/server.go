@@ -11,33 +11,35 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// StartServer initializes the API server on the specified port with the provided scheduler instance
-func StartServer(port int, s *scheduler.Scheduler) {
-	SetScheduler(s)
+// StartServer initializes and starts the Agent API Control Plane
+func StartServer(port int, schedulerInstance *scheduler.Scheduler) *http.Server {
+	SetScheduler(schedulerInstance)
 	InitAuth()
 
 	mux := http.NewServeMux()
 
-	// 1. Prometheus Metrics (Anonymous but rate limited)
-	mux.Handle("/metrics", rateLimitMiddleware(promhttp.Handler()))
+	// Define middleware chain: Authentication FIRST, then Rate Limit (P1-10)
+	secureChain := func(h http.Handler) http.Handler {
+		return authMiddleware(rateLimitMiddleware(h))
+	}
 
-	// 2. Read-Only Endpoints (Authenticated)
-	mux.Handle("/api/v1/status", rateLimitMiddleware(authMiddleware(http.HandlerFunc(handleStatus))))
-	mux.Handle("/api/v1/system", rateLimitMiddleware(authMiddleware(http.HandlerFunc(handleSystem))))
-	mux.Handle("/api/v1/current-exits", rateLimitMiddleware(authMiddleware(http.HandlerFunc(handleCurrentExits))))
-	mux.Handle("/api/v1/slots", rateLimitMiddleware(authMiddleware(http.HandlerFunc(handleSlots))))
-	mux.Handle("/api/v1/pool", rateLimitMiddleware(authMiddleware(http.HandlerFunc(handlePool))))
-	mux.Handle("/api/v1/pool/qualified", rateLimitMiddleware(authMiddleware(http.HandlerFunc(handlePoolQualified))))
-	mux.Handle("/api/v1/nodes/", rateLimitMiddleware(authMiddleware(http.HandlerFunc(handleNodeDetails))))
-	mux.Handle("/api/v1/operations/", rateLimitMiddleware(authMiddleware(http.HandlerFunc(handleOperationStatus))))
-
-	// 3. Write-Only Endpoints (Authenticated)
-	mux.Handle("/api/v1/slots/", rateLimitMiddleware(authMiddleware(http.HandlerFunc(handleSlotAction))))
+	mux.Handle("/api/v1/status", secureChain(http.HandlerFunc(handleStatus)))
+	mux.Handle("/api/v1/system", secureChain(http.HandlerFunc(handleSystem)))
+	mux.Handle("/api/v1/current-exits", secureChain(http.HandlerFunc(handleCurrentExits)))
+	mux.Handle("/api/v1/slots", secureChain(http.HandlerFunc(handleSlots)))
+	mux.Handle("/api/v1/pool", secureChain(http.HandlerFunc(handlePool)))
+	mux.Handle("/api/v1/pool/qualified", secureChain(http.HandlerFunc(handlePoolQualified)))
+	mux.Handle("/api/v1/nodes/", secureChain(http.HandlerFunc(handleNodeDetails)))
+	mux.Handle("/api/v1/operations/", secureChain(http.HandlerFunc(handleOperationStatus)))
+	mux.Handle("/api/v1/slots/", secureChain(http.HandlerFunc(handleSlotAction)))
+	
+	// P1-11: Metrics must be authenticated
+	mux.Handle("/metrics", secureChain(promhttp.Handler()))
 
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	
 	// Generate in-memory self-signed TLS cert
-	tlsCert, err := GenerateSelfSignedCert()
+	tlsCert, err := LoadOrGenerateCert("configs/cert.pem", "configs/key.pem")
 	if err != nil {
 		log.Fatalf("[AgentAPI] Failed to generate TLS certificate: %v", err)
 	}
@@ -51,9 +53,12 @@ func StartServer(port int, s *scheduler.Scheduler) {
 		},
 	}
 
-	log.Printf("[AgentAPI] Server listening on https://%s", addr)
+	go func() {
+		log.Printf("[AgentAPI] Server listening securely on %s", addr)
+		if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("[AgentAPI] Failed to start server: %v", err)
+		}
+	}()
 	
-	if err := server.ListenAndServeTLS("", ""); err != nil {
-		log.Fatalf("[AgentAPI] Server failed: %v", err)
-	}
+	return server
 }

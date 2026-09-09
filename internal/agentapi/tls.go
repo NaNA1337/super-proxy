@@ -8,12 +8,22 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log"
 	"math/big"
+	"os"
 	"time"
 )
 
-// GenerateSelfSignedCert generates an in-memory self-signed certificate for TLS
-func GenerateSelfSignedCert() (*tls.Certificate, error) {
+// LoadOrGenerateCert loads the certificate from disk if it exists, otherwise generates and saves a new one.
+func LoadOrGenerateCert(certPath, keyPath string) (*tls.Certificate, error) {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err == nil {
+		log.Printf("[AgentAPI] Loaded persistent TLS certificate from %s", certPath)
+		return &cert, nil
+	}
+
+	log.Printf("[AgentAPI] Generating new self-signed TLS certificate...")
+
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -46,12 +56,19 @@ func GenerateSelfSignedCert() (*tls.Certificate, error) {
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-	
 	b, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
 		return nil, err
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b})
+
+	// Save to disk
+	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+		log.Printf("[AgentAPI] Warning: Failed to save cert.pem: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		log.Printf("[AgentAPI] Warning: Failed to save key.pem: %v", err)
+	}
 
 	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
