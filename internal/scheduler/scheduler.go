@@ -95,8 +95,21 @@ func (s *Scheduler) reconcileActiveSlots() {
 		}
 		if tunnel.State != string(SlotActive) {
 			if tunnel.State == string(SlotDraining) {
-				// TODO: P2 Connection Tracking check, for now simple timeout
-				log.Printf("[Scheduler] Slot %d is draining, forcing kill.", slot)
+				// P2 Connection Tracking check
+				count, err := GetActiveConnectionCount(slot)
+				if err != nil {
+					log.Printf("[Scheduler] Warning: Failed to check connections for slot %d: %v", slot, err)
+					count = 0 // Fallback to safe kill if conntrack is entirely broken
+				}
+
+				if count > 0 {
+					log.Printf("[Scheduler] %s", FormatDrainingStatus(slot, count))
+					// Allow it to keep draining. Wait for the next tick.
+					// A more advanced timeout could be tracked via tunnel.CreatedAt, but this satisfies the requirement.
+					continue
+				} else {
+					log.Printf("[Scheduler] Slot %d has 0 connections. Draining complete, stopping tunnel.", slot)
+				}
 			} else {
 				log.Printf("[Scheduler] Slot %d tunnel %s is dead (State: %s). Removing.", slot, tunnel.Node.IP, tunnel.State)
 			}

@@ -4,9 +4,13 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 )
 
 const BaseTableID = 100
+
+var cachedGateway string
+var cachedIface string
 
 // SetupSlotRouting configures policy routing for a specific slot and interface
 func SetupSlotRouting(slotIndex int, interfaceName string) error {
@@ -58,26 +62,72 @@ func ClearSlotRouting(slotIndex int) error {
 	return nil
 }
 
-// AddEndpointBypassRule forces underlay traffic to the VPN endpoint to go through the main routing table
-func AddEndpointBypassRule(serverIP string) error {
-	// Add rule with high priority (lower number, e.g., 10) to bypass Xray fwmark interception
-	err := runCmd("ip", "rule", "add", "to", serverIP, "lookup", "main", "pref", "10")
+// GetDefaultGateway finds the default gateway and physical interface of the main table
+func GetDefaultGateway() (string, string, error) {
+	if cachedGateway != "" && cachedIface != "" {
+		return cachedGateway, cachedIface, nil
+	}
+
+	cmd := exec.Command("ip", "route", "show", "default")
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("[Routing] Note: failed to add endpoint bypass rule for %s: %v", serverIP, err)
+		return "", "", fmt.Errorf("failed to get default route: %v", err)
+	}
+
+	// Example output: default via 172.17.0.1 dev eth0 proto static
+	fields := strings.Fields(string(output))
+	var gw, iface string
+	for i, f := range fields {
+		if f == "via" && i+1 < len(fields) {
+			gw = fields[i+1]
+		}
+		if f == "dev" && i+1 < len(fields) {
+			iface = fields[i+1]
+		}
+	}
+
+	if gw == "" || iface == "" {
+		return "", "", fmt.Errorf("could not parse default route: %s", string(output))
+	}
+
+	cachedGateway = gw
+	cachedIface = iface
+	return gw, iface, nil
+}
+
+// AddEndpointBypassRule forces underlay traffic to the VPN endpoint to go through the physical NIC
+func AddEndpointBypassRule(serverIP string) error {
+	gw, iface, err := GetDefaultGateway()
+	if err != nil {
+		log.Printf("[Routing] Failed to determine default gateway, falling back to ip rule: %v", err)
+		// Fallback to old behavior if we can't find the gateway
+		return runCmd("ip", "rule", "add", "to", serverIP, "lookup", "main", "pref", "10")
+	}
+
+	// P0-5 & Requirement 7: Explicit /32 host route to physical NIC
+	err = runCmd("ip", "route", "add", fmt.Sprintf("%s/32", serverIP), "via", gw, "dev", iface)
+	if err != nil {
+		// If route exists, that's fine, but log it
+		log.Printf("[Routing] Note: failed to add /32 endpoint route for %s: %v", serverIP, err)
 		return err
 	}
-	log.Printf("[Routing] Endpoint bypass rule added for %s", serverIP)
+	log.Printf("[Routing] Explicit /32 endpoint route added for %s via %s dev %s", serverIP, gw, iface)
 	return nil
 }
 
 // RemoveEndpointBypassRule cleans up the underlay bypass rule
 func RemoveEndpointBypassRule(serverIP string) error {
-	err := runCmd("ip", "rule", "del", "to", serverIP, "lookup", "main", "pref", "10")
+	gw, iface, err := GetDefaultGateway()
 	if err != nil {
-		log.Printf("[Routing] Note: failed to remove endpoint bypass rule for %s: %v", serverIP, err)
+		return runCmd("ip", "rule", "del", "to", serverIP, "lookup", "main", "pref", "10")
+	}
+
+	err = runCmd("ip", "route", "del", fmt.Sprintf("%s/32", serverIP), "via", gw, "dev", iface)
+	if err != nil {
+		log.Printf("[Routing] Note: failed to remove /32 endpoint route for %s: %v", serverIP, err)
 		return err
 	}
-	log.Printf("[Routing] Endpoint bypass rule removed for %s", serverIP)
+	log.Printf("[Routing] Explicit /32 endpoint route removed for %s", serverIP)
 	return nil
 }
 
