@@ -179,6 +179,7 @@ func main() {
 	// 8. Initialize Scheduler (Manages OpenVPN tunnels, FSM, and active slots)
 	sched := scheduler.NewScheduler(3, 2, repEngine, cfg.Region)
 	sched.ScoringEngine = scheduler.NewScoringEngine(cfg.Scoring)
+	sched.SetSpeedTestConfig(cfg.SpeedTest)
 	sched.SetXraySupervisor(xsup)
 	sched.Start()
 	log.Println("Scheduler Engine started.")

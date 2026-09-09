@@ -197,9 +197,15 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 	}
 
 	if sched.XraySupervisor != nil {
-		tag := fmt.Sprintf("exit-%d", op.Slot)
-		if err := sched.XraySupervisor.EnableOutbound(tag, routing.BaseTableID+op.Slot); err != nil {
-			log.Printf("[Operation-%s] Warning: failed to enable Xray outbound %s: %v", op.ID, tag, err)
+		if err := sched.XraySupervisor.ActivateSlot(op.Slot); err != nil {
+			log.Printf("[Operation-%s] ERROR: Failed to activate Xray slot %d: %v. Rolling back manual switch.", op.ID, op.Slot, err)
+			routing.ClearSlotRouting(op.Slot)
+			tunnel.Stop()
+			_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+			updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to activate Xray routing: %v", err))
+			lease.Release()
+			releaseSlot(op.Slot)
+			return
 		}
 	}
 

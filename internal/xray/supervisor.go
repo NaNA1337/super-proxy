@@ -455,13 +455,77 @@ func (s *Supervisor) syncActiveSlotsLocked(activeSlots []int) error {
 		return fmt.Errorf("failed to sync active slots via xray api adrules: %w (output: %s)", err, string(out))
 	}
 
-	log.Printf("[XraySupervisor] Active slots synced to %v (routing rule updated via adrules, NO rmo called)", sorted)
+	// Active-set runtime read-back: verify Xray routing rules actually reflect the requested active slots
+	if err := s.verifyRuntimeRoutingLocked(sorted, -1); err != nil {
+		return fmt.Errorf("runtime read-back verification failed after syncing active slots: %w", err)
+	}
+
+	log.Printf("[XraySupervisor] Active slots synced to %v (routing rule updated via adrules, verified via runtime read-back, NO rmo called)", sorted)
+	return nil
+}
+
+// verifyRuntimeRoutingLocked performs an active-set runtime read-back via Xray API (lsrules and bi)
+// to strictly verify that Xray has committed the routing configuration.
+func (s *Supervisor) verifyRuntimeRoutingLocked(expectedSlots []int, drainingSlot int) error {
+	/* #nosec G204 */
+	cmd := exec.Command(s.xrayBin, "api", "lsrules", "--server="+s.apiAddr)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("runtime read-back query to xray lsrules failed: %w (output: %s)", err, string(out))
+	}
+
+	outStr := string(out)
+
+	// 1. Verify active-balancer-rule is loaded
+	if !strings.Contains(outStr, `"ruleTag": "active-balancer-rule"`) {
+		return fmt.Errorf("runtime read-back mismatch: active-balancer-rule not found in rules: %s", outStr)
+	}
+
+	// 2. If a slot is DRAINING, strictly verify it is NOT targeted as the direct outbound tag
+	if drainingSlot >= 0 {
+		drainingTag := fmt.Sprintf("exit-%d", drainingSlot)
+		if strings.Contains(outStr, fmt.Sprintf(`"tag": "%s"`, drainingTag)) {
+			return fmt.Errorf("CRITICAL VIOLATION: draining slot %s still present as target in active routing rules: %s", drainingTag, outStr)
+		}
+	}
+
+	// 3. Verify the expected target balancer or outbound is present
+	if len(expectedSlots) == 1 {
+		expectedTag := fmt.Sprintf("exit-%d", expectedSlots[0])
+		if !strings.Contains(outStr, fmt.Sprintf(`"tag": "%s"`, expectedTag)) {
+			return fmt.Errorf("runtime read-back mismatch: expected single outbound %s not in rules: %s", expectedTag, outStr)
+		}
+	} else if len(expectedSlots) > 1 {
+		tagParts := make([]string, len(expectedSlots))
+		for idx, sl := range expectedSlots {
+			tagParts[idx] = fmt.Sprintf("%d", sl)
+		}
+		expectedBalancer := "balancer-" + strings.Join(tagParts, "-")
+
+		/* #nosec G204 */
+		cmdBi := exec.Command(s.xrayBin, "api", "bi", "--server="+s.apiAddr, expectedBalancer)
+		outBi, errBi := cmdBi.CombinedOutput()
+		if errBi != nil || !strings.Contains(string(outBi), "Selects:") {
+			return fmt.Errorf("runtime read-back mismatch: balancer %s not active via bi: %v (output: %s)", expectedBalancer, errBi, string(outBi))
+		}
+
+		// Also verify draining slot is not in the balancer's selector pool
+		if drainingSlot >= 0 {
+			drainingTag := fmt.Sprintf("exit-%d", drainingSlot)
+			if strings.Contains(string(outBi), drainingTag) {
+				return fmt.Errorf("CRITICAL VIOLATION: draining slot %s found in active balancer %s: %s", drainingTag, expectedBalancer, string(outBi))
+			}
+		}
+	}
+
+	log.Printf("[XraySupervisor] Runtime read-back VERIFIED: active slots=%v, draining slot %d excluded", expectedSlots, drainingSlot)
 	return nil
 }
 
 // DrainingSlot transitions a slot to DRAINING without removing its outbound handler.
 // It removes the slot from active routing via Xray API adrules so new connections
 // will never route to this slot, while existing TCP streams remain alive on their socket.
+// It performs a runtime read-back to strictly guarantee the draining slot is excluded.
 func (s *Supervisor) DrainingSlot(slot int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -481,7 +545,19 @@ func (s *Supervisor) DrainingSlot(slot int) error {
 		}
 	}
 
-	return s.syncActiveSlotsLocked(surviving)
+	if err := s.syncActiveSlotsLocked(surviving); err != nil {
+		s.activeOutbounds[tag] = true // rollback
+		return fmt.Errorf("failed to sync active slots during drain of slot %d: %w", slot, err)
+	}
+
+	// Strict runtime read-back verification for the draining slot
+	if err := s.verifyRuntimeRoutingLocked(surviving, slot); err != nil {
+		s.activeOutbounds[tag] = true // rollback
+		return fmt.Errorf("draining runtime read-back verification failed for slot %d: %w", slot, err)
+	}
+
+	log.Printf("[XraySupervisor] Slot %d successfully DRAINING (verified via active-set runtime read-back)", slot)
+	return nil
 }
 
 // ActivateSlot promotes a slot to ACTIVE status and updates Xray routing rules.
@@ -500,7 +576,11 @@ func (s *Supervisor) ActivateSlot(slot int) error {
 		}
 	}
 
-	return s.syncActiveSlotsLocked(active)
+	if err := s.syncActiveSlotsLocked(active); err != nil {
+		s.activeOutbounds[tag] = false // rollback
+		return fmt.Errorf("failed to activate slot %d in Xray routing: %w", slot, err)
+	}
+	return nil
 }
 
 // GetActiveSlots returns the list of slot indices currently active in Xray.
@@ -508,14 +588,56 @@ func (s *Supervisor) GetActiveSlots() []int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	active := []int{}
-	for i := 0; i < s.slotCount; i++ {
-		tag := fmt.Sprintf("exit-%d", i)
-		if s.activeOutbounds[tag] {
-			active = append(active, i)
+	var active []int
+	for tag, isAct := range s.activeOutbounds {
+		if isAct {
+			var slot int
+			if _, err := fmt.Sscanf(tag, "exit-%d", &slot); err == nil {
+				active = append(active, slot)
+			}
 		}
 	}
+	sort.Ints(active)
 	return active
+}
+
+// GetOutboundStats queries Xray's StatsService for uplink and downlink bytes of a specific outbound tag.
+func (s *Supervisor) GetOutboundStats(tag string) (int64, int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.state != StateRunning {
+		return 0, 0, errors.New("xray supervisor is not running")
+	}
+
+	queryStat := func(metric string) (int64, error) {
+		name := fmt.Sprintf("outbound>>>%s>>>traffic>>>%s", tag, metric)
+		/* #nosec G204 */
+		cmd := exec.Command(s.xrayBin, "api", "stats", "--server="+s.apiAddr, "-name", name)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return 0, fmt.Errorf("failed to query %s: %w (output: %s)", name, err, string(out))
+		}
+		var resp struct {
+			Stat struct {
+				Name  string `json:"name"`
+				Value int64  `json:"value"`
+			} `json:"stat"`
+		}
+		if err := json.Unmarshal(out, &resp); err == nil {
+			return resp.Stat.Value, nil
+		}
+		return 0, nil
+	}
+
+	uplink, errUp := queryStat("uplink")
+	if errUp != nil {
+		return 0, 0, errUp
+	}
+	downlink, errDown := queryStat("downlink")
+	if errDown != nil {
+		return 0, 0, errDown
+	}
+	return uplink, downlink, nil
 }
 
 // DisableOutbound gracefully drains an outbound without calling rmo,

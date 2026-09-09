@@ -146,6 +146,15 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 				"StatsService",
 			},
 		},
+		"stats": map[string]interface{}{},
+		"policy": map[string]interface{}{
+			"system": map[string]interface{}{
+				"statsInboundUplink":    true,
+				"statsInboundDownlink":  true,
+				"statsOutboundUplink":   true,
+				"statsOutboundDownlink": true,
+			},
+		},
 		"inbounds": []map[string]interface{}{
 			{
 				"tag":      "api",

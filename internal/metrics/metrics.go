@@ -66,6 +66,10 @@ var (
 		Name: "xray_restarts",
 		Help: "Total number of Xray process restarts by supervisor",
 	})
+	XrayErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "xray_errors",
+		Help: "Total number of Xray API or routing synchronization errors",
+	})
 	XrayUptime = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "xray_uptime",
 		Help: "Uptime seconds of currently running Xray process",

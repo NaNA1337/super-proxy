@@ -182,11 +182,15 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 // cleanup removes temporary files and endpoint bypass rules. Safe to call multiple times.
 func (t *Tunnel) cleanup() {
 	t.cleanupOnce.Do(func() {
-		os.Remove(t.tmpConfigPath)
-		if err := routing.RemoveEndpointBypassRule(t.Node.IP); err != nil {
-			log.Printf("[Slot %d] Warning: failed to remove endpoint bypass rule for %s: %v", t.SlotIndex, t.Node.IP, err)
+		if t.tmpConfigPath != "" {
+			_ = os.Remove(t.tmpConfigPath)
 		}
-		log.Printf("[Slot %d] Cleanup completed for tunnel to %s", t.SlotIndex, t.Node.IP)
+		if t.Node != nil && t.Node.IP != "" {
+			if err := routing.RemoveEndpointBypassRule(t.Node.IP); err != nil {
+				log.Printf("[Slot %d] Warning: failed to remove endpoint bypass rule for %s: %v", t.SlotIndex, t.Node.IP, err)
+			}
+			log.Printf("[Slot %d] Cleanup completed for tunnel to %s", t.SlotIndex, t.Node.IP)
+		}
 	})
 }
 
@@ -197,19 +201,21 @@ func (t *Tunnel) Stop() {
 		t.Cancel()
 	}
 
-	select {
-	case <-t.doneChan:
-		// Process exited cleanly via context cancellation
-	case <-time.After(5 * time.Second):
-		log.Printf("[Slot %d] Warning: OpenVPN process did not exit within 5s after cancel, force killing (SIGKILL)", t.SlotIndex)
-		if t.Cmd != nil && t.Cmd.Process != nil {
-			_ = t.Cmd.Process.Kill()
-		}
+	if t.doneChan != nil {
 		select {
 		case <-t.doneChan:
-			log.Printf("[Slot %d] OpenVPN process exited after SIGKILL", t.SlotIndex)
+			// Process exited cleanly via context cancellation
 		case <-time.After(5 * time.Second):
-			log.Printf("[Slot %d] Error: OpenVPN process could not be reaped after SIGKILL", t.SlotIndex)
+			log.Printf("[Slot %d] Warning: OpenVPN process did not exit within 5s after cancel, force killing (SIGKILL)", t.SlotIndex)
+			if t.Cmd != nil && t.Cmd.Process != nil {
+				_ = t.Cmd.Process.Kill()
+			}
+			select {
+			case <-t.doneChan:
+				log.Printf("[Slot %d] OpenVPN process exited after SIGKILL", t.SlotIndex)
+			case <-time.After(5 * time.Second):
+				log.Printf("[Slot %d] Error: OpenVPN process could not be reaped after SIGKILL", t.SlotIndex)
+			}
 		}
 	}
 

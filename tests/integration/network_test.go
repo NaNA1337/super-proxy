@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -158,57 +157,8 @@ func TestLinuxNetwork_FullIntegrationHarness(t *testing.T) {
 }
 
 func TestLinuxNetwork_100NewConnectionsAvoidDrainingSlot(t *testing.T) {
-	// Tests that when slot 0 is DRAINING and slots 1, 2 are ACTIVE:
-	// 100 simulated connection routing decisions strictly avoid slot 0.
-	activeSlots := map[int]bool{
-		1: true,
-		2: true,
-	}
-	drainingSlots := map[int]bool{
-		0: true,
-	}
-
-	var mu sync.Mutex
-	slotCounts := make(map[int]int)
-
-	const totalConnections = 100
-	var wg sync.WaitGroup
-
-	for i := 0; i < totalConnections; i++ {
-		wg.Add(1)
-		go func(connID int) {
-			defer wg.Done()
-
-			// Round-robin or balancer among ACTIVE slots only (mimics Xray balancer active-set)
-			selectedSlot := -1
-			mu.Lock()
-			// Balance across slots 1 and 2
-			if connID%2 == 0 {
-				selectedSlot = 1
-			} else {
-				selectedSlot = 2
-			}
-			slotCounts[selectedSlot]++
-			mu.Unlock()
-
-			if drainingSlots[selectedSlot] {
-				t.Errorf("CRITICAL VIOLATION: new connection %d entered DRAINING slot %d", connID, selectedSlot)
-			}
-			if !activeSlots[selectedSlot] {
-				t.Errorf("New connection %d selected non-active slot %d", connID, selectedSlot)
-			}
-		}(i)
-	}
-
-	wg.Wait()
-
-	if slotCounts[0] != 0 {
-		t.Fatalf("Expected 0 connections on draining slot 0, got %d", slotCounts[0])
-	}
-	if slotCounts[1]+slotCounts[2] != totalConnections {
-		t.Fatalf("Expected all %d connections distributed across slots 1 and 2, got %d",
-			totalConnections, slotCounts[1]+slotCounts[2])
-	}
+	// Real Linux packet-path and Xray active-set test (no mock / simulated loop)
+	TestXray_PacketPath_ExistingConnectionPreservedAnd100NewAvoidDraining(t)
 }
 
 func TestRouting_EndpointRefcount_Unit(t *testing.T) {

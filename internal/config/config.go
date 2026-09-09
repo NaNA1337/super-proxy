@@ -86,6 +86,11 @@ func LoadConfig(path string) (*Config, error) {
 	viper.SetDefault("scoring.failure_penalty", 30)
 	viper.SetDefault("scoring.speed_weight", 1.0)
 	viper.SetDefault("scoring.latency_weight", 0.5)
+	viper.SetDefault("speed_test.enabled", true)
+	viper.SetDefault("speed_test.rtt_target_url", "https://1.1.1.1")
+	viper.SetDefault("speed_test.download_url", "https://speed.cloudflare.com/__down?bytes=5000000")
+	viper.SetDefault("speed_test.upload_url", "https://speed.cloudflare.com/__up")
+	viper.SetDefault("speed_test.timeout_sec", 15)
 
 	viper.SetEnvPrefix("XRAY_MANAGER")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))

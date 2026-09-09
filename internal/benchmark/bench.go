@@ -67,18 +67,49 @@ func BenchmarkInterfaceWithConfig(ctx context.Context, interfaceName string, cfg
 		Timeout: cfg.Timeout,
 	}
 
-	// 1. RTT Test (Probing low-overhead endpoint)
-	rttStart := time.Now()
-	reqRTT, err := http.NewRequestWithContext(ctx, "GET", cfg.RTTTargetURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create RTT request: %w", err)
+	// 1. RTT & Packet Loss Test (Probing endpoint across sequential probes)
+	probeCount := 5
+	successCount := 0
+	var totalRTT int64
+	var lastErr error
+
+	probeTimeout := cfg.Timeout / time.Duration(probeCount)
+	if probeTimeout > 2*time.Second {
+		probeTimeout = 2 * time.Second
+	} else if probeTimeout < 500*time.Millisecond {
+		probeTimeout = 500 * time.Millisecond
 	}
-	respRTT, err := client.Do(reqRTT)
-	if err != nil {
-		return nil, fmt.Errorf("RTT probe failed on %s: %w", interfaceName, err)
+
+	for i := 0; i < probeCount; i++ {
+		probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+		pStart := time.Now()
+		reqRTT, err := http.NewRequestWithContext(probeCtx, "GET", cfg.RTTTargetURL, nil)
+		if err == nil {
+			respRTT, errDo := client.Do(reqRTT)
+			if errDo == nil {
+				if respRTT.StatusCode >= 200 && respRTT.StatusCode < 400 {
+					_ = respRTT.Body.Close()
+					successCount++
+					totalRTT += time.Since(pStart).Milliseconds()
+				} else {
+					_ = respRTT.Body.Close()
+					lastErr = fmt.Errorf("HTTP status %d", respRTT.StatusCode)
+				}
+			} else {
+				lastErr = errDo
+			}
+		} else {
+			lastErr = err
+		}
+		probeCancel()
 	}
-	_ = respRTT.Body.Close()
-	rtt := int(time.Since(rttStart).Milliseconds())
+
+	if successCount == 0 {
+		return nil, fmt.Errorf("all %d RTT probes failed on %s: %w", probeCount, interfaceName, lastErr)
+	}
+
+	rtt := int(totalRTT / int64(successCount))
+	packetLossPct := (float64(probeCount-successCount) / float64(probeCount)) * 100.0
 
 	// 2. Download Throughput Test
 	dlStart := time.Now()
@@ -128,8 +159,8 @@ func BenchmarkInterfaceWithConfig(ctx context.Context, interfaceName string, cfg
 	}
 
 	totalDuration := time.Since(totalStart).Milliseconds()
-	log.Printf("[Benchmark] %s results: RTT=%dms, Download=%d bps, Upload=%d bps (%s), Duration=%dms",
-		interfaceName, rtt, downloadBps, uploadBps, uploadStatus, totalDuration)
+	log.Printf("[Benchmark] %s results: RTT=%dms, Loss=%.1f%%, Download=%d bps, Upload=%d bps (%s), Duration=%dms",
+		interfaceName, rtt, packetLossPct, downloadBps, uploadBps, uploadStatus, totalDuration)
 
 	return &models.PerformanceMetrics{
 		RTT:           rtt,
@@ -137,7 +168,7 @@ func BenchmarkInterfaceWithConfig(ctx context.Context, interfaceName string, cfg
 		DownloadSpeed: downloadBps,
 		UploadSpeed:   uploadBps,
 		UploadStatus:  uploadStatus,
-		PacketLoss:    0.0,
+		PacketLoss:    packetLossPct,
 		DurationMs:    totalDuration,
 		LastChecked:   time.Now(),
 	}, nil

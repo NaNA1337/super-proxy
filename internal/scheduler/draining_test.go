@@ -178,6 +178,9 @@ func TestDraining_XrayActiveSetCoordination(t *testing.T) {
 		State: "ACTIVE",
 	}
 	sched.ActiveSlots[0] = mockTunnel
+	if err := xsup.ActivateSlot(0); err != nil {
+		t.Fatalf("failed to activate slot 0 in xray: %v", err)
+	}
 
 	// Initially exit-0 is active in Xray
 	if !xsup.IsOutboundActive("exit-0") {

@@ -11,6 +11,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/config"
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/health"
+	"github.com/NaNA1337/super-proxy/internal/metrics"
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
@@ -232,6 +233,17 @@ func (s *Scheduler) reconcileActiveSlots() {
 					continue
 				}
 
+				// Atomic Xray activation: if Xray activation fails, roll back routing and do NOT commit slot!
+				if s.XraySupervisor != nil {
+					if err := s.XraySupervisor.ActivateSlot(i); err != nil {
+						log.Printf("[Scheduler] ERROR: Failed to activate Xray slot %d: %v. Rolling back promotion.", i, err)
+						metrics.XrayErrors.Inc()
+						_ = routing.ClearSlotRouting(i)
+						newTunnel.Stop()
+						continue
+					}
+				}
+
 				_ = TransitionNode(database.DB, newTunnel.Node, models.StatusActive)
 				s.ActiveSlots[i] = newTunnel
 
@@ -242,13 +254,6 @@ func (s *Scheduler) reconcileActiveSlots() {
 					sc.State = SlotActive
 					sc.OutboundActive = true
 					sc.Mu.Unlock()
-				}
-
-				// Dynamically add to Xray active-set so new connections can enter this slot
-				if s.XraySupervisor != nil {
-					if err := s.XraySupervisor.ActivateSlot(i); err != nil {
-						log.Printf("[Scheduler] Warning: failed to activate Xray slot %d: %v", i, err)
-					}
 				}
 			} else {
 				log.Printf("[Scheduler] Slot %d is empty, but no standby available.", i)
@@ -273,7 +278,10 @@ func (s *Scheduler) reconcileActiveSlots() {
 				}
 			}
 		}
-		_ = s.XraySupervisor.SyncActiveSlots(activeSlots)
+		if err := s.XraySupervisor.SyncActiveSlots(activeSlots); err != nil {
+			log.Printf("[Scheduler] ERROR: Failed to sync Xray active slots to %v: %v", activeSlots, err)
+			metrics.XrayErrors.Inc()
+		}
 	}
 }
 
@@ -296,7 +304,8 @@ func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel)
 	// (adrules routes new connections exclusively to surviving active slots)
 	if s.XraySupervisor != nil {
 		if err := s.XraySupervisor.DrainingSlot(slot); err != nil {
-			log.Printf("[Scheduler] Warning: failed to drain Xray slot %d: %v", slot, err)
+			log.Printf("[Scheduler] ERROR: Failed to drain Xray slot %d: %v", slot, err)
+			metrics.XrayErrors.Inc()
 		}
 	}
 
@@ -422,23 +431,42 @@ func (s *Scheduler) maintainStandbyPool() {
 	_, prefixPenalty, prefixReason := reputation.EvaluatePrefixRisk(database.DB, node.IP, badLimit)
 
 	// Reputation Check
-	res, _ := s.RepEngine.EvaluateIP(s.ctx, node.IP)
-	isConservativeUnknown := s.RepEngine != nil && s.RepEngine.FailurePolicy() == "conservative" && res != nil && res.Status == reputation.StatusUnknown
-	if res.HardReject || isConservativeUnknown {
-		_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, true, true)
-		log.Printf("[Scheduler] Candidate %s REJECTED by reputation policy (Status=%s, HardReject=%v): %s",
-			node.IP, res.Status, res.HardReject, res.ProviderReason)
-		_ = TransitionNode(database.DB, &node, models.StatusFailed)
-		return
+	if s.RepEngine != nil {
+		res, repErr := s.RepEngine.EvaluateIP(s.ctx, node.IP)
+		if repErr != nil {
+			log.Printf("[Scheduler] Reputation check returned error for %s: %v", node.IP, repErr)
+			if s.RepEngine.FailurePolicy() == "conservative" {
+				log.Printf("[Scheduler] Candidate %s REJECTED: reputation query error (%v) under conservative fail-closed policy", node.IP, repErr)
+				_ = TransitionNode(database.DB, &node, models.StatusFailed)
+				return
+			}
+		}
+
+		isConservativeUnknown := s.RepEngine.FailurePolicy() == "conservative" && (res == nil || res.Status == reputation.StatusUnknown)
+		if (res != nil && res.HardReject) || isConservativeUnknown {
+			_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, true, true)
+			statusStr := "UNKNOWN"
+			hardReject := false
+			reason := ""
+			if res != nil {
+				statusStr = string(res.Status)
+				hardReject = res.HardReject
+				reason = res.ProviderReason
+			}
+			log.Printf("[Scheduler] Candidate %s REJECTED by reputation policy (Status=%s, HardReject=%v): %s",
+				node.IP, statusStr, hardReject, reason)
+			_ = TransitionNode(database.DB, &node, models.StatusFailed)
+			return
+		}
+
+		if res != nil {
+			_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, res.ScorePenalty > 0, false)
+			node.Reputation.FraudScore = res.ScorePenalty
+			node.Reputation.Status = string(res.Status)
+			node.Reputation.ProviderName = res.ProviderReason
+			node.NetClass = res.NetworkInfo
+		}
 	}
-
-	_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, res.ScorePenalty > 0, false)
-
-	// Update node reputation and network intelligence
-	node.Reputation.FraudScore = res.ScorePenalty
-	node.Reputation.Status = string(res.Status)
-	node.Reputation.ProviderName = res.ProviderReason
-	node.NetClass = res.NetworkInfo
 
 	// Evaluate candidate using unified ScoringEngine
 	if s.ScoringEngine != nil {

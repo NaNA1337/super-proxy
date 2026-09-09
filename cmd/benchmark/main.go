@@ -123,14 +123,25 @@ func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) Ben
 	}
 	mss := mtu - 40 // Standard IPv4 TCP MSS
 
-	// Measure RTT probe
-	rttStart := time.Now()
-	resp, err := http.Get("https://1.1.1.1")
-	rttMs := int64(0)
-	if err == nil {
-		_ = resp.Body.Close()
-		rttMs = time.Since(rttStart).Milliseconds()
+	// Measure RTT & packet loss probes
+	const probeCount = 5
+	successCount := 0
+	var totalRTT int64
+	probeClient := &http.Client{Timeout: 2 * time.Second}
+	for i := 0; i < probeCount; i++ {
+		pStart := time.Now()
+		resp, err := probeClient.Get("https://1.1.1.1")
+		if err == nil {
+			_ = resp.Body.Close()
+			successCount++
+			totalRTT += time.Since(pStart).Milliseconds()
+		}
 	}
+	rttMs := int64(0)
+	if successCount > 0 {
+		rttMs = totalRTT / int64(successCount)
+	}
+	packetLossPct := (float64(probeCount-successCount) / float64(probeCount)) * 100.0
 
 	ctx, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
@@ -223,7 +234,7 @@ func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) Ben
 		ThroughputBps:      bps,
 		ThroughputMbps:     mbps,
 		RTTMs:              rttMs,
-		PacketLossPct:      0.0,
+		PacketLossPct:      packetLossPct,
 		CPUUsagePct:        cpuUsage,
 		PPS:                pps,
 		MTU:                mtu,

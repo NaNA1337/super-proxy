@@ -179,3 +179,71 @@ func TestHighScoreFallbackCannotBypassPrimary(t *testing.T) {
 		t.Errorf("fallback should be disabled when primary count (1) >= required (1)")
 	}
 }
+
+func TestPrimaryQualifiedCapacitySatisfied(t *testing.T) {
+	setupTestDB(t)
+
+	// 3 Active JP nodes
+	for i := 1; i <= 3; i++ {
+		database.DB.Create(&models.Node{
+			ID:       string(rune('1' + i)),
+			IP:       "192.0.2." + string(rune('0'+i)),
+			Country:  "JP",
+			Score:    100,
+			Status:   models.StatusActive,
+			LastSeen: time.Now(),
+		})
+	}
+	// 2 Standby JP nodes
+	for i := 4; i <= 5; i++ {
+		database.DB.Create(&models.Node{
+			ID:       string(rune('1' + i)),
+			IP:       "192.0.2." + string(rune('0'+i)),
+			Country:  "JP",
+			Score:    100,
+			Status:   models.StatusStandby,
+			LastSeen: time.Now(),
+		})
+	}
+	// 1 Qualified JP candidate node
+	database.DB.Create(&models.Node{
+		ID:       "JP-QUALIFIED",
+		IP:       "192.0.2.200",
+		Country:  "JP",
+		Score:    50,
+		Status:   models.StatusQualified,
+		LastSeen: time.Now(),
+	})
+
+	// Fallback US node with high score
+	database.DB.Create(&models.Node{
+		ID:       "US-HUGE",
+		IP:       "198.51.100.99",
+		Country:  "US",
+		Score:    999999,
+		Status:   models.StatusDiscovered,
+		LastSeen: time.Now(),
+	})
+
+	cfg := config.RegionConfig{
+		Primary:  "JP",
+		Fallback: []string{"US"},
+	}
+	sched := NewScheduler(3, 2, reputation.NewEngine(), cfg) // required = 5
+
+	res, err := sched.SelectNextCandidate()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Total primary qualified capacity is 3(ACTIVE) + 2(STANDBY) + 1(QUALIFIED) = 6 >= 5(required)
+	if res.QualifiedCapacity < 5 {
+		t.Errorf("expected QualifiedCapacity >= 5, got %d", res.QualifiedCapacity)
+	}
+	if res.FallbackEnabled {
+		t.Errorf("expected Fallback to be DISABLED when Primary qualified capacity meets required")
+	}
+	if res.Node.ID != "JP-QUALIFIED" {
+		t.Errorf("expected JP-QUALIFIED node to be selected, got %s (country: %s)", res.Node.ID, res.Node.Country)
+	}
+}
