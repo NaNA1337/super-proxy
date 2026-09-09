@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -71,6 +70,43 @@ func (s *Scheduler) SetXraySupervisor(xsup *xray.Supervisor) {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	s.XraySupervisor = xsup
+}
+
+// SetSpeedTestConfig configures the scheduler's benchmarker with custom SpeedTestConfig endpoints and timeouts.
+func (s *Scheduler) SetSpeedTestConfig(cfg config.SpeedTestConfig) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+
+	if !cfg.Enabled {
+		log.Println("[Scheduler] SpeedTest disabled in config; using lightweight RTT probe")
+		s.Benchmarker = func(ctx context.Context, dev string) (*models.PerformanceMetrics, error) {
+			return benchmark.BenchmarkInterfaceWithConfig(ctx, dev, benchmark.BenchmarkConfig{
+				RTTTargetURL: cfg.RTTTargetURL,
+				Timeout:      time.Duration(cfg.TimeoutSec) * time.Second,
+			})
+		}
+		return
+	}
+
+	benchCfg := benchmark.DefaultBenchmarkConfig()
+	if cfg.RTTTargetURL != "" {
+		benchCfg.RTTTargetURL = cfg.RTTTargetURL
+	}
+	if cfg.DownloadURL != "" {
+		benchCfg.DownloadURL = cfg.DownloadURL
+	}
+	if cfg.UploadURL != "" {
+		benchCfg.UploadURL = cfg.UploadURL
+	}
+	if cfg.TimeoutSec > 0 {
+		benchCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
+	}
+
+	s.Benchmarker = func(ctx context.Context, dev string) (*models.PerformanceMetrics, error) {
+		return benchmark.BenchmarkInterfaceWithConfig(ctx, dev, benchCfg)
+	}
+	log.Printf("[Scheduler] SpeedTestConfig integrated: RTT=%s, DL=%s, UL=%s, Timeout=%v",
+		benchCfg.RTTTargetURL, benchCfg.DownloadURL, benchCfg.UploadURL, benchCfg.Timeout)
 }
 
 func (s *Scheduler) Start() {
@@ -210,15 +246,34 @@ func (s *Scheduler) reconcileActiveSlots() {
 
 				// Dynamically add to Xray active-set so new connections can enter this slot
 				if s.XraySupervisor != nil {
-					tag := fmt.Sprintf("exit-%d", i)
-					if err := s.XraySupervisor.EnableOutbound(tag, routing.BaseTableID+i); err != nil {
-						log.Printf("[Scheduler] Warning: failed to enable Xray outbound %s: %v", tag, err)
+					if err := s.XraySupervisor.ActivateSlot(i); err != nil {
+						log.Printf("[Scheduler] Warning: failed to activate Xray slot %d: %v", i, err)
 					}
 				}
 			} else {
 				log.Printf("[Scheduler] Slot %d is empty, but no standby available.", i)
 			}
 		}
+	}
+
+	// Synchronize Xray active slots to match currently active live slots
+	if s.XraySupervisor != nil {
+		activeSlots := []int{}
+		for i := 0; i < s.MaxActive; i++ {
+			if t, ok := s.ActiveSlots[i]; ok && t != nil {
+				t.Mu.Lock()
+				st := t.State
+				t.Mu.Unlock()
+				if st == string(SlotActive) {
+					select {
+					case <-t.Done():
+					default:
+						activeSlots = append(activeSlots, i)
+					}
+				}
+			}
+		}
+		_ = s.XraySupervisor.SyncActiveSlots(activeSlots)
 	}
 }
 
@@ -237,11 +292,11 @@ func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel)
 	tunnel.DrainingStartedAt = time.Now()
 	tunnel.Mu.Unlock()
 
-	// 1. Immediately remove outbound from Xray active-set so NO NEW connections enter draining slot
+	// 1. Immediately transition slot to DRAINING without removing outbound handler (no rmo)
+	// (adrules routes new connections exclusively to surviving active slots)
 	if s.XraySupervisor != nil {
-		tag := fmt.Sprintf("exit-%d", slot)
-		if err := s.XraySupervisor.DisableOutbound(tag); err != nil {
-			log.Printf("[Scheduler] Warning: failed to disable Xray outbound %s: %v", tag, err)
+		if err := s.XraySupervisor.DrainingSlot(slot); err != nil {
+			log.Printf("[Scheduler] Warning: failed to drain Xray slot %d: %v", slot, err)
 		}
 	}
 
@@ -368,9 +423,11 @@ func (s *Scheduler) maintainStandbyPool() {
 
 	// Reputation Check
 	res, _ := s.RepEngine.EvaluateIP(s.ctx, node.IP)
-	if res.HardReject {
+	isConservativeUnknown := s.RepEngine != nil && s.RepEngine.FailurePolicy() == "conservative" && res != nil && res.Status == reputation.StatusUnknown
+	if res.HardReject || isConservativeUnknown {
 		_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, true, true)
-		log.Printf("[Scheduler] Candidate %s REJECTED by reputation hard-reject: %s", node.IP, res.ProviderReason)
+		log.Printf("[Scheduler] Candidate %s REJECTED by reputation policy (Status=%s, HardReject=%v): %s",
+			node.IP, res.Status, res.HardReject, res.ProviderReason)
 		_ = TransitionNode(database.DB, &node, models.StatusFailed)
 		return
 	}

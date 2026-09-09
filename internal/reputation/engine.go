@@ -48,6 +48,13 @@ func (e *Engine) AddProvider(p Provider) {
 	e.providers = append(e.providers, p)
 }
 
+// FailurePolicy returns the configured reputation failure policy ("conservative" or "lenient").
+func (e *Engine) FailurePolicy() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.failurePolicy
+}
+
 // GetCache returns the internal TTL cache.
 func (e *Engine) GetCache() *Cache {
 	return e.cache
@@ -164,7 +171,7 @@ func (e *Engine) EvaluateIP(ctx context.Context, ip string) (*Result, error) {
 	}
 
 	// If any provider returned unknown and failure policy is conservative, mark UNKNOWN unless hard rejected
-	if unknownCount > 0 && !finalResult.HardReject && e.failurePolicy == "conservative" && successCount == 0 {
+	if unknownCount > 0 && !finalResult.HardReject && e.failurePolicy == "conservative" {
 		finalResult.Status = StatusUnknown
 	}
 

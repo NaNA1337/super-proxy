@@ -67,25 +67,36 @@ func TestSupervisorLifecycleAndActiveSet(t *testing.T) {
 		t.Errorf("expected state RUNNING, got %s", state)
 	}
 
-	// Verify both outbounds are initially active
-	if !sup.IsOutboundActive("exit-0") || !sup.IsOutboundActive("exit-1") {
-		t.Errorf("expected exit-0 and exit-1 to be active")
+	// Verify initially neither outbound is active until synchronized
+	if sup.IsOutboundActive("exit-0") || sup.IsOutboundActive("exit-1") {
+		t.Errorf("expected outbounds to be initially inactive before synchronization")
 	}
 
-	// Dynamically disable exit-0 (DRAINING simulation)
-	if err := sup.DisableOutbound("exit-0"); err != nil {
-		t.Fatalf("failed to disable exit-0: %v", err)
+	// Synchronize active slots 0 and 1
+	if err := sup.SyncActiveSlots([]int{0, 1}); err != nil {
+		t.Fatalf("failed to sync active slots: %v", err)
+	}
+	if !sup.IsOutboundActive("exit-0") || !sup.IsOutboundActive("exit-1") {
+		t.Errorf("expected exit-0 and exit-1 to be active after SyncActiveSlots")
+	}
+
+	// Dynamically drain slot 0 (DRAINING simulation without rmo)
+	if err := sup.DrainingSlot(0); err != nil {
+		t.Fatalf("failed to drain slot 0: %v", err)
 	}
 	if sup.IsOutboundActive("exit-0") {
-		t.Errorf("expected exit-0 to be marked inactive")
+		t.Errorf("expected exit-0 to be marked inactive after draining")
+	}
+	if !sup.IsOutboundActive("exit-1") {
+		t.Errorf("expected exit-1 to remain active during slot 0 drain")
 	}
 
-	// Re-enable exit-0 (Standby promotion simulation)
-	if err := sup.EnableOutbound("exit-0", 100); err != nil {
-		t.Fatalf("failed to enable exit-0: %v", err)
+	// Re-activate slot 0 (Standby promotion simulation)
+	if err := sup.ActivateSlot(0); err != nil {
+		t.Fatalf("failed to activate slot 0: %v", err)
 	}
 	if !sup.IsOutboundActive("exit-0") {
-		t.Errorf("expected exit-0 to be active after EnableOutbound")
+		t.Errorf("expected exit-0 to be active after ActivateSlot")
 	}
 
 	// Graceful stop

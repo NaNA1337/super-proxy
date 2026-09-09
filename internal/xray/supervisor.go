@@ -10,6 +10,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -80,7 +83,7 @@ func NewSupervisor(configPath string, apiPort int, socksListen string, socksPort
 	marksMap := make(map[string]int)
 	for i := 0; i < slotCount; i++ {
 		tag := fmt.Sprintf("exit-%d", i)
-		activeMap[tag] = true
+		activeMap[tag] = false // Initial state: no slots active until verified by scheduler
 		marksMap[tag] = 100 + i // base table
 	}
 
@@ -322,76 +325,228 @@ func (s *Supervisor) monitorLoop() {
 	}
 }
 
-// DisableOutbound removes an outbound tag from Xray's active balancer set via Xray API.
-func (s *Supervisor) DisableOutbound(tag string) error {
+// SyncActiveSlots synchronizes Xray routing rules to route proxy traffic exclusively
+// to the specified active slots via Xray's RoutingService (adrules).
+// It does NOT remove outbound handlers (no rmo), guaranteeing existing TCP streams remain alive.
+func (s *Supervisor) SyncActiveSlots(activeSlots []int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if !s.activeOutbounds[tag] {
-		log.Printf("[XraySupervisor] Outbound %s is already disabled", tag)
-		return nil
-	}
-
-	/* #nosec G204 */
-	cmd := exec.Command(s.xrayBin, "api", "rmo", "--server="+s.apiAddr, tag)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to remove outbound %s via xray api: %w (output: %s)", tag, err, string(out))
-	}
-
-	s.activeOutbounds[tag] = false
-	log.Printf("[XraySupervisor] Outbound %s successfully REMOVED from Xray active set", tag)
-	return nil
+	return s.syncActiveSlotsLocked(activeSlots)
 }
 
-// EnableOutbound dynamically adds an outbound tag with its fwmark to Xray via Xray API.
-func (s *Supervisor) EnableOutbound(tag string, mark int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.activeOutbounds[tag] {
-		log.Printf("[XraySupervisor] Outbound %s is already active", tag)
-		return nil
-	}
-
-	outboundDef := map[string]interface{}{
-		"tag":      tag,
-		"protocol": "freedom",
-		"settings": map[string]interface{}{},
-		"streamSettings": map[string]interface{}{
-			"sockopt": map[string]interface{}{
-				"mark": mark,
+func (s *Supervisor) generateBalancers() []map[string]interface{} {
+	balancers := []map[string]interface{}{
+		{
+			"tag": "vpn-balancer",
+			"selector": []string{
+				"exit-",
+			},
+			"strategy": map[string]interface{}{
+				"type": "random",
 			},
 		},
 	}
 
-	configWrapper := map[string]interface{}{
-		"outbounds": []interface{}{outboundDef},
+	var generateSubsets func(start int, cur []int)
+	generateSubsets = func(start int, cur []int) {
+		if len(cur) >= 2 {
+			tagParts := make([]string, len(cur))
+			selector := make([]string, len(cur))
+			for idx, sl := range cur {
+				tagParts[idx] = fmt.Sprintf("%d", sl)
+				selector[idx] = fmt.Sprintf("exit-%d", sl)
+			}
+			balancers = append(balancers, map[string]interface{}{
+				"tag":      "balancer-" + strings.Join(tagParts, "-"),
+				"selector": selector,
+				"strategy": map[string]interface{}{
+					"type": "random",
+				},
+			})
+		}
+		for i := start; i < s.slotCount; i++ {
+			generateSubsets(i+1, append(cur, i))
+		}
+	}
+	generateSubsets(0, []int{})
+	return balancers
+}
+
+func (s *Supervisor) syncActiveSlotsLocked(activeSlots []int) error {
+	slotMap := make(map[int]bool)
+	for _, sl := range activeSlots {
+		if sl >= 0 && sl < s.slotCount {
+			slotMap[sl] = true
+		}
 	}
 
-	tmpFile, err := os.CreateTemp("", fmt.Sprintf("xray_outbound_%s_*.json", tag))
+	sorted := make([]int, 0, len(slotMap))
+	for sl := range slotMap {
+		sorted = append(sorted, sl)
+	}
+	sort.Ints(sorted)
+
+	// Update activeOutbounds map
+	for i := 0; i < s.slotCount; i++ {
+		tag := fmt.Sprintf("exit-%d", i)
+		s.activeOutbounds[tag] = slotMap[i]
+	}
+
+	// Build routing rules replacement
+	rules := []map[string]interface{}{
+		{
+			"type":        "field",
+			"inboundTag":  []string{"api"},
+			"outboundTag": "api",
+		},
+	}
+
+	if len(sorted) == 0 {
+		rules = append(rules, map[string]interface{}{
+			"type":        "field",
+			"ruleTag":     "active-balancer-rule",
+			"inboundTag":  []string{"proxy"},
+			"outboundTag": "block",
+		})
+	} else if len(sorted) == 1 {
+		rules = append(rules, map[string]interface{}{
+			"type":        "field",
+			"ruleTag":     "active-balancer-rule",
+			"inboundTag":  []string{"proxy"},
+			"outboundTag": fmt.Sprintf("exit-%d", sorted[0]),
+		})
+	} else {
+		tagParts := make([]string, len(sorted))
+		for idx, sl := range sorted {
+			tagParts[idx] = fmt.Sprintf("%d", sl)
+		}
+		balancerTag := "balancer-" + strings.Join(tagParts, "-")
+		rules = append(rules, map[string]interface{}{
+			"type":        "field",
+			"ruleTag":     "active-balancer-rule",
+			"inboundTag":  []string{"proxy"},
+			"balancerTag": balancerTag,
+		})
+	}
+
+	configWrapper := map[string]interface{}{
+		"routing": map[string]interface{}{
+			"balancers": s.generateBalancers(),
+			"rules":     rules,
+		},
+	}
+
+	tmpFile, err := os.CreateTemp("", "xray_rules_*.json")
 	if err != nil {
-		return fmt.Errorf("failed to create temp outbound json: %w", err)
+		return fmt.Errorf("failed to create temp rules json: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
 
 	if err := json.NewEncoder(tmpFile).Encode(configWrapper); err != nil {
 		_ = tmpFile.Close()
-		return fmt.Errorf("failed to encode outbound json: %w", err)
+		return fmt.Errorf("failed to encode rules json: %w", err)
 	}
 	_ = tmpFile.Close()
 
 	/* #nosec G204 */
-	cmd := exec.Command(s.xrayBin, "api", "ado", "--server="+s.apiAddr, tmpFile.Name())
+	cmd := exec.Command(s.xrayBin, "api", "adrules", "--server="+s.apiAddr, tmpFile.Name())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to add outbound %s via xray api: %w (output: %s)", tag, err, string(out))
+		return fmt.Errorf("failed to sync active slots via xray api adrules: %w (output: %s)", err, string(out))
 	}
 
-	s.activeOutbounds[tag] = true
-	s.outboundMarks[tag] = mark
-	log.Printf("[XraySupervisor] Outbound %s (mark: %d) successfully ADDED to Xray active set", tag, mark)
+	log.Printf("[XraySupervisor] Active slots synced to %v (routing rule updated via adrules, NO rmo called)", sorted)
 	return nil
+}
+
+// DrainingSlot transitions a slot to DRAINING without removing its outbound handler.
+// It removes the slot from active routing via Xray API adrules so new connections
+// will never route to this slot, while existing TCP streams remain alive on their socket.
+func (s *Supervisor) DrainingSlot(slot int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tag := fmt.Sprintf("exit-%d", slot)
+	if !s.activeOutbounds[tag] {
+		log.Printf("[XraySupervisor] Slot %d (%s) is already not active", slot, tag)
+		return nil
+	}
+
+	s.activeOutbounds[tag] = false
+	surviving := []int{}
+	for i := 0; i < s.slotCount; i++ {
+		t := fmt.Sprintf("exit-%d", i)
+		if s.activeOutbounds[t] {
+			surviving = append(surviving, i)
+		}
+	}
+
+	return s.syncActiveSlotsLocked(surviving)
+}
+
+// ActivateSlot promotes a slot to ACTIVE status and updates Xray routing rules.
+func (s *Supervisor) ActivateSlot(slot int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tag := fmt.Sprintf("exit-%d", slot)
+	s.activeOutbounds[tag] = true
+
+	active := []int{}
+	for i := 0; i < s.slotCount; i++ {
+		t := fmt.Sprintf("exit-%d", i)
+		if s.activeOutbounds[t] {
+			active = append(active, i)
+		}
+	}
+
+	return s.syncActiveSlotsLocked(active)
+}
+
+// GetActiveSlots returns the list of slot indices currently active in Xray.
+func (s *Supervisor) GetActiveSlots() []int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	active := []int{}
+	for i := 0; i < s.slotCount; i++ {
+		tag := fmt.Sprintf("exit-%d", i)
+		if s.activeOutbounds[tag] {
+			active = append(active, i)
+		}
+	}
+	return active
+}
+
+// DisableOutbound gracefully drains an outbound without calling rmo,
+// preserving existing connections while excluding the slot from new routing.
+func (s *Supervisor) DisableOutbound(tag string) error {
+	slotStr := strings.TrimPrefix(tag, "exit-")
+	slot, err := strconv.Atoi(slotStr)
+	if err != nil {
+		s.mu.Lock()
+		s.activeOutbounds[tag] = false
+		s.mu.Unlock()
+		return nil
+	}
+	return s.DrainingSlot(slot)
+}
+
+// EnableOutbound promotes an outbound to active routing via ActivateSlot.
+func (s *Supervisor) EnableOutbound(tag string, mark int) error {
+	s.mu.Lock()
+	s.outboundMarks[tag] = mark
+	s.mu.Unlock()
+
+	slotStr := strings.TrimPrefix(tag, "exit-")
+	slot, err := strconv.Atoi(slotStr)
+	if err != nil {
+		s.mu.Lock()
+		s.activeOutbounds[tag] = true
+		s.mu.Unlock()
+		return nil
+	}
+	return s.ActivateSlot(slot)
 }
 
 // IsOutboundActive checks if a given outbound tag is currently in the active set.

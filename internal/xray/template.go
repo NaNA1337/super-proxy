@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/NaNA1337/super-proxy/internal/routing"
 )
@@ -96,7 +97,43 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 		}
 	}
 
-	// Full Xray configuration with API and Balancer
+	balancers := []map[string]interface{}{
+		{
+			"tag": "vpn-balancer",
+			"selector": []string{
+				"exit-", // Matches exit-0, exit-1, exit-2, etc.
+			},
+			"strategy": map[string]interface{}{
+				"type": "random", // Connection-based balancing
+			},
+		},
+	}
+
+	// Generate combination balancers for any subsets of size >= 2
+	var generateSubsets func(start int, cur []int)
+	generateSubsets = func(start int, cur []int) {
+		if len(cur) >= 2 {
+			tagParts := make([]string, len(cur))
+			selector := make([]string, len(cur))
+			for idx, sl := range cur {
+				tagParts[idx] = fmt.Sprintf("%d", sl)
+				selector[idx] = fmt.Sprintf("exit-%d", sl)
+			}
+			balancers = append(balancers, map[string]interface{}{
+				"tag":      "balancer-" + strings.Join(tagParts, "-"),
+				"selector": selector,
+				"strategy": map[string]interface{}{
+					"type": "random",
+				},
+			})
+		}
+		for i := start; i < opts.SlotCount; i++ {
+			generateSubsets(i+1, append(cur, i))
+		}
+	}
+	generateSubsets(0, []int{})
+
+	// Full Xray configuration with API and Balancers
 	xrayConfig := map[string]interface{}{
 		"log": map[string]interface{}{
 			"loglevel": "warning",
@@ -130,17 +167,7 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 		"outbounds": outbounds,
 		"routing": map[string]interface{}{
 			"domainStrategy": "AsIs",
-			"balancers": []map[string]interface{}{
-				{
-					"tag": "vpn-balancer",
-					"selector": []string{
-						"exit-", // Matches exit-0, exit-1, exit-2, etc.
-					},
-					"strategy": map[string]interface{}{
-						"type": "random", // Connection-based balancing
-					},
-				},
-			},
+			"balancers":      balancers,
 			"rules": []map[string]interface{}{
 				{
 					"type":        "field",
@@ -148,9 +175,11 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 					"outboundTag": "api",
 				},
 				{
+					// Initial outbound state: synchronized to block (blackhole) until tunnels become ACTIVE
 					"type":        "field",
-					"network":     "tcp,udp",
-					"balancerTag": "vpn-balancer",
+					"ruleTag":     "active-balancer-rule",
+					"inboundTag":  []string{"proxy"},
+					"outboundTag": "block",
 				},
 			},
 		},

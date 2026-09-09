@@ -10,6 +10,7 @@ import (
 
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/models"
+	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/google/uuid"
 )
@@ -128,11 +129,16 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Reputation check (outside lock since it may take network I/O)
 	repRes, err := sched.RepEngine.EvaluateIP(context.Background(), node.IP)
-	if err != nil || repRes.HardReject {
+	isConservativeUnknown := sched.RepEngine != nil && sched.RepEngine.FailurePolicy() == "conservative" && repRes != nil && repRes.Status == reputation.StatusUnknown
+	if err != nil || repRes == nil || repRes.HardReject || isConservativeUnknown {
 		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
 		lease.Release()
 		releaseSlot(slot)
-		http.Error(w, "Node rejected by reputation engine", http.StatusForbidden)
+		reason := "Node rejected by reputation engine"
+		if isConservativeUnknown {
+			reason = "Node rejected: reputation UNKNOWN under conservative fail-closed policy"
+		}
+		http.Error(w, reason, http.StatusForbidden)
 		return
 	}
 
