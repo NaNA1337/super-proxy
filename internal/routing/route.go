@@ -14,9 +14,7 @@ func SetupSlotRouting(slotIndex int, interfaceName string) error {
 	fwmark := tableID // use the same number for simplicity
 
 	// 1. Add IP rule based on fwmark
-	// ip rule add fwmark <mark> table <table>
 	if err := runCmd("ip", "rule", "add", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
-		// Ignore error if rule already exists (File exists)
 		log.Printf("[Slot %d] Note: ip rule add returned (might already exist): %v", slotIndex, err)
 	}
 
@@ -24,7 +22,6 @@ func SetupSlotRouting(slotIndex int, interfaceName string) error {
 	runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", tableID))
 
 	// 3. Add default route to the table pointing to the tun interface
-	// ip route add default dev tunX table <table>
 	if err := runCmd("ip", "route", "add", "default", "dev", interfaceName, "table", fmt.Sprintf("%d", tableID)); err != nil {
 		return fmt.Errorf("failed to add default route for %s: %w", interfaceName, err)
 	}
@@ -38,18 +35,38 @@ func ClearSlotRouting(slotIndex int) error {
 	tableID := BaseTableID + slotIndex
 	fwmark := tableID
 
-	// 1. Flush the routing table
 	if err := runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", tableID)); err != nil {
 		log.Printf("[Slot %d] Note: failed to flush route table: %v", slotIndex, err)
 	}
 
-	// 2. Remove IP rule
-	// ip rule del fwmark <mark> table <table>
 	if err := runCmd("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
 		log.Printf("[Slot %d] Note: ip rule del returned: %v", slotIndex, err)
 	}
 
 	log.Printf("[Slot %d] Routing cleared.", slotIndex)
+	return nil
+}
+
+// AddEndpointBypassRule forces underlay traffic to the VPN endpoint to go through the main routing table
+func AddEndpointBypassRule(serverIP string) error {
+	// Add rule with high priority (lower number, e.g., 10) to bypass Xray fwmark interception
+	err := runCmd("ip", "rule", "add", "to", serverIP, "lookup", "main", "pref", "10")
+	if err != nil {
+		log.Printf("[Routing] Note: failed to add endpoint bypass rule for %s: %v", serverIP, err)
+		return err
+	}
+	log.Printf("[Routing] Endpoint bypass rule added for %s", serverIP)
+	return nil
+}
+
+// RemoveEndpointBypassRule cleans up the underlay bypass rule
+func RemoveEndpointBypassRule(serverIP string) error {
+	err := runCmd("ip", "rule", "del", "to", serverIP, "lookup", "main", "pref", "10")
+	if err != nil {
+		log.Printf("[Routing] Note: failed to remove endpoint bypass rule for %s: %v", serverIP, err)
+		return err
+	}
+	log.Printf("[Routing] Endpoint bypass rule removed for %s", serverIP)
 	return nil
 }
 

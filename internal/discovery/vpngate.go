@@ -80,8 +80,6 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 			HostName:    record[0],
 			IP:          ip,
 			Score:       score,
-			Ping:        ping,
-			Speed:       speed,
 			CountryL:    record[5],
 			Country:     record[6], // CountryShort
 			Sessions:    sessions,
@@ -93,7 +91,10 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 			LastSeen:    now,
 			FirstSeen:   now,
 			FailCount:   0,
-			HealthScore: 0,
+			Performance: models.PerformanceMetrics{
+				RTT:        ping,
+				Throughput: speed,
+			},
 		}
 
 		nodes = append(nodes, node)

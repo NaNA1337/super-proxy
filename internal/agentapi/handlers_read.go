@@ -80,14 +80,14 @@ func handleCurrentExits(w http.ResponseWriter, r *http.Request) {
 	for slot, tunnel := range sched.ActiveSlots {
 		exits = append(exits, map[string]interface{}{
 			"slot":         slot,
-			"status":       tunnel.IsActive,
+			"status":       tunnel.State,
 			"node_id":      tunnel.Node.ID,
 			"ip":           tunnel.Node.IP,
 			"country":      tunnel.Node.Country,
 			"region":       tunnel.Node.Country, // Simplified mapping
 			"score":        tunnel.Node.Score,
-			"reputation":   tunnel.Node.HealthScore, // Rep map
-			"throughput":   tunnel.Node.Speed,
+			"reputation":   tunnel.Node.Reputation,
+			"throughput":   tunnel.Node.Performance.Throughput,
 			"last_check":   tunnel.Node.LastSeen,
 		})
 	}

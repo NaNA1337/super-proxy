@@ -79,8 +79,13 @@ func (s *Scheduler) reconcile() {
 		if s.ManualOverride[slot] {
 			continue // Skip health reconciliation if slot is locked by manual switch
 		}
-		if !tunnel.IsActive {
-			log.Printf("[Scheduler] Slot %d tunnel %s is dead (process exited). Removing.", slot, tunnel.Node.IP)
+		if tunnel.State != string(SlotActive) {
+			if tunnel.State == string(SlotDraining) {
+				// Handle draining... wait until connections drop, for now just kill it after 10s
+				log.Printf("[Scheduler] Slot %d is draining, forcing kill.", slot)
+			} else {
+				log.Printf("[Scheduler] Slot %d tunnel %s is dead (State: %s). Removing.", slot, tunnel.Node.IP, tunnel.State)
+			}
 			routing.ClearSlotRouting(slot)
 			tunnel.Stop()
 			delete(s.ActiveSlots, slot)
@@ -88,11 +93,11 @@ func (s *Scheduler) reconcile() {
 		}
 
 		ctxTimeout, cancel := context.WithTimeout(s.ctx, 10*time.Second)
-		ok, _, err := health.CheckTunnelConnectivity(ctxTimeout, tunnel.Interface, "http://1.1.1.1")
+		res := health.PerformLayeredCheck(ctxTimeout, tunnel.Interface, "", routing.BaseTableID+slot)
 		cancel()
 
-		if !ok || err != nil {
-			log.Printf("[Scheduler] Slot %d health check failed: %v. Marking dead.", slot, err)
+		if res.Error != nil {
+			log.Printf("[Scheduler] Slot %d health check failed: %v. Marking dead.", slot, res.Error)
 			routing.ClearSlotRouting(slot)
 			tunnel.Stop()
 			delete(s.ActiveSlots, slot)
@@ -104,7 +109,9 @@ func (s *Scheduler) reconcile() {
 		if s.ManualOverride[i] {
 			continue // Skip filling if manually overridden (Wait for manual op to finish)
 		}
-		if _, ok := s.ActiveSlots[i]; !ok {
+		
+		tunnel, exists := s.ActiveSlots[i]
+		if !exists || tunnel.State != string(SlotActive) {
 			if len(s.StandbyNodes) > 0 {
 				log.Printf("[Scheduler] Promoting standby tunnel to slot %d", i)
 				newTunnel := s.StandbyNodes[0]

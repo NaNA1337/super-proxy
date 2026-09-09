@@ -22,7 +22,7 @@ type Tunnel struct {
 	Cmd       *exec.Cmd
 	Cancel    context.CancelFunc
 	mu        sync.Mutex
-	IsActive  bool
+	State     string
 }
 
 // StartTunnel decodes config, injects route-nopull, and starts the OpenVPN process
@@ -57,15 +57,19 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 	ctxChild, cancel := context.WithCancel(ctx)
 
 	// 4. Start OpenVPN process
-	// Disable DCO fallback is handled by OpenVPN 2.6 automatically if config is incompatible.
-	// But we can add --disable-dco if we wanted. For now, let it try DCO if available.
-	/* #nosec G204 */
-	cmd := exec.CommandContext(ctxChild, "openvpn",
+	args := []string{
 		"--config", tmpFile.Name(),
 		"--dev", interfaceName,
 		"--auth-nocache",
 		"--script-security", "2",
-	)
+	}
+
+	if !DetectDCOCapability(ctxChild, cfgStr) {
+		args = append(args, "--disable-dco")
+	}
+
+	/* #nosec G204 */
+	cmd := exec.CommandContext(ctxChild, "openvpn", args...)
 
 	// We can capture stdout/stderr for logging
 	cmd.Stdout = os.Stdout
@@ -84,14 +88,14 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 		Node:      node,
 		Cmd:       cmd,
 		Cancel:    cancel,
-		IsActive:  true,
+		State:     "ACTIVE",
 	}
 
 	// Wait for process in background
 	go func() {
 		err := cmd.Wait()
 		tunnel.mu.Lock()
-		tunnel.IsActive = false
+		tunnel.State = "FAILED"
 		tunnel.mu.Unlock()
 		if err != nil {
 			log.Printf("[Slot %d] OpenVPN process exited: %v", slotIndex, err)
@@ -105,7 +109,7 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 	// Wait a bit to ensure it doesn't immediately crash
 	time.Sleep(2 * time.Second)
 	tunnel.mu.Lock()
-	active := tunnel.IsActive
+	active := tunnel.State == "ACTIVE"
 	tunnel.mu.Unlock()
 
 	if !active {
