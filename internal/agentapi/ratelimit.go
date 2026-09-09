@@ -90,11 +90,11 @@ func cleanupVisitors() {
 
 func rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			log.Printf("[AgentAPI] RateLimit warning: failed to parse remote addr %s", r.RemoteAddr)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
+		ip := r.RemoteAddr
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			ip = host
+		} else if ip == "" {
+			ip = "127.0.0.1"
 		}
 
 		// Actually validate the token to determine the correct rate bucket

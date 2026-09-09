@@ -10,6 +10,8 @@ import (
 
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/models"
+	"github.com/NaNA1337/super-proxy/internal/scheduler"
+	"github.com/google/uuid"
 )
 
 type SwitchRequest struct {
@@ -44,6 +46,9 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Protect against OOM attacks: limit body size to 1MB
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 6 || parts[5] != "switch" {
 		http.Error(w, "Invalid endpoint. Use /api/v1/slots/{slot}/switch", http.StatusBadRequest)
@@ -73,10 +78,12 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ALL validation under the scheduler lock to prevent TOCTOU races
+	opID := uuid.New().String()
+
+	// ALL validation and reservation performed under scheduler lock to prevent TOCTOU races
 	sched.Mu.Lock()
 
-	// 1. Check if slot is already locked by another operation
+	// 1. Check if slot is already locked by another manual operation
 	if sched.ManualOverride[slot] {
 		sched.Mu.Unlock()
 		http.Error(w, "409 SLOT_BUSY: Slot is currently locked by another manual operation", http.StatusConflict)
@@ -91,8 +98,8 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Verify state is QUALIFIED (DISCOVERED/STANDBY)
-	if node.Status != models.StatusDiscovered && node.Status != models.StatusStandby {
+	// 3. Verify state is allowed for manual switch (DISCOVERED, QUALIFIED, or STANDBY)
+	if node.Status != models.StatusDiscovered && node.Status != models.StatusStandby && node.Status != models.StatusQualified {
 		sched.Mu.Unlock()
 		http.Error(w, fmt.Sprintf("Node is not qualified for manual switch. Current status: %s", node.Status), http.StatusConflict)
 		return
@@ -107,18 +114,23 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 5. Reserve the slot atomically
+	// 5. Acquire atomic generation lease
+	lease, err := sched.Slots.TryAcquireSlot(slot, "manual-switch", opID)
+	if err != nil {
+		sched.Mu.Unlock()
+		http.Error(w, fmt.Sprintf("409 SLOT_BUSY: %v", err), http.StatusConflict)
+		return
+	}
+
+	// 6. Lock the slot
 	sched.ManualOverride[slot] = true
-
-	// 6. Mark node as being used (prevent another concurrent request from using same node)
-	database.DB.Model(&node).Update("status", models.StatusActive)
-
 	sched.Mu.Unlock()
 
-	// 7. Reputation check (outside lock since it may be slow)
+	// 7. Reputation check (outside lock since it may take network I/O)
 	repRes, err := sched.RepEngine.EvaluateIP(context.Background(), node.IP)
 	if err != nil || repRes.HardReject {
-		database.DB.Model(&node).Update("status", models.StatusFailed)
+		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		lease.Release()
 		releaseSlot(slot)
 		http.Error(w, "Node rejected by reputation engine", http.StatusForbidden)
 		return
@@ -126,9 +138,10 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 
 	// Create async operation
 	op := createSwitchOperation(slot, req.NodeID)
+	op.ID = opID // Match the lease operation ID
 
-	// Execute state machine in background
-	go executeManualSwitch(op)
+	// Execute state machine in background with generation lease
+	go executeManualSwitch(op, lease)
 
 	// Return 202 Accepted
 	w.WriteHeader(http.StatusAccepted)

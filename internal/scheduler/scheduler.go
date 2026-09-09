@@ -25,26 +25,33 @@ type Scheduler struct {
 	RegionConfig     config.RegionConfig
 	ActiveSlots      map[int]*openvpn.Tunnel
 	DrainingSlots    map[int]*openvpn.Tunnel // Tunnels being drained before shutdown
+	drainingTableIDs map[int]int
+	drainingTunIPs   map[int]string
 	StandbyNodes     []*openvpn.Tunnel
+	Slots            *SlotManager
 	ManualOverride   map[int]bool
 	Mu               sync.Mutex
 	ctx              context.Context
 	cancel           context.CancelFunc
+	wg               sync.WaitGroup
 	standbySlotCount atomic.Int64 // Monotonically increasing counter for standby virtual slots
 }
 
 func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine, regionCfg config.RegionConfig) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Scheduler{
-		MaxActive:      maxActive,
-		MaxStandby:     maxStandby,
-		RepEngine:      repEngine,
-		RegionConfig:   regionCfg,
-		ActiveSlots:    make(map[int]*openvpn.Tunnel),
-		DrainingSlots:  make(map[int]*openvpn.Tunnel),
-		ManualOverride: make(map[int]bool),
-		ctx:            ctx,
-		cancel:         cancel,
+		MaxActive:        maxActive,
+		MaxStandby:       maxStandby,
+		RepEngine:        repEngine,
+		RegionConfig:     regionCfg,
+		ActiveSlots:      make(map[int]*openvpn.Tunnel),
+		DrainingSlots:    make(map[int]*openvpn.Tunnel),
+		drainingTableIDs: make(map[int]int),
+		drainingTunIPs:   make(map[int]string),
+		Slots:            NewSlotManager(maxActive),
+		ManualOverride:   make(map[int]bool),
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 	// Start virtual slot counter after active + standby range
 	s.standbySlotCount.Store(int64(maxActive + maxStandby + 10))
@@ -53,15 +60,20 @@ func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine, regio
 
 func (s *Scheduler) Start() {
 	log.Println("[Scheduler] Starting background scheduler...")
+	s.wg.Add(1)
 	go s.monitorLoop()
 }
 
 func (s *Scheduler) Stop() {
 	log.Println("[Scheduler] Stopping scheduler...")
 	s.cancel()
+	// Block until monitorLoop and all tunnel cleanup goroutines complete cleanly
+	s.wg.Wait()
+	log.Println("[Scheduler] Scheduler stopped and all resources cleaned up.")
 }
 
 func (s *Scheduler) monitorLoop() {
+	defer s.wg.Done()
 	ticker := time.NewTicker(10 * time.Second)
 	staleTicker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -76,7 +88,9 @@ func (s *Scheduler) monitorLoop() {
 				t.Stop()
 			}
 			for slot, t := range s.DrainingSlots {
-				routing.ClearSlotRouting(slot)
+				drainingTableID := s.drainingTableIDs[slot]
+				tunIP := s.drainingTunIPs[slot]
+				routing.ClearDrainingRouting(drainingTableID, tunIP)
 				t.Stop()
 			}
 			for _, t := range s.StandbyNodes {
@@ -95,7 +109,7 @@ func (s *Scheduler) monitorLoop() {
 }
 
 func (s *Scheduler) cleanStaleNodes() {
-	// P1-3: Mark nodes unseen for 24 hours as STALE
+	// Mark nodes unseen for 24 hours as STALE
 	database.DB.Model(&models.Node{}).
 		Where("last_seen < ? AND status != ?", time.Now().Add(-24*time.Hour), models.StatusStale).
 		Update("status", models.StatusStale)
@@ -118,7 +132,7 @@ func (s *Scheduler) reconcileActiveSlots() {
 
 		if state != string(SlotActive) {
 			log.Printf("[Scheduler] Slot %d tunnel %s is dead (State: %s). Transitioning to DRAINING.", slot, tunnel.Node.IP, state)
-			s.transitionToDraining(slot, tunnel)
+			s.transitionToDrainingLocked(slot, tunnel)
 			continue
 		}
 
@@ -128,11 +142,11 @@ func (s *Scheduler) reconcileActiveSlots() {
 
 		if !res.TunnelHealthy || res.Error != nil {
 			log.Printf("[Scheduler] Slot %d health check failed (Healthy=%v, Err=%v). Transitioning to DRAINING.", slot, res.TunnelHealthy, res.Error)
-			s.transitionToDraining(slot, tunnel)
+			s.transitionToDrainingLocked(slot, tunnel)
 		}
 	}
 
-	// 2. Fill empty active slots from standby pool (P1-2: True Warm Standby)
+	// 2. Fill empty active slots from standby pool (True Warm Standby)
 	for i := 0; i < s.MaxActive; i++ {
 		if s.ManualOverride[i] {
 			continue
@@ -161,10 +175,22 @@ func (s *Scheduler) reconcileActiveSlots() {
 				newTunnel.SlotIndex = i
 
 				// Ensure route table for the slot routes via this tunnel's interface
-				routing.SetupSlotRouting(i, newTunnel.Interface)
+				if err := routing.SetupSlotRouting(i, newTunnel.Interface); err != nil {
+					log.Printf("[Scheduler] Failed to setup slot routing for slot %d: %v", i, err)
+					newTunnel.Stop()
+					continue
+				}
 
-				database.DB.Model(newTunnel.Node).Update("status", models.StatusActive)
+				_ = TransitionNode(database.DB, newTunnel.Node, models.StatusActive)
 				s.ActiveSlots[i] = newTunnel
+
+				sc, _ := s.Slots.GetSlot(i)
+				if sc != nil {
+					sc.Mu.Lock()
+					sc.ActiveTunnel = newTunnel
+					sc.State = SlotActive
+					sc.Mu.Unlock()
+				}
 			} else {
 				log.Printf("[Scheduler] Slot %d is empty, but no standby available.", i)
 			}
@@ -172,48 +198,79 @@ func (s *Scheduler) reconcileActiveSlots() {
 	}
 }
 
-// transitionToDraining moves a tunnel from active to draining state.
+// TransitionToDraining public method allowing manual switch and external controllers to drain a slot safely
+func (s *Scheduler) TransitionToDraining(slot int, tunnel *openvpn.Tunnel) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.transitionToDrainingLocked(slot, tunnel)
+}
+
+// transitionToDrainingLocked moves a tunnel from active to draining state with isolated routing.
 // Must be called with s.Mu held.
-func (s *Scheduler) transitionToDraining(slot int, tunnel *openvpn.Tunnel) {
+func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel) {
 	tunnel.Mu.Lock()
 	tunnel.State = string(SlotDraining)
 	tunnel.DrainingStartedAt = time.Now()
 	tunnel.Mu.Unlock()
 
-	// Update DB status
-	database.DB.Model(tunnel.Node).Updates(map[string]interface{}{
-		"status":     models.StatusDraining,
-		"fail_count": tunnel.Node.FailCount + 1,
-	})
+	// 1. Isolate into dedicated Draining Table (200 + slot)
+	drainingTableID := 200 + slot
+	tunIP, _ := routing.GetInterfaceIP(tunnel.Interface)
+	if err := routing.SetupDrainingRouting(drainingTableID, tunnel.Interface, tunIP); err != nil {
+		log.Printf("[Scheduler] Warning: failed to setup draining routing for slot %d: %v", slot, err)
+	}
 
-	// Move from active to draining
+	s.drainingTableIDs[slot] = drainingTableID
+	s.drainingTunIPs[slot] = tunIP
+
+	// 2. FSM state transition
+	_ = TransitionNode(database.DB, tunnel.Node, models.StatusDraining)
+
+	// 3. Move from active to draining map
 	delete(s.ActiveSlots, slot)
 	s.DrainingSlots[slot] = tunnel
-	log.Printf("[Scheduler] Slot %d moved to DRAINING state", slot)
+
+	sc, _ := s.Slots.GetSlot(slot)
+	if sc != nil {
+		sc.Mu.Lock()
+		sc.ActiveTunnel = nil
+		sc.DrainingTunnel = tunnel
+		sc.DrainingTableID = drainingTableID
+		sc.State = SlotDraining
+		sc.Mu.Unlock()
+	}
+
+	log.Printf("[Scheduler] Slot %d moved to DRAINING state (dev %s, tunIP %s, table %d)",
+		slot, tunnel.Interface, tunIP, drainingTableID)
 }
 
-// cleanupDrainingSlots checks draining slots and removes them when done.
+// cleanupDrainingSlots checks draining slots and removes them when conntrack count hits 0 or timeout.
 func (s *Scheduler) cleanupDrainingSlots() {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 
 	for slot, tunnel := range s.DrainingSlots {
-		// Check timeout first
 		tunnel.Mu.Lock()
 		elapsed := time.Since(tunnel.DrainingStartedAt)
 		tunnel.Mu.Unlock()
 
+		tunIP := s.drainingTunIPs[slot]
+		drainingTableID := s.drainingTableIDs[slot]
+
 		if elapsed > drainingTimeout {
 			log.Printf("[Scheduler] Slot %d draining timeout exceeded (%.0fs). Force stopping.", slot, elapsed.Seconds())
+			routing.ClearDrainingRouting(drainingTableID, tunIP)
 			routing.ClearSlotRouting(slot)
 			tunnel.Stop()
 			s.markNodeFailed(tunnel.Node)
 			delete(s.DrainingSlots, slot)
+			delete(s.drainingTableIDs, slot)
+			delete(s.drainingTunIPs, slot)
 			continue
 		}
 
-		// Check remaining connections
-		count, err := GetActiveConnectionCount(slot)
+		// Check remaining connections by mark and tunIP
+		count, err := GetActiveConnectionCount(slot, tunIP)
 		if err != nil {
 			log.Printf("[Scheduler] Warning: Failed to check connections for slot %d: %v", slot, err)
 			count = 0 // Fallback to safe kill if conntrack is entirely broken
@@ -225,28 +282,25 @@ func (s *Scheduler) cleanupDrainingSlots() {
 		}
 
 		log.Printf("[Scheduler] Slot %d has 0 connections. Draining complete, stopping tunnel.", slot)
-		routing.ClearSlotRouting(slot)
+		routing.ClearDrainingRouting(drainingTableID, tunIP)
 		tunnel.Stop()
 		s.markNodeFailed(tunnel.Node)
 		delete(s.DrainingSlots, slot)
+		delete(s.drainingTableIDs, slot)
+		delete(s.drainingTunIPs, slot)
+
+		sc, _ := s.Slots.GetSlot(slot)
+		if sc != nil {
+			sc.Mu.Lock()
+			sc.DrainingTunnel = nil
+			sc.Mu.Unlock()
+		}
 	}
 }
 
-// markNodeFailed updates a node's status to FAILED or DEAD based on fail count.
+// markNodeFailed updates a node's status to FAILED or DEAD using the FSM.
 func (s *Scheduler) markNodeFailed(node *models.Node) {
-	newStatus := models.StatusFailed
-	newFailCount := node.FailCount + 1
-
-	// After 3 failures, mark as DEAD
-	if newFailCount >= 3 {
-		newStatus = models.StatusDead
-		log.Printf("[Scheduler] Node %s has failed %d times, marking as DEAD", node.IP, newFailCount)
-	}
-
-	database.DB.Model(node).Updates(map[string]interface{}{
-		"status":     newStatus,
-		"fail_count": newFailCount,
-	})
+	_ = TransitionNode(database.DB, node, models.StatusFailed)
 }
 
 func (s *Scheduler) maintainStandbyPool() {
@@ -266,7 +320,7 @@ func (s *Scheduler) maintainStandbyPool() {
 	allowedCountries = append(allowedCountries, s.RegionConfig.Fallback...)
 
 	var node models.Node
-	// P1-1: Strict Lifecycle + Region filter
+	// Strict Lifecycle + Region filter
 	query := database.DB.Where("status = ?", models.StatusDiscovered)
 	if len(allowedCountries) > 0 && allowedCountries[0] != "" {
 		query = query.Where("country IN ?", allowedCountries)
@@ -280,44 +334,58 @@ func (s *Scheduler) maintainStandbyPool() {
 
 	log.Printf("[Scheduler] Evaluating node %s (%s) for standby pool", node.IP, node.Country)
 
-	// P1-4: Reputation Check
+	// Reputation Check
 	res, _ := s.RepEngine.EvaluateIP(s.ctx, node.IP)
 	if res.HardReject {
-		database.DB.Model(&node).Update("status", models.StatusFailed)
+		_ = TransitionNode(database.DB, &node, models.StatusFailed)
 		return
 	}
-	database.DB.Model(&node).Update("status", models.StatusReputationChecked)
+
+	// Soft penalty persisted to DB
+	if res.ScorePenalty > 0 {
+		node.Score -= res.ScorePenalty
+		database.DB.Model(&node).Update("score", node.Score)
+	}
+	database.DB.Model(&node).Updates(map[string]interface{}{
+		"rep_fraud_score":   res.ScorePenalty,
+		"rep_provider_name": res.ProviderReason,
+	})
+
+	if err := TransitionNode(database.DB, &node, models.StatusReputationChecked); err != nil {
+		log.Printf("[Scheduler] FSM transition error: %v", err)
+		return
+	}
 
 	// Connect
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
 	tunnel, err := openvpn.StartTunnel(ctx, standbyVirtualSlot, &node)
 	if err != nil {
-		database.DB.Model(&node).Updates(map[string]interface{}{
-			"status":     models.StatusFailed,
-			"fail_count": node.FailCount + 1,
-		})
+		_ = TransitionNode(database.DB, &node, models.StatusFailed)
 		return
 	}
 
 	time.Sleep(5 * time.Second)
 
-	// To verify the tunnel without polluting main route table, we temporarily assign it to its virtual table
-	routing.SetupSlotRouting(standbyVirtualSlot, tunnel.Interface)
+	// Verify the tunnel without polluting main route table
+	_ = routing.SetupSlotRouting(standbyVirtualSlot, tunnel.Interface)
 	hRes := health.VerifyTunnel(ctx, standbyVirtualSlot, tunnel.Interface, routing.BaseTableID+standbyVirtualSlot, &node)
-	routing.ClearSlotRouting(standbyVirtualSlot) // Remove temp routing
+	_ = routing.ClearSlotRouting(standbyVirtualSlot) // Remove temp routing
 
 	if !hRes.TunnelHealthy || hRes.Error != nil {
 		tunnel.Stop()
-		database.DB.Model(&node).Updates(map[string]interface{}{
-			"status":     models.StatusFailed,
-			"fail_count": node.FailCount + 1,
-		})
+		_ = TransitionNode(database.DB, &node, models.StatusFailed)
 		return
 	}
 
-	// P1-1: Qualified and Standby
-	database.DB.Model(&node).Update("status", models.StatusStandby)
+	// Transition to QUALIFIED, then to STANDBY
+	if err := TransitionNode(database.DB, &node, models.StatusQualified); err != nil {
+		log.Printf("[Scheduler] FSM qualified error: %v", err)
+	}
+	if err := TransitionNode(database.DB, &node, models.StatusStandby); err != nil {
+		log.Printf("[Scheduler] FSM standby error: %v", err)
+	}
+
 	tunnel.Mu.Lock()
 	tunnel.State = string(SlotActive) // The process itself is active
 	tunnel.Mu.Unlock()
@@ -325,5 +393,6 @@ func (s *Scheduler) maintainStandbyPool() {
 	s.Mu.Lock()
 	s.StandbyNodes = append(s.StandbyNodes, tunnel)
 	s.Mu.Unlock()
-	log.Printf("[Scheduler] Successfully added tunnel %s to warm standby pool.", tunnel.Interface)
+	log.Printf("[Scheduler] Successfully added tunnel %s to warm standby pool (Node %s: QUALIFIED -> STANDBY).",
+		tunnel.Interface, node.IP)
 }

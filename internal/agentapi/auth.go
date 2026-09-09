@@ -12,13 +12,21 @@ var (
 	masterAPIKey = ""
 )
 
-func InitAuth() {
+func InitAuth(configKey string) {
 	key := os.Getenv("XRAY_MANAGER_API_KEY")
 	if key == "" {
-		// Log warning but allow it to be injected later via config, 
-		// for now we set a strong fallback or fail secure.
-		log.Println("[AgentAPI] WARNING: XRAY_MANAGER_API_KEY environment variable not set. API will reject all authenticated requests.")
+		key = configKey
 	}
+	if key == "" {
+		log.Println("[AgentAPI] WARNING: Neither XRAY_MANAGER_API_KEY nor config api_key is set. API will reject all authenticated requests.")
+	} else {
+		log.Println("[AgentAPI] Authentication initialized successfully.")
+	}
+	masterAPIKey = key
+}
+
+// SetMasterAPIKey dynamically sets the API key (for testing and runtime config reload)
+func SetMasterAPIKey(key string) {
 	masterAPIKey = key
 }
 

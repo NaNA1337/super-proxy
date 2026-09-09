@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -126,11 +127,12 @@ func main() {
 	if discoveryInterval < time.Minute {
 		discoveryInterval = 15 * time.Minute
 	}
-	go runPeriodicDiscovery(cfg.Discovery.URL, discoveryInterval)
+	discoveryCtx, cancelDiscovery := context.WithCancel(context.Background())
+	go runPeriodicDiscovery(discoveryCtx, cfg.Discovery.URL, discoveryInterval)
 	log.Printf("Periodic discovery refresh every %v", discoveryInterval)
 
-	// 10. Initialize Agent API
-	apiServer := agentapi.StartServer(60000, sched)
+	// 10. Initialize Agent API with config APIKey
+	apiServer := agentapi.StartServer(60000, sched, cfg.APIKey)
 	log.Println("Agent API Server listening on port 60000.")
 
 	// 11. Wait for Interrupt for Graceful Shutdown
@@ -141,6 +143,9 @@ func main() {
 	log.Println("Interrupt signal received. Initiating graceful shutdown...")
 
 	// 12. Shutdown sequence
+	// Stop periodic discovery
+	cancelDiscovery()
+
 	// Shutdown API first so no new switch commands come in
 	if apiServer != nil {
 		if err := apiServer.Close(); err != nil {
@@ -148,7 +153,7 @@ func main() {
 		}
 	}
 
-	// Stop scheduler and all its managed tunnels and routes
+	// Stop scheduler and wait for all managed tunnels and routes to clean up
 	sched.Stop()
 
 	// Disable leak protection
@@ -159,21 +164,27 @@ func main() {
 }
 
 // runPeriodicDiscovery fetches VPN Gate data on a regular interval and upserts into DB.
-func runPeriodicDiscovery(url string, interval time.Duration) {
+func runPeriodicDiscovery(ctx context.Context, url string, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		nodes, err := discovery.FetchAndParseNodes(url)
-		if err != nil {
-			log.Printf("[Discovery] Periodic fetch failed: %v", err)
-			continue
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[Discovery] Periodic discovery loop stopped.")
+			return
+		case <-ticker.C:
+			nodes, err := discovery.FetchAndParseNodes(url)
+			if err != nil {
+				log.Printf("[Discovery] Periodic fetch failed: %v", err)
+				continue
+			}
 
-		database.DB.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"country", "country_long", "sessions", "last_seen"}),
-		}).Create(&nodes)
-		log.Printf("[Discovery] Refreshed %d nodes.", len(nodes))
+			database.DB.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "id"}},
+				DoUpdates: clause.AssignmentColumns([]string{"country", "country_long", "sessions", "last_seen"}),
+			}).Create(&nodes)
+			log.Printf("[Discovery] Refreshed %d nodes.", len(nodes))
+		}
 	}
 }

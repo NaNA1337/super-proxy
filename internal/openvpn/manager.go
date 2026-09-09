@@ -1,9 +1,11 @@
 package openvpn
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -24,6 +26,7 @@ type Tunnel struct {
 	Cancel            context.CancelFunc
 	Mu                sync.Mutex
 	State             string
+	DCOStatus         DCOStatus
 	DrainingStartedAt time.Time
 	tmpConfigPath     string
 	cleanupOnce       sync.Once
@@ -80,9 +83,8 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 	/* #nosec G204 */
 	cmd := exec.CommandContext(ctxChild, "openvpn", args...)
 
-	// Capture stdout/stderr for logging
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	stdoutPipe, _ := cmd.StdoutPipe()
+	stderrPipe, _ := cmd.StderrPipe()
 
 	log.Printf("[Slot %d] Starting OpenVPN for Node %s on %s", slotIndex, node.IP, interfaceName)
 	if err := cmd.Start(); err != nil {
@@ -90,6 +92,14 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 		routing.RemoveEndpointBypassRule(node.IP)
 		os.Remove(tmpFile.Name())
 		return nil, fmt.Errorf("failed to start openvpn: %w", err)
+	}
+
+	initialDCO := DCOStatusRequested
+	for _, arg := range args {
+		if arg == "--disable-dco" {
+			initialDCO = DCOStatusDisabled
+			break
+		}
 	}
 
 	tunnel := &Tunnel{
@@ -100,7 +110,30 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 		Cmd:           cmd,
 		Cancel:        cancel,
 		State:         "ACTIVE",
+		DCOStatus:     initialDCO,
 		tmpConfigPath: tmpFile.Name(),
+	}
+
+	scanLog := func(r io.Reader) {
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if status := ParseDCOLogLine(line); status != "" {
+				tunnel.Mu.Lock()
+				tunnel.DCOStatus = status
+				tunnel.Mu.Unlock()
+				log.Printf("[Slot %d] OpenVPN runtime DCO status confirmed: %s", slotIndex, status)
+			}
+		}
+		if err := scanner.Err(); err != nil && err != io.EOF {
+			log.Printf("[Slot %d] Log scanner encountered error: %v", slotIndex, err)
+		}
+	}
+	if stdoutPipe != nil {
+		go scanLog(stdoutPipe)
+	}
+	if stderrPipe != nil {
+		go scanLog(stderrPipe)
 	}
 
 	// Wait for process in background

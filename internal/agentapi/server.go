@@ -12,9 +12,9 @@ import (
 )
 
 // StartServer initializes and starts the Agent API Control Plane
-func StartServer(port int, schedulerInstance *scheduler.Scheduler) *http.Server {
+func StartServer(port int, schedulerInstance *scheduler.Scheduler, configKey string) *http.Server {
 	SetScheduler(schedulerInstance)
-	InitAuth()
+	InitAuth(configKey)
 
 	mux := http.NewServeMux()
 
@@ -34,7 +34,7 @@ func StartServer(port int, schedulerInstance *scheduler.Scheduler) *http.Server 
 	mux.Handle("/api/v1/operations/", secureChain(http.HandlerFunc(handleOperationStatus)))
 	mux.Handle("/api/v1/slots/", secureChain(http.HandlerFunc(handleSlotAction)))
 
-	// P1-11: Metrics must be authenticated
+	// Metrics must be authenticated
 	mux.Handle("/metrics", secureChain(promhttp.Handler()))
 
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
@@ -49,8 +49,12 @@ func StartServer(port int, schedulerInstance *scheduler.Scheduler) *http.Server 
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{*tlsCert},
+			MinVersion:   tls.VersionTLS12,
 		},
 	}
 

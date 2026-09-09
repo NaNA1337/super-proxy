@@ -5,14 +5,19 @@ import (
 )
 
 // EnableDNSLeakProtection prevents DNS queries from leaking outside VPN tunnels.
-// It blocks all outgoing DNS (UDP/TCP 53) on non-tun interfaces.
+// It allows root management traffic (for discovery and reputation checks) on the physical
+// interface, while strictly blocking all non-root and marked proxy DNS traffic.
 func EnableDNSLeakProtection() error {
 	_, physIface, err := GetDefaultGateway()
 	if err != nil {
 		return err
 	}
 
-	// Block DNS on physical interface (allow on tun+ interfaces)
+	// 1. Allow root management daemon to resolve discovery and reputation APIs
+	_ = runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "udp", "--dport", "53", "-j", "ACCEPT")
+	_ = runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "53", "-j", "ACCEPT")
+
+	// 2. Block all other DNS on physical interface (strictly enforced for proxy clients / non-root)
 	if err := runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP"); err != nil {
 		log.Printf("[LeakGuard] Warning: failed to add DNS UDP leak rule: %v", err)
 	}
@@ -20,7 +25,7 @@ func EnableDNSLeakProtection() error {
 		log.Printf("[LeakGuard] Warning: failed to add DNS TCP leak rule: %v", err)
 	}
 
-	log.Printf("[LeakGuard] DNS leak protection enabled on interface %s", physIface)
+	log.Printf("[LeakGuard] DNS leak protection enabled on interface %s (daemon exempted, proxy blocked)", physIface)
 	return nil
 }
 
@@ -32,8 +37,10 @@ func DisableDNSLeakProtection() {
 		return
 	}
 
-	runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP")
-	runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "tcp", "--dport", "53", "-j", "DROP")
+	_ = runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "udp", "--dport", "53", "-j", "ACCEPT")
+	_ = runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "53", "-j", "ACCEPT")
+	_ = runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP")
+	_ = runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "tcp", "--dport", "53", "-j", "DROP")
 	log.Println("[LeakGuard] DNS leak protection disabled")
 }
 

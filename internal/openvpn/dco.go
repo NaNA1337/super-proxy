@@ -9,6 +9,16 @@ import (
 	"strings"
 )
 
+type DCOStatus string
+
+const (
+	DCOStatusSupported DCOStatus = "DCO_SUPPORTED"
+	DCOStatusRequested DCOStatus = "DCO_REQUESTED"
+	DCOStatusActive    DCOStatus = "DCO_ACTIVE"
+	DCOStatusFailed    DCOStatus = "DCO_FAILED"
+	DCOStatusDisabled  DCOStatus = "DCO_DISABLED"
+)
+
 // OpenVPNVersion holds parsed version info
 type OpenVPNVersion struct {
 	Major int
@@ -23,7 +33,6 @@ func DetectOpenVPNVersion(ctx context.Context) *OpenVPNVersion {
 	cmd := exec.CommandContext(ctx, "openvpn", "--version")
 	output, _ := cmd.CombinedOutput()
 	// openvpn --version outputs to stderr and exits with code 1
-	// First line is like: "OpenVPN 2.5.9 x86_64..."
 	lines := strings.Split(string(output), "\n")
 	if len(lines) == 0 {
 		return nil
@@ -60,7 +69,6 @@ func (v *OpenVPNVersion) SupportsDisableDCO() bool {
 }
 
 // DetectDCOCapability checks if the host supports OpenVPN DCO and if the config is compatible.
-// Returns (dcoCapable, supportsDisableDCOFlag).
 func DetectDCOCapability(ctx context.Context, cfgStr string) bool {
 	// 1. Check OpenVPN version — only 2.6+ supports DCO at all
 	version := DetectOpenVPNVersion(ctx)
@@ -68,7 +76,6 @@ func DetectDCOCapability(ctx context.Context, cfgStr string) bool {
 		log.Printf("[DCO] Could not detect OpenVPN version")
 		return false
 	}
-	log.Printf("[DCO] Detected %s", version.Raw)
 
 	if !version.SupportsDisableDCO() {
 		log.Printf("[DCO] OpenVPN %d.%d.%d does not support DCO (requires 2.6+)", version.Major, version.Minor, version.Patch)
@@ -85,9 +92,6 @@ func DetectDCOCapability(ctx context.Context, cfgStr string) bool {
 	}
 
 	// 3. Check config compatibility
-	// DCO currently does not support certain ciphers like AES-128-CBC well in some environments,
-	// or it strictly requires AES-256-GCM / CHACHA20-POLY1305.
-	// For safety, if config forces CBC, we disable DCO.
 	if strings.Contains(cfgStr, "cipher AES-128-CBC") || strings.Contains(cfgStr, "cipher AES-256-CBC") {
 		log.Printf("[DCO] Config contains CBC cipher, which may be incompatible with DCO. Disabling DCO.")
 		return false
@@ -98,12 +102,9 @@ func DetectDCOCapability(ctx context.Context, cfgStr string) bool {
 }
 
 // GetDCOArgs returns the OpenVPN arguments needed based on DCO detection results.
-// For OpenVPN 2.5 and below, no DCO-related args are returned (the flag doesn't exist).
-// For 2.6+, returns --disable-dco if DCO is not available.
 func GetDCOArgs(ctx context.Context, cfgStr string) []string {
 	version := DetectOpenVPNVersion(ctx)
 	if version == nil || !version.SupportsDisableDCO() {
-		// Old OpenVPN — no DCO flags at all
 		return nil
 	}
 
@@ -111,7 +112,20 @@ func GetDCOArgs(ctx context.Context, cfgStr string) []string {
 		return []string{"--disable-dco"}
 	}
 
-	// DCO is available and config is compatible — don't add --disable-dco
-	// (2.6+ enables DCO by default when ovpn_dco is present)
 	return nil
+}
+
+// ParseDCOLogLine scans an OpenVPN runtime output line to determine runtime DCO state.
+func ParseDCOLogLine(line string) DCOStatus {
+	lineLower := strings.ToLower(line)
+	if strings.Contains(lineLower, "cannot open") || strings.Contains(lineLower, "dco failed") || strings.Contains(lineLower, "dco error") {
+		return DCOStatusFailed
+	}
+	if strings.Contains(lineLower, "--disable-dco is present") || strings.Contains(lineLower, "dco disabled") {
+		return DCOStatusDisabled
+	}
+	if strings.Contains(lineLower, "using dco") || strings.Contains(lineLower, "dco device opened") || strings.Contains(lineLower, "dco device ovpn") {
+		return DCOStatusActive
+	}
+	return ""
 }

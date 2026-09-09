@@ -11,6 +11,13 @@ type Config struct {
 	Database   DatabaseConfig   `mapstructure:"database"`
 	Discovery  DiscoveryConfig  `mapstructure:"discovery"`
 	Reputation ReputationConfig `mapstructure:"reputation"`
+	APIKey     string           `mapstructure:"api_key"`
+	API        APIConfig        `mapstructure:"api"`
+}
+
+type APIConfig struct {
+	Key  string `mapstructure:"key"`
+	Port int    `mapstructure:"port"`
 }
 
 type RegionConfig struct {

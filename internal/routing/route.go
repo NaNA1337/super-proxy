@@ -3,6 +3,7 @@ package routing
 import (
 	"fmt"
 	"log"
+	"net"
 	"os/exec"
 	"strings"
 	"sync"
@@ -116,39 +117,15 @@ func GetDefaultGateway() (string, string, error) {
 }
 
 // AddEndpointBypassRule forces underlay traffic to the VPN endpoint to go through the physical NIC
+// using centralized reference counting to prevent prematurely deleting routes shared by multiple tunnels.
 func AddEndpointBypassRule(serverIP string) error {
-	gw, iface, err := GetDefaultGateway()
-	if err != nil {
-		log.Printf("[Routing] Failed to determine default gateway, falling back to ip rule: %v", err)
-		// Fallback to old behavior if we can't find the gateway
-		return runCmd("ip", "rule", "add", "to", serverIP, "lookup", "main", "pref", "10")
-	}
-
-	// P0-5 & Requirement 7: Explicit /32 host route to physical NIC
-	err = runCmd("ip", "route", "add", fmt.Sprintf("%s/32", serverIP), "via", gw, "dev", iface)
-	if err != nil {
-		// If route exists, that's fine, but log it
-		log.Printf("[Routing] Note: failed to add /32 endpoint route for %s: %v", serverIP, err)
-		return err
-	}
-	log.Printf("[Routing] Explicit /32 endpoint route added for %s via %s dev %s", serverIP, gw, iface)
-	return nil
+	return GetEndpointManager().AcquireEndpoint(serverIP)
 }
 
-// RemoveEndpointBypassRule cleans up the underlay bypass rule
+// RemoveEndpointBypassRule decrements the reference count and removes the underlay bypass
+// route when no more tunnels rely on this endpoint.
 func RemoveEndpointBypassRule(serverIP string) error {
-	gw, iface, err := GetDefaultGateway()
-	if err != nil {
-		return runCmd("ip", "rule", "del", "to", serverIP, "lookup", "main", "pref", "10")
-	}
-
-	err = runCmd("ip", "route", "del", fmt.Sprintf("%s/32", serverIP), "via", gw, "dev", iface)
-	if err != nil {
-		log.Printf("[Routing] Note: failed to remove /32 endpoint route for %s: %v", serverIP, err)
-		return err
-	}
-	log.Printf("[Routing] Explicit /32 endpoint route removed for %s", serverIP)
-	return nil
+	return GetEndpointManager().ReleaseEndpoint(serverIP)
 }
 
 func runCmd(name string, args ...string) error {
@@ -159,4 +136,64 @@ func runCmd(name string, args ...string) error {
 		return fmt.Errorf("%s %v failed: %w, output: %s", name, args, err, string(output))
 	}
 	return nil
+}
+
+// GetInterfaceIP returns the primary IPv4 address configured on an interface
+func GetInterfaceIP(ifaceName string) (string, error) {
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get interface %s: %w", ifaceName, err)
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return "", fmt.Errorf("failed to get addresses for %s: %w", ifaceName, err)
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+			return ip.String(), nil
+		}
+	}
+	return "", fmt.Errorf("no IPv4 address found on interface %s", ifaceName)
+}
+
+// SetupDrainingRouting isolates a draining tunnel into its dedicated table (BaseDrainingTable + slot)
+// and pins all existing flows with source IP = tunIP to exit through this draining table.
+// New connections from Xray will NOT match tunIP and will route via the active slot table.
+func SetupDrainingRouting(drainingTableID int, interfaceName string, tunIP string) error {
+	// 1. Flush old routes in draining table
+	runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", drainingTableID))
+
+	// 2. Add default route dev interface in draining table
+	if err := runCmd("ip", "route", "add", "default", "dev", interfaceName, "table", fmt.Sprintf("%d", drainingTableID)); err != nil {
+		return fmt.Errorf("failed to add default route to draining table %d for %s: %w", drainingTableID, interfaceName, err)
+	}
+
+	// 3. Pin existing connections bound to tunIP to this draining table
+	if tunIP != "" {
+		if err := runCmd("ip", "rule", "add", "from", tunIP, "table", fmt.Sprintf("%d", drainingTableID), "pref", "50"); err != nil {
+			log.Printf("[Draining] Note: ip rule add from %s returned: %v", tunIP, err)
+		}
+	}
+
+	// 4. Blackhole IPv6 on draining table
+	runCmd("ip", "-6", "route", "add", "blackhole", "default", "table", fmt.Sprintf("%d", drainingTableID))
+
+	log.Printf("[Draining] Routing setup for draining table %d (dev %s, tunIP %s)", drainingTableID, interfaceName, tunIP)
+	return nil
+}
+
+// ClearDrainingRouting tears down the dedicated draining table and rules
+func ClearDrainingRouting(drainingTableID int, tunIP string) {
+	if tunIP != "" {
+		runCmd("ip", "rule", "del", "from", tunIP, "table", fmt.Sprintf("%d", drainingTableID), "pref", "50")
+	}
+	runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", drainingTableID))
+	log.Printf("[Draining] Cleared draining routing table %d", drainingTableID)
 }
