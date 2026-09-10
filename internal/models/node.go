@@ -42,36 +42,58 @@ type OpenVPNConfigMeta struct {
 	VerifyX509Name  string            `json:"verify_x509_name"`
 }
 
-// Node represents a VPN Gate node
+// NodeUpsertColumns defines the single source of truth for fields refreshed during discovery.
+var NodeUpsertColumns = []string{
+	"score",
+	"country",
+	"country_long",
+	"host_name",
+	"sessions",
+	"uptime",
+	"users",
+	"message",
+	"openvpn_config_base64",
+	"openvpn_config",
+	"endpoints_json",
+	"endpoint_host",
+	"endpoint_port",
+	"endpoint_proto",
+	"total_traffic",
+	"log_type",
+	"operator",
+	"last_seen",
+}
+
+// Node represents a VPN Gate node with stable identity.
 type Node struct {
-	ID        string    `gorm:"primaryKey" json:"id"` // Node identifier: IP or IP:Port
-	HostName  string    `json:"hostname"`
-	IP        string    `gorm:"index" json:"ip"`
-	Score     int       `json:"score"` // Original VPN Gate score
-	Country   string    `gorm:"index" json:"country"`
-	CountryL  string    `json:"country_long"`
-	Sessions  int       `json:"sessions"`
-	Uptime    int64     `json:"uptime"` // in milliseconds
-	Users     int       `json:"users"`
-	Message   string    `json:"message"`
-	OpenVPN   string    `json:"openvpn_config_base64"`
+	ID        string `gorm:"primaryKey;column:id" json:"id"` // Stable node identity (IP)
+	HostName  string `gorm:"column:host_name" json:"hostname"`
+	IP        string `gorm:"index;column:ip" json:"ip"`
+	Score     int    `gorm:"column:score" json:"score"` // Original VPN Gate score
+	Country   string `gorm:"index;column:country" json:"country"`
+	CountryL  string `gorm:"column:country_long" json:"country_long"`
+	Sessions  int    `gorm:"column:sessions" json:"sessions"`
+	Uptime    int64  `gorm:"column:uptime" json:"uptime"` // in milliseconds
+	Users     int    `gorm:"column:users" json:"users"`
+	Message   string `gorm:"column:message" json:"message"`
+	OpenVPN   string `gorm:"column:openvpn_config_base64" json:"openvpn_config_base64"`
 
 	// VPN Gate Discovery metadata
-	TotalTraffic int64  `json:"total_traffic"`
-	LogType      string `json:"log_type"`
-	Operator     string `json:"operator"`
+	TotalTraffic int64  `gorm:"column:total_traffic" json:"total_traffic"`
+	LogType      string `gorm:"column:log_type" json:"log_type"`
+	Operator     string `gorm:"column:operator" json:"operator"`
 
-	// Structured OpenVPN endpoint information
-	EndpointHost  string `gorm:"index" json:"endpoint_host"`
-	EndpointPort  int    `gorm:"index" json:"endpoint_port"`
-	EndpointProto string `json:"endpoint_proto"`
-	OpenVPNConfig string `json:"openvpn_config"` // Decoded .ovpn config
-	EndpointsJSON string `json:"endpoints_json"` // JSON-encoded []OpenVPNEndpoint
-	
-	Status       string    `gorm:"index" json:"status"` // NEW, DISCOVERED, ACTIVE, FAILED, COOLDOWN, DEAD
-	LastSeen     time.Time `json:"last_seen"`
-	FirstSeen    time.Time `json:"first_seen"`
-	FailCount    int       `json:"fail_count"`
+	// Structured OpenVPN endpoint information (separated from Node identity)
+	EndpointHost  string `gorm:"index;column:endpoint_host" json:"endpoint_host"`
+	EndpointPort  int    `gorm:"index;column:endpoint_port" json:"endpoint_port"`
+	EndpointProto string `gorm:"column:endpoint_proto" json:"endpoint_proto"`
+	OpenVPNConfig string `gorm:"column:openvpn_config" json:"openvpn_config"` // Canonical safe local .ovpn config
+	EndpointsJSON string `gorm:"column:endpoints_json" json:"endpoints_json"` // JSON-encoded []OpenVPNEndpoint
+
+	Status    string    `gorm:"index;column:status" json:"status"` // NEW, DISCOVERED, ACTIVE, FAILED, COOLDOWN, DEAD
+	LastSeen  time.Time `gorm:"column:last_seen" json:"last_seen"`
+	FirstSeen time.Time `gorm:"column:first_seen" json:"first_seen"`
+	FailCount int       `gorm:"column:fail_count" json:"fail_count"`
 
 	// Separated concerns using GORM embedded structs
 	Reputation  ReputationMetrics  `gorm:"embedded;embeddedPrefix:rep_" json:"reputation"`
@@ -98,15 +120,23 @@ type NetworkClass struct {
 	IsHosting    bool   `json:"is_hosting"`
 }
 
+// Metric status values
+const (
+	MetricStatusAvailable   = "AVAILABLE"
+	MetricStatusUnavailable = "UNAVAILABLE"
+	MetricStatusNotMeasured = "NOT_MEASURED"
+	MetricStatusError       = "ERROR"
+)
+
 type PerformanceMetrics struct {
-	RTT              int       `json:"rtt_ms"`              // Round-trip time in milliseconds
+	RTT              int       `json:"rtt_ms"`              // Round-trip time in milliseconds (-1 if unmeasured)
 	Throughput       int64     `json:"throughput_bps"`      // Aggregate throughput in bps
 	DownloadSpeed    int64     `json:"download_bps"`        // Download throughput
 	UploadSpeed      int64     `json:"upload_bps"`          // Upload throughput
-	UploadStatus     string    `json:"upload_status"`       // "AVAILABLE", "UNAVAILABLE", "FAILED"
-	SpeedStatus      string    `json:"speed_status"`        // "AVAILABLE", "UNAVAILABLE", "NOT_MEASURED"
-	PacketLoss       float64   `json:"packet_loss_pct"`     // Packet loss percentage (-1 if unavailable)
-	PacketLossStatus string    `json:"packet_loss_status"`  // "AVAILABLE", "UNAVAILABLE", "NOT_MEASURED"
+	UploadStatus     string    `json:"upload_status"`       // AVAILABLE, UNAVAILABLE, NOT_MEASURED, ERROR
+	SpeedStatus      string    `json:"speed_status"`        // AVAILABLE, UNAVAILABLE, NOT_MEASURED, ERROR
+	PacketLoss       float64   `json:"packet_loss_pct"`     // Packet loss percentage (-1 if unmeasured)
+	PacketLossStatus string    `json:"packet_loss_status"`  // AVAILABLE, UNAVAILABLE, NOT_MEASURED, ERROR
 	DurationMs       int64     `json:"duration_ms"`         // Test duration in ms
 	LastChecked      time.Time `json:"last_checked"`
 }

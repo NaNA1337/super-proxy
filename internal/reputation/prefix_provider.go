@@ -2,7 +2,13 @@ package reputation
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
@@ -24,6 +30,8 @@ type PrefixIntel struct {
 	ObservedIPCount  int       `json:"observed_ip_count"`
 	BadIPCount       int       `json:"bad_ip_count"`
 	LastObserved     time.Time `json:"last_observed"`
+	ProviderName     string    `json:"provider_name"`
+	IsExternal       bool      `json:"is_external"`
 }
 
 // PrefixProvider defines the interface for prefix-level reputation providers.
@@ -53,16 +61,16 @@ func (l *LocalPrefixProvider) LookupPrefix(ctx context.Context, prefix string) (
 	since := time.Now().Add(-7 * 24 * time.Hour) // 7-day default evaluation window
 
 	type aggStats struct {
-		ObservedCount  int
-		BadCount       int
+		ObservedCount   int
+		BadCount        int
 		HardRejectCount int
-		VPNCount       int
-		ProxyCount     int
-		TorCount       int
-		HostingCount   int
-		ASN            string
-		ISP            string
-		LastObserved   time.Time
+		VPNCount        int
+		ProxyCount      int
+		TorCount        int
+		HostingCount    int
+		ASN             string
+		ISP             string
+		LastObserved    time.Time
 	}
 
 	var stats aggStats
@@ -90,6 +98,7 @@ func (l *LocalPrefixProvider) LookupPrefix(ctx context.Context, prefix string) (
 		return &PrefixIntel{
 			Prefix:       prefix,
 			LastObserved: time.Now(),
+			ProviderName: l.Name(),
 		}, nil
 	}
 
@@ -107,5 +116,153 @@ func (l *LocalPrefixProvider) LookupPrefix(ctx context.Context, prefix string) (
 		ObservedIPCount:  stats.ObservedCount,
 		BadIPCount:       stats.BadCount,
 		LastObserved:     stats.LastObserved,
+		ProviderName:     l.Name(),
 	}, nil
+}
+
+// ExternalRDAPPrefixProvider queries standard public RDAP registries for CIDR allocation,
+// ASN, and organization data with caching, retry with backoff, and strict timeout controls.
+type ExternalRDAPPrefixProvider struct {
+	client       *http.Client
+	baseURL      string
+	mu           sync.RWMutex
+	cache        map[string]*rdapCacheEntry
+	backoffUntil time.Time
+}
+
+type rdapCacheEntry struct {
+	intel     *PrefixIntel
+	expiresAt time.Time
+}
+
+func NewExternalRDAPPrefixProvider(customBaseURL string) *ExternalRDAPPrefixProvider {
+	url := "https://rdap.arin.net/registry/ip"
+	if customBaseURL != "" {
+		url = strings.TrimRight(customBaseURL, "/")
+	}
+	return &ExternalRDAPPrefixProvider{
+		client:  &http.Client{Timeout: 3 * time.Second},
+		baseURL: url,
+		cache:   make(map[string]*rdapCacheEntry),
+	}
+}
+
+func (e *ExternalRDAPPrefixProvider) Name() string {
+	return "ExternalRDAPPrefixProvider"
+}
+
+func (e *ExternalRDAPPrefixProvider) LookupPrefix(ctx context.Context, prefix string) (*PrefixIntel, error) {
+	// 1. Check in-memory cache
+	e.mu.RLock()
+	if entry, ok := e.cache[prefix]; ok && time.Now().Before(entry.expiresAt) {
+		e.mu.RUnlock()
+		return entry.intel, nil
+	}
+	if time.Now().Before(e.backoffUntil) {
+		e.mu.RUnlock()
+		// Rate limited: provider failure must NEVER condemn the node, return nil without error
+		return nil, nil
+	}
+	e.mu.RUnlock()
+
+	// Extract sample IP from prefix (e.g., "198.51.100.0/24" -> "198.51.100.1")
+	parts := strings.Split(prefix, "/")
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	baseIP := parts[0]
+	parsed := net.ParseIP(baseIP)
+	if parsed == nil {
+		return nil, nil
+	}
+	v4 := parsed.To4()
+	if v4 == nil {
+		return nil, nil
+	}
+	sampleIP := fmt.Sprintf("%d.%d.%d.1", v4[0], v4[1], v4[2])
+
+	reqURL := fmt.Sprintf("%s/%s", e.baseURL, sampleIP)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return nil, nil
+	}
+	req.Header.Set("Accept", "application/rdap+json")
+
+	// Retry loop with backoff (up to 2 retries)
+	var resp *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err = e.client.Do(req)
+		if err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	if err != nil {
+		// Network/provider failure: return nil without error to prevent false BAD categorization
+		return nil, nil
+	}
+	defer resp.Body.Close()
+
+	// Handle 429 rate-limiting with Retry-After
+	if resp.StatusCode == http.StatusTooManyRequests {
+		e.mu.Lock()
+		retryAfterSec := 60
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if s, errAtoi := strconv.Atoi(ra); errAtoi == nil && s > 0 {
+				retryAfterSec = s
+			}
+		}
+		e.backoffUntil = time.Now().Add(time.Duration(retryAfterSec) * time.Second)
+		e.mu.Unlock()
+		return nil, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil
+	}
+
+	var rdapResp struct {
+		Name         string `json:"name"`
+		Handle       string `json:"handle"`
+		Country      string `json:"country"`
+		StartAddress string `json:"startAddress"`
+		EndAddress   string `json:"endAddress"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rdapResp); err != nil {
+		return nil, nil
+	}
+
+	intel := &PrefixIntel{
+		Prefix:       prefix,
+		Organization: rdapResp.Name,
+		LastObserved: time.Now(),
+		ProviderName: e.Name(),
+		IsExternal:   true,
+	}
+
+	// Cache result for 4 hours
+	e.mu.Lock()
+	e.cache[prefix] = &rdapCacheEntry{
+		intel:     intel,
+		expiresAt: time.Now().Add(4 * time.Hour),
+	}
+	e.mu.Unlock()
+
+	return intel, nil
+}
+
+// NullExternalPrefixProvider is used when external prefix intelligence is unavailable or disabled.
+type NullExternalPrefixProvider struct{}
+
+func (n *NullExternalPrefixProvider) Name() string {
+	return "NullExternalPrefixProvider (external prefix intelligence unavailable)"
+}
+
+func (n *NullExternalPrefixProvider) LookupPrefix(ctx context.Context, prefix string) (*PrefixIntel, error) {
+	return nil, nil
 }

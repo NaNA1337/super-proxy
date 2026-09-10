@@ -17,6 +17,7 @@ type ReputationStatus string
 
 const (
 	StatusGood    ReputationStatus = "GOOD"
+	StatusRisky   ReputationStatus = "RISKY"
 	StatusBad     ReputationStatus = "BAD"
 	StatusUnknown ReputationStatus = "UNKNOWN"
 )
@@ -375,10 +376,14 @@ func (q *IPQSProvider) CheckIP(ctx context.Context, ip string) (*ReputationResul
 		res.Status = StatusBad
 		res.HardReject = true
 		res.ProviderReason = fmt.Sprintf("IPQS FraudScore: %d, Bot: %v (Hard Reject)", apiResp.FraudScore, apiResp.BotStatus)
-	} else if apiResp.FraudScore >= 50 {
+	} else if apiResp.FraudScore >= 75 {
 		res.Status = StatusBad
 		res.ScorePenalty = apiResp.FraudScore / 4
-		res.ProviderReason = fmt.Sprintf("IPQS Moderate FraudScore: %d, Penalty: -%d", apiResp.FraudScore, res.ScorePenalty)
+		res.ProviderReason = fmt.Sprintf("IPQS High FraudScore: %d, Penalty: -%d", apiResp.FraudScore, res.ScorePenalty)
+	} else if isVPN || isProxy || isTor || apiResp.FraudScore >= 25 {
+		res.Status = StatusRisky
+		res.ScorePenalty = apiResp.FraudScore / 5
+		res.ProviderReason = fmt.Sprintf("IPQS Risky network trait (FraudScore: %d, VPN=%v, Proxy=%v, Tor=%v)", apiResp.FraudScore, isVPN, isProxy, isTor)
 	} else {
 		res.Status = StatusGood
 		res.ProviderReason = fmt.Sprintf("IPQS Clean (FraudScore: %d)", apiResp.FraudScore)
@@ -496,10 +501,15 @@ func (i *IPInfoProvider) CheckIP(ctx context.Context, ip string) (*ReputationRes
 	isTor := apiResp.Privacy.Tor
 	isResidential := apiResp.Company.Type == "isp" && !isHosting
 
+	status := StatusGood
+	if isHosting || isVPN || isProxy {
+		status = StatusRisky
+	}
+
 	res := &ReputationResult{
 		Provider:      "IPInfo",
 		IP:            ip,
-		Status:        StatusGood,
+		Status:        status,
 		IsVPN:         boolPtr(isVPN),
 		IsProxy:       boolPtr(isProxy),
 		IsTor:         boolPtr(isTor),
@@ -519,7 +529,7 @@ func (i *IPInfoProvider) CheckIP(ctx context.Context, ip string) (*ReputationRes
 			IsTor:        isTor,
 			IsHosting:    isHosting,
 		},
-		ProviderReason: fmt.Sprintf("IPInfo: Org=%s, Hosting=%v, VPN=%v", orgName, isHosting, isVPN),
+		ProviderReason: fmt.Sprintf("IPInfo: Org=%s, Hosting=%v, VPN=%v, Proxy=%v (Status=%s)", orgName, isHosting, isVPN, isProxy, status),
 	}
 
 	return res, nil

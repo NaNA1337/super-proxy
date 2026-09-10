@@ -35,31 +35,33 @@ type Scheduler struct {
 	ManualOverride   map[int]bool
 	XraySupervisor   *xray.Supervisor
 	Benchmarker      func(ctx context.Context, interfaceName string) (*models.PerformanceMetrics, error)
-	ScoringEngine    *ScoringEngine
-	Mu               sync.Mutex
-	ctx              context.Context
-	cancel           context.CancelFunc
-	wg               sync.WaitGroup
-	standbySlotCount atomic.Int64 // Monotonically increasing counter for standby virtual slots
+	ScoringEngine          *ScoringEngine
+	SetupDrainingRoutingFn func(drainingTableID int, interfaceName string, tunIP string) error
+	Mu                     sync.Mutex
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	wg                     sync.WaitGroup
+	standbySlotCount       atomic.Int64 // Monotonically increasing counter for standby virtual slots
 }
 
 func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine, regionCfg config.RegionConfig) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Scheduler{
-		MaxActive:        maxActive,
-		MaxStandby:       maxStandby,
-		RepEngine:        repEngine,
-		RegionConfig:     regionCfg,
-		ActiveSlots:      make(map[int]*openvpn.Tunnel),
-		DrainingSlots:    make(map[int]*openvpn.Tunnel),
-		drainingTableIDs: make(map[int]int),
-		drainingTunIPs:   make(map[int]string),
-		Slots:            NewSlotManager(maxActive),
-		ManualOverride:   make(map[int]bool),
-		Benchmarker:      benchmark.BenchmarkInterface,
-		ScoringEngine:    NewScoringEngine(config.ScoringConfig{}),
-		ctx:              ctx,
-		cancel:           cancel,
+		MaxActive:              maxActive,
+		MaxStandby:             maxStandby,
+		RepEngine:              repEngine,
+		RegionConfig:           regionCfg,
+		ActiveSlots:            make(map[int]*openvpn.Tunnel),
+		DrainingSlots:          make(map[int]*openvpn.Tunnel),
+		drainingTableIDs:       make(map[int]int),
+		drainingTunIPs:         make(map[int]string),
+		Slots:                  NewSlotManager(maxActive),
+		ManualOverride:         make(map[int]bool),
+		Benchmarker:            benchmark.BenchmarkInterface,
+		ScoringEngine:          NewScoringEngine(config.ScoringConfig{}),
+		SetupDrainingRoutingFn: routing.SetupDrainingRouting,
+		ctx:                    ctx,
+		cancel:                 cancel,
 	}
 	// Start virtual slot counter after active + standby range
 	s.standbySlotCount.Store(int64(maxActive + maxStandby + 10))
@@ -316,8 +318,30 @@ func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel)
 	// 3. Isolate existing connections into dedicated Draining Table (200 + slot)
 	drainingTableID := 200 + slot
 	tunIP, _ := routing.GetInterfaceIP(tunnel.Interface)
-	if err := routing.SetupDrainingRouting(drainingTableID, tunnel.Interface, tunIP); err != nil {
-		log.Printf("[Scheduler] Warning: failed to setup draining routing for slot %d: %v", slot, err)
+	setupFn := s.SetupDrainingRoutingFn
+	if setupFn == nil {
+		setupFn = routing.SetupDrainingRouting
+	}
+	if err := setupFn(drainingTableID, tunnel.Interface, tunIP); err != nil {
+		log.Printf("[Scheduler] CRITICAL: failed to setup draining routing for slot %d: %v. Rolling back Xray drain to prevent connection death.", slot, err)
+		metrics.DrainFailures.Inc()
+
+		// Rollback Xray drain to re-include slot in active outbound routing
+		if s.XraySupervisor != nil {
+			if rbErr := s.XraySupervisor.ActivateSlot(slot); rbErr != nil {
+				log.Printf("[Scheduler] CRITICAL: failed to rollback Xray ActivateSlot for slot %d: %v", slot, rbErr)
+				metrics.XrayErrors.Inc()
+			}
+		}
+
+		// Rollback tunnel memory state
+		tunnel.Mu.Lock()
+		tunnel.State = string(SlotActive)
+		tunnel.DrainingStartedAt = time.Time{}
+		tunnel.Mu.Unlock()
+
+		// Slot remains ACTIVE in scheduler
+		return
 	}
 
 	s.drainingTableIDs[slot] = drainingTableID
@@ -427,12 +451,8 @@ func (s *Scheduler) maintainStandbyPool() {
 	log.Printf("[Scheduler] Evaluating node %s (%s, score=%d, fallback=%v) for standby pool",
 		node.IP, node.Country, node.Score, selection.IsFallbackNode)
 
-	// Prefix Intelligence check
-	badLimit := 3
-	if s.ScoringEngine != nil && s.ScoringEngine.cfg.PrefixBadLimit > 0 {
-		badLimit = s.ScoringEngine.cfg.PrefixBadLimit
-	}
-	_, prefixPenalty, prefixReason := reputation.EvaluatePrefixRisk(database.DB, node.IP, badLimit)
+	// Windowed Prefix Intelligence check (multi-window statistical profile 24h/7d/30d/90d)
+	_, prefixPenalty, prefixReason := reputation.EvaluatePrefixRisk(database.DB, node.IP, 0)
 
 	// Reputation Check
 	if s.RepEngine != nil {

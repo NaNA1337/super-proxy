@@ -125,7 +125,7 @@ func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) Ben
 	}
 	mss := mtu - 40 // Standard IPv4 TCP MSS
 
-	// Measure RTT & packet loss probes
+	// Measure RTT probes
 	const probeCount = 5
 	successCount := 0
 	var totalRTT int64
@@ -140,13 +140,36 @@ func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) Ben
 		}
 	}
 	rttMs := int64(-1)
-	packetLossStatus := "AVAILABLE"
-	packetLossPct := -1.0
 	if successCount > 0 {
 		rttMs = totalRTT / int64(successCount)
-		packetLossPct = (float64(probeCount-successCount) / float64(probeCount)) * 100.0
-	} else {
-		packetLossStatus = "UNAVAILABLE"
+	}
+
+	// Measure genuine ICMP packet loss via ping (never fake from HTTP probe)
+	packetLossStatus := "NOT_MEASURED"
+	packetLossPct := -1.0
+	if len(ifaces) > 0 {
+		pingTarget := "1.1.1.1"
+		pingCmd := exec.Command("ping", "-c", "5", "-W", "1", "-I", ifaces[0], pingTarget)
+		out, err := pingCmd.CombinedOutput()
+		outStr := string(out)
+		if err == nil || strings.Contains(outStr, "packet loss") {
+			fields := strings.Split(outStr, ",")
+			for _, f := range fields {
+				if strings.Contains(f, "packet loss") {
+					parts := strings.Fields(strings.TrimSpace(f))
+					if len(parts) > 0 {
+						valStr := strings.TrimSuffix(parts[0], "%")
+						if val, pErr := strconv.ParseFloat(valStr, 64); pErr == nil {
+							packetLossPct = val
+							packetLossStatus = "AVAILABLE"
+							break
+						}
+					}
+				}
+			}
+		} else {
+			packetLossStatus = "UNAVAILABLE"
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), duration)

@@ -14,6 +14,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/metrics"
+	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/routing"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
@@ -129,14 +130,13 @@ func main() {
 	}
 
 	// 5. Initial Discovery (Bootstrap pool if empty)
-	nodeUpsertColumns := []string{"score", "country", "country_long", "sessions", "uptime", "users", "message", "openvpn_config_base64", "last_seen"}
 	nodes, err := discovery.FetchAndParseNodes(cfg.Discovery.URL)
 	if err != nil {
 		log.Printf("Warning: Failed initial VPN Gate fetch (will retry later): %v", err)
 	} else {
 		database.DB.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "id"}},
-			DoUpdates: clause.AssignmentColumns(nodeUpsertColumns),
+			DoUpdates: clause.AssignmentColumns(models.NodeUpsertColumns),
 		}).Create(&nodes)
 		log.Printf("Bootstrapped %d nodes into database.", len(nodes))
 	}
@@ -191,7 +191,7 @@ func main() {
 		discoveryInterval = 15 * time.Minute
 	}
 	discoveryCtx, cancelDiscovery := context.WithCancel(context.Background())
-	go runPeriodicDiscovery(discoveryCtx, cfg.Discovery.URL, discoveryInterval, nodeUpsertColumns)
+	go runPeriodicDiscovery(discoveryCtx, cfg.Discovery.URL, discoveryInterval, models.NodeUpsertColumns)
 	log.Printf("Periodic discovery refresh configured every %v", discoveryInterval)
 
 	// 10. Initialize Agent API

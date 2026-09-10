@@ -260,14 +260,25 @@ func (e *Engine) mergeProviderResult(finalResult *Result, res *ReputationResult,
 	if res.Status == StatusUnknown {
 		*unknownCount++
 		finalResult.ProviderReason += fmt.Sprintf("[%s: UNKNOWN - %s] ", res.Provider, res.ProviderReason)
-	} else if res.HardReject {
+	} else if res.HardReject || res.Status == StatusBad {
 		finalResult.Status = StatusBad
-		finalResult.HardReject = true
-		finalResult.ProviderReason += fmt.Sprintf("[%s: HARD REJECT - %s] ", res.Provider, res.ProviderReason)
-	} else if res.ScorePenalty > 0 {
-		finalResult.Status = StatusBad
+		if res.HardReject {
+			finalResult.HardReject = true
+			finalResult.ProviderReason += fmt.Sprintf("[%s: HARD REJECT - %s] ", res.Provider, res.ProviderReason)
+		} else {
+			finalResult.ProviderReason += fmt.Sprintf("[%s: BAD - %s] ", res.Provider, res.ProviderReason)
+		}
+	} else if res.Status == StatusRisky || res.ScorePenalty > 0 || res.NetworkInfo.IsVPN || res.NetworkInfo.IsHosting || res.NetworkInfo.IsProxy {
+		// Network traits (VPN/Hosting/Proxy) and score penalties represent elevated risk, NOT malicious intent!
+		if finalResult.Status != StatusBad {
+			finalResult.Status = StatusRisky
+		}
 		finalResult.ScorePenalty += res.ScorePenalty
-		finalResult.ProviderReason += fmt.Sprintf("[%s: PENALTY (-%d) - %s] ", res.Provider, res.ScorePenalty, res.ProviderReason)
+		if res.ScorePenalty > 0 {
+			finalResult.ProviderReason += fmt.Sprintf("[%s: RISKY/PENALTY (-%d) - %s] ", res.Provider, res.ScorePenalty, res.ProviderReason)
+		} else {
+			finalResult.ProviderReason += fmt.Sprintf("[%s: RISKY - %s] ", res.Provider, res.ProviderReason)
+		}
 	} else {
 		finalResult.ProviderReason += fmt.Sprintf("[%s: %s] ", res.Provider, res.ProviderReason)
 	}

@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -39,26 +38,20 @@ type Tunnel struct {
 
 // StartTunnel decodes config, injects route-nopull, and starts the OpenVPN process
 func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel, error) {
-	// 1. Validate & decode untrusted config
-	rawConfig, _, err := discovery.ParseOpenVPNConfig(node.OpenVPN)
+	// 1. Validate untrusted config and generate safe canonical local config
+	safeConfigStr, _, err := discovery.ParseOpenVPNConfig(node.OpenVPN)
 	if err != nil {
 		return nil, fmt.Errorf("failed to validate untrusted openvpn config: %w", err)
 	}
-	cfgStr := rawConfig
 
-	// 2. Inject route-nopull to prevent overwriting main routing table
-	if !strings.Contains(cfgStr, "route-nopull") {
-		cfgStr += "\nroute-nopull\n"
-	}
-
-	// 3. Write to temp file
+	// 2. Write strictly validated safe config to temp file (safeConfigStr already includes route-nopull)
 	tmpFile, err := os.CreateTemp("", fmt.Sprintf("ovpn_slot%d_*.conf", slotIndex))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp config file: %w", err)
 	}
 	defer tmpFile.Close()
 
-	if _, err := tmpFile.WriteString(cfgStr); err != nil {
+	if _, err := tmpFile.WriteString(safeConfigStr); err != nil {
 		return nil, err
 	}
 
@@ -66,23 +59,22 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 
 	ctxChild, cancel := context.WithCancel(ctx)
 
-	// 4. Prevent routing recursion (P0-5) — MUST succeed before starting OpenVPN
+	// 3. Prevent routing recursion (P0-5) — MUST succeed before starting OpenVPN
 	if err := routing.AddEndpointBypassRule(node.IP); err != nil {
 		cancel()
 		os.Remove(tmpFile.Name())
 		return nil, fmt.Errorf("FATAL: failed to add endpoint bypass rule for %s, refusing to start tunnel to prevent routing recursion: %w", node.IP, err)
 	}
 
-	// 5. Build OpenVPN arguments
+	// 4. Build OpenVPN arguments (script execution completely disabled, NO --script-security)
 	args := []string{
 		"--config", tmpFile.Name(),
 		"--dev", interfaceName,
 		"--auth-nocache",
-		"--script-security", "2",
 	}
 
 	// Version-aware DCO handling
-	dcoArgs := GetDCOArgs(ctxChild, cfgStr)
+	dcoArgs := GetDCOArgs(ctxChild, safeConfigStr)
 	args = append(args, dcoArgs...)
 
 	/* #nosec G204 */

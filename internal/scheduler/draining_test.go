@@ -26,7 +26,7 @@ func TestDraining_LifecycleAndState(t *testing.T) {
 	mockTunnel := &openvpn.Tunnel{
 		ID:        "slot-0",
 		SlotIndex: 0,
-		Interface: "tun0",
+		Interface: "lo",
 		Node:      node,
 		State:     "ACTIVE",
 	}
@@ -92,7 +92,7 @@ func TestDraining_StandbyPromotionDoesNotOverwriteDraining(t *testing.T) {
 	oldTunnel := &openvpn.Tunnel{
 		ID:        "slot-0",
 		SlotIndex: 0,
-		Interface: "tun0",
+		Interface: "lo",
 		Node:      oldNode,
 		State:     "ACTIVE",
 	}
@@ -169,7 +169,7 @@ func TestDraining_XrayActiveSetCoordination(t *testing.T) {
 	mockTunnel := &openvpn.Tunnel{
 		ID:        "slot-0",
 		SlotIndex: 0,
-		Interface: "tun0",
+		Interface: "lo",
 		Node: &models.Node{
 			ID:     "node-xray-1",
 			IP:     "192.0.2.1",

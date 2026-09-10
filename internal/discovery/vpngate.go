@@ -81,7 +81,7 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 
 		endpointsJSON, _ := json.Marshal(meta.Endpoints)
 
-		id := fmt.Sprintf("%s:%d", ip, meta.PrimaryEndpoint.Port)
+		id := ip
 
 		node := models.Node{
 			ID:            id,

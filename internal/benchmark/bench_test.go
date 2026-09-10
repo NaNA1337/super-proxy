@@ -17,12 +17,7 @@ func TestBenchmark_RealMetricsCalculation(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/rtt":
-			count := probeCount.Add(1)
-			if count == 2 {
-				// Drop the 2nd probe to verify packet loss calculation
-				http.Error(w, "server error", http.StatusInternalServerError)
-				return
-			}
+			probeCount.Add(1)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("OK"))
 		case "/down":
@@ -45,6 +40,7 @@ func TestBenchmark_RealMetricsCalculation(t *testing.T) {
 
 	cfg := BenchmarkConfig{
 		RTTTargetURL:  ts.URL + "/rtt",
+		ICMPTarget:    "127.0.0.1",
 		DownloadURL:   ts.URL + "/down",
 		UploadURL:     ts.URL + "/up",
 		DownloadBytes: 100000,
@@ -67,16 +63,85 @@ func TestBenchmark_RealMetricsCalculation(t *testing.T) {
 	if metrics.Throughput <= 0 {
 		t.Errorf("expected Throughput > 0, got %d", metrics.Throughput)
 	}
-	// We dropped 1 out of 5 probes: packet loss should be 20.0%
-	expectedLoss := 20.0
-	if metrics.PacketLoss != expectedLoss {
-		t.Errorf("expected PacketLoss %.1f%%, got %.1f%%", expectedLoss, metrics.PacketLoss)
+	if metrics.SpeedStatus != StatusAvailable {
+		t.Errorf("expected SpeedStatus AVAILABLE, got %s", metrics.SpeedStatus)
 	}
-	if metrics.UploadStatus != "AVAILABLE" {
+	if metrics.PacketLossStatus != StatusAvailable {
+		t.Errorf("expected PacketLossStatus AVAILABLE with ICMP ping, got %s", metrics.PacketLossStatus)
+	}
+	if metrics.PacketLoss < 0 {
+		t.Errorf("expected non-negative packet loss, got %.1f", metrics.PacketLoss)
+	}
+	if metrics.UploadStatus != StatusAvailable {
 		t.Errorf("expected UploadStatus AVAILABLE, got %s", metrics.UploadStatus)
 	}
 	if metrics.UploadSpeed <= 0 {
 		t.Errorf("expected UploadSpeed > 0, got %d", metrics.UploadSpeed)
+	}
+}
+
+func TestBenchmark_NoICMPTargetNeverReportsAvailable(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer ts.Close()
+
+	cfg := BenchmarkConfig{
+		RTTTargetURL:  ts.URL,
+		ICMPTarget:    "", // NO ICMP target
+		DownloadURL:   ts.URL,
+		DownloadBytes: 100,
+		Timeout:       2 * time.Second,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	metrics, err := BenchmarkInterfaceWithConfig(ctx, "lo", cfg)
+	if err != nil {
+		t.Fatalf("unexpected benchmark failure: %v", err)
+	}
+
+	// Strict requirement: Without genuine ICMP measurement, packet loss must NOT be AVAILABLE or 0%
+	if metrics.PacketLossStatus == StatusAvailable {
+		t.Fatalf("PacketLossStatus must NOT be AVAILABLE when ICMP was not measured, got %s", metrics.PacketLossStatus)
+	}
+	if metrics.PacketLossStatus != StatusNotMeasured {
+		t.Errorf("expected PacketLossStatus NOT_MEASURED, got %s", metrics.PacketLossStatus)
+	}
+	if metrics.PacketLoss != -1.0 {
+		t.Errorf("expected PacketLoss -1.0 when unmeasured, got %.1f", metrics.PacketLoss)
+	}
+}
+
+func TestBenchmark_UnmeasuredSpeedAndUpload(t *testing.T) {
+	cfg := BenchmarkConfig{
+		RTTTargetURL:  "",
+		ICMPTarget:    "",
+		DownloadURL:   "",
+		UploadURL:     "",
+		DownloadBytes: 0,
+		UploadBytes:   0,
+		Timeout:       1 * time.Second,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	metrics, err := BenchmarkInterfaceWithConfig(ctx, "lo", cfg)
+	if err != nil {
+		t.Fatalf("unexpected benchmark failure: %v", err)
+	}
+
+	if metrics.SpeedStatus != StatusNotMeasured {
+		t.Errorf("expected SpeedStatus NOT_MEASURED, got %s", metrics.SpeedStatus)
+	}
+	if metrics.UploadStatus != StatusNotMeasured {
+		t.Errorf("expected UploadStatus NOT_MEASURED, got %s", metrics.UploadStatus)
+	}
+	if metrics.PacketLossStatus != StatusNotMeasured {
+		t.Errorf("expected PacketLossStatus NOT_MEASURED, got %s", metrics.PacketLossStatus)
 	}
 }
 

@@ -372,9 +372,11 @@ func (s *Supervisor) generateBalancers() []map[string]interface{} {
 	return balancers
 }
 
-func (s *Supervisor) syncActiveSlotsLocked(activeSlots []int) error {
+// applyCandidateRoutingLocked applies candidate routing rules to Xray runtime and verifies them.
+// It DOES NOT mutate s.activeOutbounds, enabling a clean transactional candidate model.
+func (s *Supervisor) applyCandidateRoutingLocked(candidateSlots []int, drainingSlot int) error {
 	slotMap := make(map[int]bool)
-	for _, sl := range activeSlots {
+	for _, sl := range candidateSlots {
 		if sl >= 0 && sl < s.slotCount {
 			slotMap[sl] = true
 		}
@@ -385,12 +387,6 @@ func (s *Supervisor) syncActiveSlotsLocked(activeSlots []int) error {
 		sorted = append(sorted, sl)
 	}
 	sort.Ints(sorted)
-
-	// Update activeOutbounds map
-	for i := 0; i < s.slotCount; i++ {
-		tag := fmt.Sprintf("exit-%d", i)
-		s.activeOutbounds[tag] = slotMap[i]
-	}
 
 	// Build routing rules replacement
 	rules := []map[string]interface{}{
@@ -455,17 +451,52 @@ func (s *Supervisor) syncActiveSlotsLocked(activeSlots []int) error {
 		return fmt.Errorf("failed to sync active slots via xray api adrules: %w (output: %s)", err, string(out))
 	}
 
-	// Active-set runtime read-back: verify Xray routing rules actually reflect the requested active slots
-	if err := s.verifyRuntimeRoutingLocked(sorted, -1); err != nil {
-		return fmt.Errorf("runtime read-back verification failed after syncing active slots: %w", err)
+	// Active-set runtime read-back: verify Xray routing rules actually reflect the candidate active slots
+	if err := s.verifyRuntimeRoutingLocked(sorted, drainingSlot); err != nil {
+		return fmt.Errorf("runtime read-back verification failed for candidate slots %v: %w", sorted, err)
 	}
 
-	log.Printf("[XraySupervisor] Active slots synced to %v (routing rule updated via adrules, verified via runtime read-back, NO rmo called)", sorted)
 	return nil
 }
 
+func (s *Supervisor) syncActiveSlotsLocked(activeSlots []int) error {
+	oldSlots := s.getActiveSlotsLocked()
+
+	// 1. Apply candidate state to runtime
+	if err := s.applyCandidateRoutingLocked(activeSlots, -1); err != nil {
+		// Rollback runtime to old state if candidate application failed
+		if rbErr := s.applyCandidateRoutingLocked(oldSlots, -1); rbErr != nil {
+			log.Printf("[XraySupervisor] CRITICAL SAFETY STATE: rollback after sync failure also failed: %v", rbErr)
+		}
+		return err
+	}
+
+	// 2. COMMIT memory state ONLY after runtime application and verification succeed
+	slotMap := make(map[int]bool)
+	for _, sl := range activeSlots {
+		if sl >= 0 && sl < s.slotCount {
+			slotMap[sl] = true
+		}
+	}
+	for i := 0; i < s.slotCount; i++ {
+		tag := fmt.Sprintf("exit-%d", i)
+		s.activeOutbounds[tag] = slotMap[i]
+	}
+
+	log.Printf("[XraySupervisor] Active slots TRANSACTION COMMITTED to %v", activeSlots)
+	return nil
+}
+
+type lsRulesResponse struct {
+	Rules []struct {
+		RuleTag     string `json:"ruleTag"`
+		Tag         string `json:"tag"`
+		BalancerTag string `json:"balancerTag"`
+	} `json:"rules"`
+}
+
 // verifyRuntimeRoutingLocked performs an active-set runtime read-back via Xray API (lsrules and bi)
-// to strictly verify that Xray has committed the routing configuration.
+// to strictly verify that Xray has committed the routing configuration using exact-set comparisons.
 func (s *Supervisor) verifyRuntimeRoutingLocked(expectedSlots []int, drainingSlot int) error {
 	/* #nosec G204 */
 	cmd := exec.Command(s.xrayBin, "api", "lsrules", "--server="+s.apiAddr)
@@ -474,28 +505,48 @@ func (s *Supervisor) verifyRuntimeRoutingLocked(expectedSlots []int, drainingSlo
 		return fmt.Errorf("runtime read-back query to xray lsrules failed: %w (output: %s)", err, string(out))
 	}
 
-	outStr := string(out)
+	var lsResp lsRulesResponse
+	if parseErr := json.Unmarshal(out, &lsResp); parseErr != nil {
+		return fmt.Errorf("failed to parse xray lsrules json output: %w (raw: %s)", parseErr, string(out))
+	}
 
-	// 1. Verify active-balancer-rule is loaded
-	if !strings.Contains(outStr, `"ruleTag": "active-balancer-rule"`) {
-		return fmt.Errorf("runtime read-back mismatch: active-balancer-rule not found in rules: %s", outStr)
+	// 1. Locate active-balancer-rule
+	var activeRule *struct {
+		RuleTag     string `json:"ruleTag"`
+		Tag         string `json:"tag"`
+		BalancerTag string `json:"balancerTag"`
+	}
+	for i := range lsResp.Rules {
+		if lsResp.Rules[i].RuleTag == "active-balancer-rule" {
+			activeRule = &lsResp.Rules[i]
+			break
+		}
+	}
+	if activeRule == nil {
+		return fmt.Errorf("runtime read-back mismatch: active-balancer-rule not found in rules: %s", string(out))
 	}
 
 	// 2. If a slot is DRAINING, strictly verify it is NOT targeted as the direct outbound tag
 	if drainingSlot >= 0 {
 		drainingTag := fmt.Sprintf("exit-%d", drainingSlot)
-		if strings.Contains(outStr, fmt.Sprintf(`"tag": "%s"`, drainingTag)) {
-			return fmt.Errorf("CRITICAL VIOLATION: draining slot %s still present as target in active routing rules: %s", drainingTag, outStr)
+		if activeRule.Tag == drainingTag {
+			return fmt.Errorf("CRITICAL VIOLATION: draining slot %s is targeted directly by active-balancer-rule", drainingTag)
 		}
 	}
 
-	// 3. Verify the expected target balancer or outbound is present
-	if len(expectedSlots) == 1 {
-		expectedTag := fmt.Sprintf("exit-%d", expectedSlots[0])
-		if !strings.Contains(outStr, fmt.Sprintf(`"tag": "%s"`, expectedTag)) {
-			return fmt.Errorf("runtime read-back mismatch: expected single outbound %s not in rules: %s", expectedTag, outStr)
+	// 3. Exact comparison of the active target
+	if len(expectedSlots) == 0 {
+		if activeRule.Tag != "block" && activeRule.Tag != "" {
+			return fmt.Errorf("runtime read-back mismatch: expected block rule for empty active slots, got tag %s", activeRule.Tag)
 		}
-	} else if len(expectedSlots) > 1 {
+	} else if len(expectedSlots) == 1 {
+		expectedTag := fmt.Sprintf("exit-%d", expectedSlots[0])
+		// Strict exact equality comparison - never substring contains (e.g. exit-1 vs exit-10)
+		if activeRule.Tag != expectedTag {
+			return fmt.Errorf("runtime read-back mismatch: expected exact single outbound tag %q, got %q", expectedTag, activeRule.Tag)
+		}
+	} else {
+		// Multi-slot: verify balancer and exact selector set
 		tagParts := make([]string, len(expectedSlots))
 		for idx, sl := range expectedSlots {
 			tagParts[idx] = fmt.Sprintf("%d", sl)
@@ -508,6 +559,7 @@ func (s *Supervisor) verifyRuntimeRoutingLocked(expectedSlots []int, drainingSlo
 		if errBi != nil || !strings.Contains(string(outBi), "Selects:") {
 			return fmt.Errorf("runtime read-back mismatch: balancer %s not active via bi: %v (output: %s)", expectedBalancer, errBi, string(outBi))
 		}
+
 		// Parse structured selectors from balancer output
 		actualSelectors := make(map[string]bool)
 		inSelects := false
@@ -560,35 +612,6 @@ func (s *Supervisor) verifyRuntimeRoutingLocked(expectedSlots []int, drainingSlo
 	return nil
 }
 
-// rollbackRoutingLocked restores previous desired slot state on runtime failure.
-func (s *Supervisor) rollbackRoutingLocked(oldSlots []int) {
-	log.Printf("[XraySupervisor] ROLLBACK: Reverting Xray runtime routing to previous desired slots %v", oldSlots)
-
-	// Restore internal memory state
-	for i := 0; i < s.slotCount; i++ {
-		t := fmt.Sprintf("exit-%d", i)
-		s.activeOutbounds[t] = false
-	}
-	for _, sl := range oldSlots {
-		t := fmt.Sprintf("exit-%d", sl)
-		s.activeOutbounds[t] = true
-	}
-
-	// Re-apply old desired configuration to Xray runtime
-	if syncErr := s.syncActiveSlotsLocked(oldSlots); syncErr != nil {
-		log.Printf("[XraySupervisor] CRITICAL DEGRADED SAFETY STATE: rollback sync failed: %v", syncErr)
-		return
-	}
-
-	// Verify old configuration is restored
-	if verifyErr := s.verifyRuntimeRoutingLocked(oldSlots, -1); verifyErr != nil {
-		log.Printf("[XraySupervisor] CRITICAL DEGRADED SAFETY STATE: rollback verification failed: %v", verifyErr)
-		return
-	}
-
-	log.Printf("[XraySupervisor] Rollback SUCCESSFUL: Xray runtime restored to %v", oldSlots)
-}
-
 func (s *Supervisor) getActiveSlotsLocked() []int {
 	var active []int
 	for i := 0; i < s.slotCount; i++ {
@@ -601,7 +624,7 @@ func (s *Supervisor) getActiveSlotsLocked() []int {
 	return active
 }
 
-// DrainingSlot transitions a slot to DRAINING without removing its outbound handler.
+// DrainingSlot transitions a slot to DRAINING using a candidate-commit transactional model.
 // It removes the slot from active routing via Xray API adrules so new connections
 // will never route to this slot, while existing TCP streams remain alive on their socket.
 // It performs a runtime read-back to strictly guarantee the draining slot is excluded.
@@ -616,7 +639,6 @@ func (s *Supervisor) DrainingSlot(slot int) error {
 	}
 
 	oldSlots := s.getActiveSlotsLocked()
-
 	surviving := []int{}
 	for _, sl := range oldSlots {
 		if sl != slot {
@@ -624,48 +646,56 @@ func (s *Supervisor) DrainingSlot(slot int) error {
 		}
 	}
 
+	// 1. Apply candidate state to runtime and verify
+	if err := s.applyCandidateRoutingLocked(surviving, slot); err != nil {
+		// Rollback runtime to old state
+		if rbErr := s.applyCandidateRoutingLocked(oldSlots, -1); rbErr != nil {
+			log.Printf("[XraySupervisor] CRITICAL SAFETY STATE: rollback after drain slot %d failed: %v", slot, rbErr)
+		}
+		return fmt.Errorf("failed to drain slot %d in Xray runtime: %w", slot, err)
+	}
+
+	// 2. COMMIT memory state ONLY after runtime application and verification succeed
 	s.activeOutbounds[tag] = false
-	if err := s.syncActiveSlotsLocked(surviving); err != nil {
-		s.rollbackRoutingLocked(oldSlots)
-		return fmt.Errorf("failed to sync active slots during drain of slot %d: %w", slot, err)
-	}
-
-	// Strict runtime read-back verification for the draining slot
-	if err := s.verifyRuntimeRoutingLocked(surviving, slot); err != nil {
-		s.rollbackRoutingLocked(oldSlots)
-		return fmt.Errorf("draining runtime read-back verification failed for slot %d: %w", slot, err)
-	}
-
-	log.Printf("[XraySupervisor] Slot %d successfully DRAINING (verified via active-set runtime read-back)", slot)
+	log.Printf("[XraySupervisor] Slot %d draining TRANSACTION COMMITTED (surviving=%v)", slot, surviving)
 	return nil
 }
 
-// ActivateSlot promotes a slot to ACTIVE status and updates Xray routing rules.
+// ActivateSlot promotes a slot to ACTIVE status using a candidate-commit transactional model.
 func (s *Supervisor) ActivateSlot(slot int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tag := fmt.Sprintf("exit-%d", slot)
+	if s.activeOutbounds[tag] {
+		return nil
+	}
+
 	oldSlots := s.getActiveSlotsLocked()
-
-	activeSet := make(map[int]bool)
+	candidateSet := make(map[int]bool)
 	for _, sl := range oldSlots {
-		activeSet[sl] = true
+		candidateSet[sl] = true
 	}
-	activeSet[slot] = true
+	candidateSet[slot] = true
 
-	active := make([]int, 0, len(activeSet))
-	for sl := range activeSet {
-		active = append(active, sl)
+	candidateSlots := make([]int, 0, len(candidateSet))
+	for sl := range candidateSet {
+		candidateSlots = append(candidateSlots, sl)
 	}
-	sort.Ints(active)
+	sort.Ints(candidateSlots)
 
+	// 1. Apply candidate state to runtime and verify
+	if err := s.applyCandidateRoutingLocked(candidateSlots, -1); err != nil {
+		// Rollback runtime to old state
+		if rbErr := s.applyCandidateRoutingLocked(oldSlots, -1); rbErr != nil {
+			log.Printf("[XraySupervisor] CRITICAL SAFETY STATE: rollback after activate slot %d failed: %v", slot, rbErr)
+		}
+		return fmt.Errorf("failed to activate slot %d in Xray runtime: %w", slot, err)
+	}
+
+	// 2. COMMIT memory state ONLY after runtime application and verification succeed
 	s.activeOutbounds[tag] = true
-
-	if err := s.syncActiveSlotsLocked(active); err != nil {
-		s.rollbackRoutingLocked(oldSlots)
-		return fmt.Errorf("failed to activate slot %d in Xray routing: %w", slot, err)
-	}
+	log.Printf("[XraySupervisor] Slot %d activation TRANSACTION COMMITTED (active=%v)", slot, candidateSlots)
 	return nil
 }
 

@@ -37,10 +37,24 @@ func StartServerWithAddr(listenAddr string, port int, schedulerInstance *schedul
 
 	mux := http.NewServeMux()
 
-	// Middleware chain: Rate Limit FIRST (outer), then Authentication (inner)
-	// This ensures unauthenticated brute-force attempts are rate-limited
+	// panicRecoveryMiddleware recovers from panics and limits request body size
+	panicRecoveryMiddleware := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[AgentAPI] CRITICAL PANIC RECOVERED: %v", rec)
+					http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				}
+			}()
+			// 1MB request body limit
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	// Middleware chain: Panic Recovery (outermost) -> Rate Limit -> Auth (innermost)
 	secureChain := func(h http.Handler) http.Handler {
-		return rateLimitMiddleware(authMiddleware(h))
+		return panicRecoveryMiddleware(rateLimitMiddleware(authMiddleware(h)))
 	}
 
 	mux.Handle("/api/v1/status", secureChain(http.HandlerFunc(handleStatus)))

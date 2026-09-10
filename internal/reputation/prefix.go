@@ -259,9 +259,11 @@ func QueryPrefixWindow(ctx context.Context, db *gorm.DB, prefix string, window P
 	}, nil
 }
 
-// EvaluatePrefixRisk evaluates subnet risk over a 7-day window.
-// It avoids condemning an entire /24 (256 addresses) on small numbers of bad samples,
-// instead considering bad_ratio, sample density, hard_reject_ratio, and distinct bad IPs.
+// EvaluatePrefixRisk evaluates subnet risk across multiple sliding windows (24h, 7d, 30d, 90d).
+// It evaluates statistical density (sample_count, distinct_ip_count, bad_ratio, hard_reject_ratio,
+// unknown_ratio, average_score, ASN diversity, ISP diversity, and network-type density)
+// rather than using a simplistic hardcoded bad IP threshold (badLimit).
+// The badLimit parameter is retained strictly for backward compatibility and is not used to condemn subnets.
 func EvaluatePrefixRisk(db *gorm.DB, ipStr string, badLimit int) (isHighRisk bool, penalty int, explanation string) {
 	if db == nil {
 		return false, 0, ""
@@ -271,47 +273,74 @@ func EvaluatePrefixRisk(db *gorm.DB, ipStr string, badLimit int) (isHighRisk boo
 		return false, 0, ""
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Query 7-day observation window
-	windowStats, err := QueryPrefixWindow(ctx, db, prefix, Window7d)
-	if err != nil || windowStats == nil || windowStats.SampleCount == 0 {
+	// Query multiple observation windows
+	w24h, _ := QueryPrefixWindow(ctx, db, prefix, Window24h)
+	w7d, _ := QueryPrefixWindow(ctx, db, prefix, Window7d)
+	w30d, _ := QueryPrefixWindow(ctx, db, prefix, Window30d)
+
+	// Primary window for evaluation is 7d, enriched with 24h short-term spikes and 30d baseline
+	primary := w7d
+	if primary == nil || primary.SampleCount == 0 {
+		primary = w24h
+	}
+	if primary == nil || primary.SampleCount == 0 {
+		primary = w30d
+	}
+
+	if primary == nil || primary.SampleCount == 0 {
 		return false, 0, fmt.Sprintf("Prefix %s: no prior observations", prefix)
 	}
 
-	// 1. Small sample count (< 4): do not condemn whole /24, apply minor soft penalty at most
-	if windowStats.SampleCount < 4 {
-		if windowStats.BadRatio >= 0.75 {
-			return false, 5, fmt.Sprintf("Prefix %s: %d/%d bad samples (insufficient sample density for high risk classification, soft penalty: -5)",
-				prefix, windowStats.BadCount, windowStats.SampleCount)
+	// 1. Low sample density (< 4): do not condemn whole /24.
+	// Even if 3 bad out of 3 samples, sample density is too low for hard subnet block.
+	if primary.SampleCount < 4 {
+		if primary.BadRatio >= 0.75 {
+			return false, 5, fmt.Sprintf("Prefix %s: %d/%d bad samples (sparse sample density, soft penalty: -5)",
+				prefix, primary.BadCount, primary.SampleCount)
 		}
-		return false, 0, fmt.Sprintf("Prefix %s: %d/%d bad samples (clean / insufficient samples)",
-			prefix, windowStats.BadCount, windowStats.SampleCount)
+		return false, 0, fmt.Sprintf("Prefix %s: %d/%d bad samples (sparse / low density, allowed)",
+			prefix, primary.BadCount, primary.SampleCount)
 	}
 
-	// 2. High sample count with low bad ratio (e.g. 3/2000 bad IPs): cleanly allowed
-	if windowStats.BadRatio < 0.15 && windowStats.HardRejectRatio < 0.05 {
-		return false, 0, fmt.Sprintf("Prefix %s: LOW risk (bad_ratio=%.2f%%, %d bad out of %d samples)",
-			prefix, windowStats.BadRatio*100.0, windowStats.BadCount, windowStats.SampleCount)
+	// 2. High sample count with low bad ratio (e.g. 3 bad out of 1000 samples = 0.3%):
+	// Must be cleanly ALLOWED without penalty!
+	if primary.BadRatio < 0.10 && primary.HardRejectRatio < 0.05 {
+		return false, 0, fmt.Sprintf("Prefix %s: LOW risk (bad_ratio=%.2f%%, hard_reject_ratio=%.2f%%, %d/%d samples, ASN=%d, ISP=%d)",
+			prefix, primary.BadRatio*100.0, primary.HardRejectRatio*100.0, primary.BadCount, primary.SampleCount, primary.ASNDiversity, primary.ISPDiversity)
 	}
 
-	// 3. High risk: high hard-reject ratio or dense bad ratio with multiple distinct bad IPs
-	if windowStats.HardRejectRatio >= 0.35 || (windowStats.BadRatio >= 0.65 && windowStats.BadCount >= 3) {
+	// 3. Check for immediate 24h outbreak / spike compared to 30d baseline
+	if w24h != nil && w24h.SampleCount >= 4 && w24h.HardRejectRatio >= 0.50 {
+		penalty = 35
+		return true, penalty, fmt.Sprintf("Prefix %s: CRITICAL 24h spike (24h hard_reject_ratio=%.1f%% over %d samples)",
+			prefix, w24h.HardRejectRatio*100.0, w24h.SampleCount)
+	}
+
+	// 4. High risk in primary window: high hard reject ratio or dense bad ratio with multiple distinct IPs
+	if primary.HardRejectRatio >= 0.30 || (primary.BadRatio >= 0.50 && primary.DistinctIPs >= 3) {
 		penalty = 30
-		return true, penalty, fmt.Sprintf("Prefix %s: HIGH risk (bad_ratio=%.1f%%, hard_reject_ratio=%.1f%%, samples=%d, bad_count=%d)",
-			prefix, windowStats.BadRatio*100.0, windowStats.HardRejectRatio*100.0, windowStats.SampleCount, windowStats.BadCount)
+		return true, penalty, fmt.Sprintf("Prefix %s: HIGH risk (bad_ratio=%.1f%%, hard_reject_ratio=%.1f%%, distinct_ips=%d, samples=%d)",
+			prefix, primary.BadRatio*100.0, primary.HardRejectRatio*100.0, primary.DistinctIPs, primary.SampleCount)
 	}
 
-	// 4. Moderate risk: moderate bad ratio
-	if windowStats.BadRatio >= 0.35 {
+	// 5. Moderate risk: elevated bad ratio or high unknown ratio
+	if primary.BadRatio >= 0.25 {
 		penalty = 15
-		return false, penalty, fmt.Sprintf("Prefix %s: MODERATE risk (bad_ratio=%.1f%%, samples=%d, bad_count=%d, soft penalty: -15)",
-			prefix, windowStats.BadRatio*100.0, windowStats.SampleCount, windowStats.BadCount)
+		return false, penalty, fmt.Sprintf("Prefix %s: MODERATE risk (bad_ratio=%.1f%%, samples=%d, penalty: -15)",
+			prefix, primary.BadRatio*100.0, primary.SampleCount)
+	}
+
+	if primary.UnknownRatio >= 0.70 && primary.SampleCount >= 5 {
+		penalty = 5
+		return false, penalty, fmt.Sprintf("Prefix %s: INCONCLUSIVE (unknown_ratio=%.1f%%, samples=%d, soft penalty: -5)",
+			prefix, primary.UnknownRatio*100.0, primary.SampleCount)
 	}
 
 	return false, 0, fmt.Sprintf("Prefix %s: normal (bad_ratio=%.1f%%, samples=%d)",
-		prefix, windowStats.BadRatio*100.0, windowStats.SampleCount)
+		prefix, primary.BadRatio*100.0, primary.SampleCount)
 }
 
 // GroupDiscoveredIPsByPrefix groups VPN Gate discovered nodes into /24 subnets for neighbor profiling.

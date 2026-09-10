@@ -284,10 +284,67 @@ func TestReputation_NetworkIntelligence_SoftPenaltyNotHardReject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvaluateIP error: %v", err)
 	}
-	if res.HardReject {
-		t.Fatalf("Hosting/VPN must NEVER trigger HardReject")
+	if res.Status == StatusBad {
+		t.Fatalf("Hosting/VPN must NEVER result in StatusBad, expected StatusRisky, got %s", res.Status)
 	}
-	if !res.NetworkInfo.IsHosting || !res.NetworkInfo.IsVPN {
-		t.Fatalf("Expected NetworkInfo to reflect Hosting and VPN")
+	if res.Status != StatusRisky {
+		t.Fatalf("Expected StatusRisky for Hosting/VPN traits, got %s", res.Status)
+	}
+}
+
+func TestReputation_VPNIsNotBad(t *testing.T) {
+	engine := NewEngine()
+	engine.AddProvider(&mockProvider{
+		name:    "VPNProvider",
+		healthy: true,
+		result: &ReputationResult{
+			Provider:     "VPNProvider",
+			IP:           "198.51.100.9",
+			Status:       StatusRisky,
+			ScorePenalty: 15,
+			NetworkInfo: models.NetworkClass{
+				IsVPN:       true,
+				NetworkType: "vpn",
+			},
+		},
+	})
+
+	res, err := engine.EvaluateIP(context.Background(), "198.51.100.9")
+	if err != nil {
+		t.Fatalf("EvaluateIP error: %v", err)
+	}
+	if res.Status == StatusBad {
+		t.Fatalf("VPN != malicious: node with VPN trait must NOT be marked BAD (got StatusBad)")
+	}
+	if res.Status != StatusRisky {
+		t.Fatalf("Expected StatusRisky for VPN trait, got %s", res.Status)
+	}
+	if res.ScorePenalty != 15 {
+		t.Errorf("Expected ScorePenalty 15, got %d", res.ScorePenalty)
+	}
+}
+
+func TestReputation_MaliciousEvidenceIsBad(t *testing.T) {
+	engine := NewEngine()
+	engine.AddProvider(&mockProvider{
+		name:    "AbuseMock",
+		healthy: true,
+		result: &ReputationResult{
+			Provider:   "AbuseMock",
+			IP:         "198.51.100.10",
+			Status:     StatusBad,
+			HardReject: true,
+		},
+	})
+
+	res, err := engine.EvaluateIP(context.Background(), "198.51.100.10")
+	if err != nil {
+		t.Fatalf("EvaluateIP error: %v", err)
+	}
+	if res.Status != StatusBad {
+		t.Fatalf("Expected StatusBad for confirmed malicious evidence, got %s", res.Status)
+	}
+	if !res.HardReject {
+		t.Fatalf("Expected HardReject = true for confirmed malicious evidence")
 	}
 }

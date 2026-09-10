@@ -21,12 +21,27 @@ func setupTestServer() http.Handler {
 	SetScheduler(sched)
 
 	mux := http.NewServeMux()
+	panicRecoveryMiddleware := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				}
+			}()
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+			next.ServeHTTP(w, r)
+		})
+	}
+
 	secureChain := func(h http.Handler) http.Handler {
-		return rateLimitMiddleware(authMiddleware(h))
+		return panicRecoveryMiddleware(rateLimitMiddleware(authMiddleware(h)))
 	}
 
 	mux.Handle("/api/v1/status", secureChain(http.HandlerFunc(handleStatus)))
 	mux.Handle("/api/v1/slots/", secureChain(http.HandlerFunc(handleSlotAction)))
+	mux.Handle("/api/v1/panic", secureChain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("simulated critical crash")
+	})))
 	return mux
 }
 
@@ -108,3 +123,22 @@ func TestAPI_OversizedBodyBlocked(t *testing.T) {
 		t.Fatalf("Expected 400 Bad Request for payload > 1MB, got %d", rr.Code)
 	}
 }
+
+func TestAPI_PanicRecovery(t *testing.T) {
+	handler := setupTestServer()
+
+	req, _ := http.NewRequest("GET", "/api/v1/panic", nil)
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+
+	// Should not crash the test suite or process
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected 500 Internal Server Error after panic recovery, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "internal server error") {
+		t.Errorf("Expected error message in response body, got: %s", rr.Body.String())
+	}
+}
+

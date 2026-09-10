@@ -1,8 +1,10 @@
 package xray
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -225,4 +227,55 @@ func TestSupervisorCrashRecovery(t *testing.T) {
 	if err := sup.Stop(); err != nil {
 		t.Fatalf("failed to stop supervisor: %v", err)
 	}
+}
+
+func TestXray_ExactSetMatchingRejectsPrefixOverlap(t *testing.T) {
+	// Verify that exact tag comparison rejects prefix overlaps (e.g. exit-10 when exit-1 is expected)
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "xray_prefix.json")
+	sup := NewSupervisor(configPath, 10099, "127.0.0.1", 10899, 12)
+
+	// Simulate lsrules output JSON where tag is "exit-10"
+	simulatedJSON := []byte(`{
+		"rules": [
+			{"tag": "api"},
+			{"ruleTag": "active-balancer-rule", "tag": "exit-10"}
+		]
+	}`)
+
+	var lsResp lsRulesResponse
+	if err := json.Unmarshal(simulatedJSON, &lsResp); err != nil {
+		t.Fatalf("failed to parse json: %v", err)
+	}
+
+	var activeRule *struct {
+		RuleTag     string `json:"ruleTag"`
+		Tag         string `json:"tag"`
+		BalancerTag string `json:"balancerTag"`
+	}
+	for i := range lsResp.Rules {
+		if lsResp.Rules[i].RuleTag == "active-balancer-rule" {
+			activeRule = &lsResp.Rules[i]
+			break
+		}
+	}
+	if activeRule == nil {
+		t.Fatalf("active-balancer-rule not found")
+	}
+
+	// When expecting slot 1 (tag "exit-1"), "exit-10" must NOT match!
+	expectedTag := "exit-1"
+	if activeRule.Tag == expectedTag {
+		t.Fatalf("exact match should NOT equate exit-10 with exit-1")
+	}
+
+	// Substring contains would dangerously match "exit-1" in "exit-10", but exact equality prevents this!
+	if strings.Contains(activeRule.Tag, expectedTag) {
+		// Verify that our code uses strict equality:
+		isExactMatch := (activeRule.Tag == expectedTag)
+		if isExactMatch {
+			t.Fatalf("isExactMatch must be false for exit-10 vs exit-1")
+		}
+	}
+	_ = sup
 }

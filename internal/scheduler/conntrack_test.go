@@ -40,7 +40,7 @@ func TestDrainingDoesNotKillOnConntrackUnknown(t *testing.T) {
 	tunnel := &openvpn.Tunnel{
 		ID:        "slot-0",
 		SlotIndex: 0,
-		Interface: "tun0",
+		Interface: "lo",
 		Node:      node,
 		State:     "ACTIVE",
 	}
