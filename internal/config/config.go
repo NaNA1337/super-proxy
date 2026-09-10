@@ -140,8 +140,8 @@ func LoadConfig(path string) (*Config, error) {
 // It fails fast if ports, URLs, timeouts, or routing parameters are invalid.
 func (c *Config) Validate() error {
 	// 1. API validation
-	if c.API.Port <= 0 || c.API.Port > 65535 {
-		return fmt.Errorf("invalid api.port: %d (must be 1-65535)", c.API.Port)
+	if err := xray.ValidateManagementPort(c.API.Port); err != nil {
+		return fmt.Errorf("invalid api.port: %w", err)
 	}
 	if strings.TrimSpace(c.API.Listen) == "" {
 		return fmt.Errorf("api.listen cannot be empty")
@@ -186,7 +186,7 @@ func (c *Config) Validate() error {
 
 	// 6. VLESS Reality validation
 	if c.Xray.Vless.Enabled {
-		if err := xray.ValidatePublicPort(c.Xray.Vless.Port); err != nil {
+		if err := xray.ValidateVlessPublicPort(c.Xray.Vless.Port); err != nil {
 			return fmt.Errorf("invalid xray.vless.port: %w", err)
 		}
 		if len(c.Xray.Vless.ServerNames) > 0 {

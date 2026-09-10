@@ -18,7 +18,8 @@ import (
 type VlessConfig struct {
 	Enabled             bool     `json:"enabled" mapstructure:"enabled"`
 	Listen              string   `json:"listen" mapstructure:"listen"`                         // default "0.0.0.0"
-	Port                int      `json:"port" mapstructure:"port"`                             // default 60001 (must be in 60000-61000)
+	Port                int      `json:"port" mapstructure:"port"`                             // default 443 (strictly TCP/443)
+	PublicAddress       string   `json:"public_address,omitempty" mapstructure:"public_address"` // optional explicit public domain/IP
 	UUID                string   `json:"uuid" mapstructure:"uuid"`
 	Flow                string   `json:"flow" mapstructure:"flow"`                             // default "xtls-rprx-vision"
 	Dest                string   `json:"dest" mapstructure:"dest"`                             // default "www.microsoft.com:443"
@@ -71,7 +72,7 @@ func NormalizeVlessConfig(cfg *VlessConfig) error {
 	if cfg.Port <= 0 {
 		cfg.Port = DefaultVlessPublicPort
 	}
-	if err := ValidatePublicPort(cfg.Port); err != nil {
+	if err := ValidateVlessPublicPort(cfg.Port); err != nil {
 		return fmt.Errorf("invalid vless inbound port: %w", err)
 	}
 	if cfg.Listen == "" {

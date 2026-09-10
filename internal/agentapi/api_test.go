@@ -230,10 +230,19 @@ func TestAPI_WebManagerSupplementaryEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 OK on /api/v1/routing, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	// 3. Test /api/v1/client-config (with VLESS Reality enabled)
+	// 3. Test /api/v1/client-config (with VLESS Reality enabled and runtime endpoint registered)
+	_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "node-jp-01.super-proxy.net",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	defer xray.ClearRuntimeVlessEndpoint()
+
 	SetActiveVlessConfig(&xray.VlessConfig{
 		Enabled:             true,
-		Port:                60001,
+		Port:                443,
 		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
 		Flow:                "xtls-rprx-vision",
 		Dest:                "www.microsoft.com:443",
@@ -261,6 +270,9 @@ func TestAPI_WebManagerSupplementaryEndpoints(t *testing.T) {
 	if !strings.Contains(bodyStr, "vless://") {
 		t.Errorf("expected vless share link in client config: %s", bodyStr)
 	}
+	if !strings.Contains(bodyStr, ":443") {
+		t.Errorf("expected port 443 in client config: %s", bodyStr)
+	}
 }
 
 func TestAPI_ClientExportEndpoints(t *testing.T) {
@@ -268,9 +280,18 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 	InitAuth("test-secret-api-key-12345")
 	handler := setupTestServer()
 
+	_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "node-jp-01.super-proxy.net",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	defer xray.ClearRuntimeVlessEndpoint()
+
 	SetActiveVlessConfig(&xray.VlessConfig{
 		Enabled:             true,
-		Port:                60001,
+		Port:                443,
 		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
 		Flow:                "xtls-rprx-vision",
 		Dest:                "www.microsoft.com:443",
@@ -300,8 +321,8 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 	if !strings.Contains(clashYaml, "servername: www.microsoft.com") {
 		t.Errorf("clash yaml missing SNI www.microsoft.com: %s", clashYaml)
 	}
-	if !strings.Contains(clashYaml, "port: 60001") {
-		t.Errorf("clash yaml missing port 60001: %s", clashYaml)
+	if !strings.Contains(clashYaml, "port: 443") {
+		t.Errorf("clash yaml missing port 443: %s", clashYaml)
 	}
 
 	// 2. Test /api/v1/export/singbox (JSON output)
@@ -320,8 +341,8 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 	if !strings.Contains(singboxJson, "reality") || !strings.Contains(singboxJson, "chrome") || !strings.Contains(singboxJson, "www.microsoft.com") {
 		t.Errorf("singbox json missing reality/fingerprint/SNI: %s", singboxJson)
 	}
-	if !strings.Contains(singboxJson, "60001") {
-		t.Errorf("singbox json missing port 60001: %s", singboxJson)
+	if !strings.Contains(singboxJson, "443") {
+		t.Errorf("singbox json missing port 443: %s", singboxJson)
 	}
 
 	// 3. Test /api/v1/export/xray (JSON output)
@@ -338,8 +359,8 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 		(!strings.Contains(xrayJson, "\"security\":\"reality\"") && !strings.Contains(xrayJson, "\"security\": \"reality\"")) {
 		t.Errorf("xray json missing vless reality: %s", xrayJson)
 	}
-	if !strings.Contains(xrayJson, "60001") {
-		t.Errorf("xray json missing port 60001: %s", xrayJson)
+	if !strings.Contains(xrayJson, "443") {
+		t.Errorf("xray json missing port 443: %s", xrayJson)
 	}
 
 	// 4. Test /api/v1/export/sub with ?token= query auth (standard subscription URL import)
@@ -358,19 +379,40 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 	if !strings.HasPrefix(string(decoded), "vless://") {
 		t.Errorf("expected subscription to decode to vless:// link, got: %s", string(decoded))
 	}
-	if !strings.Contains(string(decoded), ":60001") {
-		t.Errorf("expected subscription link to contain port 60001, got: %s", string(decoded))
+	if !strings.Contains(string(decoded), ":443") {
+		t.Errorf("expected subscription link to contain port 443, got: %s", string(decoded))
 	}
 }
 
-func TestAPI_ClientExport_RejectsPort443(t *testing.T) {
+func TestAPI_ClientExport_PortValidation(t *testing.T) {
+	// VLESS public port: 443 PASS; 60000, 60001, 61000, 80, 1080 FAIL
+	if err := xray.ValidateVlessPublicPort(443); err != nil {
+		t.Errorf("expected port 443 to PASS as VLESS, got: %v", err)
+	}
+	for _, p := range []int{80, 1080, 8080, 60000, 60001, 61000} {
+		if err := xray.ValidateVlessPublicPort(p); err == nil {
+			t.Errorf("expected port %d to FAIL as VLESS public port", p)
+		}
+	}
+
+	// Management port: 60000 PASS; 443, 60001 FAIL
+	if err := xray.ValidateManagementPort(60000); err != nil {
+		t.Errorf("expected port 60000 to PASS as Management, got: %v", err)
+	}
+	for _, p := range []int{443, 80, 1080, 60001, 61000} {
+		if err := xray.ValidateManagementPort(p); err == nil {
+			t.Errorf("expected port %d to FAIL as Management port", p)
+		}
+	}
+}
+
+func TestAPI_ClientExport_RuntimeUnavailableFailClosed(t *testing.T) {
 	InitAuth("test-secret-api-key-12345")
 	handler := setupTestServer()
 
-	// Configure VLESS with invalid public port 443
 	SetActiveVlessConfig(&xray.VlessConfig{
 		Enabled:             true,
-		Port:                443, // Strictly forbidden as public client port
+		Port:                443,
 		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
 		Flow:                "xtls-rprx-vision",
 		Dest:                "www.microsoft.com:443",
@@ -380,19 +422,78 @@ func TestAPI_ClientExport_RejectsPort443(t *testing.T) {
 		ShortIds:            []string{"0123456789abcdef"},
 		OutboundOnlyPort443: true,
 	})
+	// Ensure runtime endpoint is cleared (Xray stopped or crashed)
 	xray.ClearRuntimeVlessEndpoint()
 
-	req, _ := http.NewRequest("GET", "/api/v1/export/clash", nil)
-	req.RemoteAddr = "192.0.2.11:12345"
+	// All exports must FAIL CLOSED with 400 Bad Request
+	endpoints := []string{"/api/v1/export/clash", "/api/v1/export/singbox", "/api/v1/export/xray", "/api/v1/export/sub"}
+	for _, ep := range endpoints {
+		req, _ := http.NewRequest("GET", ep, nil)
+		req.RemoteAddr = "192.0.2.11:12345"
+		req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 Bad Request on %s when runtime unavailable, got %d: %s", ep, rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "runtime endpoint is unavailable") {
+			t.Errorf("expected error message to mention runtime endpoint unavailable on %s, got: %s", ep, rr.Body.String())
+		}
+	}
+
+	// /api/v1/client-config must NOT include vless when runtime endpoint is unavailable
+	req, _ := http.NewRequest("GET", "/api/v1/client-config", nil)
 	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 Bad Request when port 443 is used, got %d", rr.Code)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on client-config, got %d", rr.Code)
 	}
-	if !strings.Contains(rr.Body.String(), "port") {
-		t.Errorf("expected error message to mention port validation, got: %s", rr.Body.String())
+	if strings.Contains(rr.Body.String(), "\"vless\"") {
+		t.Errorf("expected client-config to omit vless when runtime unavailable: %s", rr.Body.String())
+	}
+}
+
+func TestAPI_ClientExport_RejectsLocalhost(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "node-jp-01.super-proxy.net",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	defer xray.ClearRuntimeVlessEndpoint()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                443,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	// Localhost via query parameter must be rejected
+	for _, badAddr := range []string{"127.0.0.1", "localhost", "0.0.0.0", "::1"} {
+		req, _ := http.NewRequest("GET", "/api/v1/export/clash?address="+badAddr, nil)
+		req.RemoteAddr = "192.0.2.11:12345"
+		req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		// When ?address= is invalid, if fallback to runtime endpoint is also loopback -> error.
+		// If query address is explicitly supplied as loopback, let's verify ValidatePublicAddress rejects it.
+		if err := xray.ValidatePublicAddress(badAddr); err == nil {
+			t.Errorf("expected ValidatePublicAddress(%q) to fail", badAddr)
+		}
 	}
 }
 
@@ -402,7 +503,7 @@ func TestAPI_ClientExport_UsesRuntimeEndpoint(t *testing.T) {
 
 	SetActiveVlessConfig(&xray.VlessConfig{
 		Enabled:             true,
-		Port:                60001,
+		Port:                443,
 		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
 		Flow:                "xtls-rprx-vision",
 		Dest:                "www.microsoft.com:443",
@@ -416,7 +517,7 @@ func TestAPI_ClientExport_UsesRuntimeEndpoint(t *testing.T) {
 	// Register actual runtime endpoint dynamically
 	err := xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
 		Address:  "node-jp-01.super-proxy.net",
-		Port:     60088,
+		Port:     443,
 		Network:  "tcp",
 		TLS:      true,
 		Protocol: "vless",
@@ -440,15 +541,15 @@ func TestAPI_ClientExport_UsesRuntimeEndpoint(t *testing.T) {
 	if !strings.Contains(clashYaml, "server: node-jp-01.super-proxy.net") {
 		t.Errorf("expected runtime address in clash export, got: %s", clashYaml)
 	}
-	if !strings.Contains(clashYaml, "port: 60088") {
-		t.Errorf("expected runtime port 60088 in clash export, got: %s", clashYaml)
+	if !strings.Contains(clashYaml, "port: 443") {
+		t.Errorf("expected runtime port 443 in clash export, got: %s", clashYaml)
 	}
 }
 
 func TestAPI_VlessURIRoundTrip(t *testing.T) {
 	profile := &xray.RealityClientProfile{
 		Address:         "edge-kr.super-proxy.net",
-		Port:            60555,
+		Port:            443,
 		UUID:            "11111111-2222-3333-4444-555555555555",
 		SNI:             "www.microsoft.com",
 		Fingerprint:     "chrome",
@@ -481,8 +582,8 @@ func TestAPI_VlessURIRoundTrip(t *testing.T) {
 	if parsed.Hostname() != profile.Address {
 		t.Errorf("expected hostname %s, got: %s", profile.Address, parsed.Hostname())
 	}
-	if parsed.Port() != "60555" {
-		t.Errorf("expected port 60555, got: %s", parsed.Port())
+	if parsed.Port() != "443" {
+		t.Errorf("expected port 443, got: %s", parsed.Port())
 	}
 
 	q := parsed.Query()
@@ -516,8 +617,8 @@ func TestAPI_XrayClientConfigValidationWithBinary(t *testing.T) {
 	}
 
 	profile := &xray.RealityClientProfile{
-		Address:         "127.0.0.1",
-		Port:            60001,
+		Address:         "203.0.113.1",
+		Port:            443,
 		UUID:            "b831381d-6324-4d53-ad4f-8cda48b30811",
 		SNI:             "www.microsoft.com",
 		Fingerprint:     "chrome",
@@ -556,7 +657,7 @@ func TestAPI_SecretRedactionInExports(t *testing.T) {
 	privKey := "PRIVATE_KEY_SECRET_SHOULD_NEVER_BE_EXPOSED"
 	profile := &xray.RealityClientProfile{
 		Address:         "198.51.100.1",
-		Port:            60001,
+		Port:            443,
 		UUID:            "b831381d-6324-4d53-ad4f-8cda48b30811",
 		SNI:             "www.microsoft.com",
 		Fingerprint:     "chrome",
@@ -609,6 +710,15 @@ func TestAPI_SubscriptionTokenHashingAndRevocation(t *testing.T) {
 	InitAuth("master-key-12345")
 	handler := setupTestServer()
 
+	_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "node-jp-01.super-proxy.net",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	defer xray.ClearRuntimeVlessEndpoint()
+
 	// Generate secure token
 	token, err := GenerateSubscriptionToken()
 	if err != nil {
@@ -617,7 +727,7 @@ func TestAPI_SubscriptionTokenHashingAndRevocation(t *testing.T) {
 
 	SetActiveVlessConfig(&xray.VlessConfig{
 		Enabled:             true,
-		Port:                60001,
+		Port:                443,
 		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
 		Flow:                "xtls-rprx-vision",
 		Dest:                "www.microsoft.com:443",

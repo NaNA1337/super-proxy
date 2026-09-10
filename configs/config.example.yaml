@@ -14,13 +14,18 @@ discovery:
 reputation:
   enabled: false
 
+api:
+  listen: "127.0.0.1"
+  port: 60000
+
 xray:
   vless:
     enabled: false
-    port: 60001
+    port: 443
     flow: "xtls-rprx-vision"
     dest: "www.microsoft.com:443"
     server_names:
       - "www.microsoft.com"
     fingerprint: "chrome"
     outbound_only_443: true
+

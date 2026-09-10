@@ -265,11 +265,20 @@ curl -k -H "Authorization: Bearer <API_KEY>" \
 
 Super-Proxy 提供标准 VLESS + Reality 代理入站，支持流控 `xtls-rprx-vision`、uTLS 指纹模拟 `chrome`、SNI 伪装目标 `www.microsoft.com:443`（伪装探测端口固定为 443）与出站仅放行 443 端口限制。
 
-### 公网入口端口策略
+### 生产公网端口策略
 
-生产环境公网客户端连接入口严格限制于 `60000-61000`（默认 `60001`），禁止使用 443、80 等特权端口作为客户端公网入口。所有客户端配置的入口端口直接来源于实际运行中的 Xray Inbound 运行时端点。
+生产环境严格限制公网暴露面为两个指定端口，其余端口全部 DROP：
 
-系统内置多客户端兼容导出层，覆盖主流代理客户端与配置格式：
+- **TCP 443**：专属于 VLESS + Reality + XTLS Vision 公网客户端入口。
+- **TCP 60000**：专属于 Web Manager 与 Management API。
+
+```text
+TCP 443   → VLESS + Reality + XTLS Vision (Xray public client ingress)
+TCP 60000 → Web Manager / Management API (HTTPS / TLS)
+其余端口   → DROP
+```
+
+所有客户端配置（VLESS URI、Clash Meta、Sing-box、Xray JSON、Subscription）统一直接来源于实际运行中的 Xray Inbound 运行时端点（TCP/443）。当 Xray 处于停止、崩溃或未就绪状态时，端点自动注销并触发 Fail-Closed，拒绝导出理论失效配置；公网分享链接禁止回退至 localhost/127.0.0.1。
 
 ### 1. 通用订阅与分享链接 (v2rayN / v2rayNG / Shadowrocket / NekoBox / Karing)
 
@@ -294,7 +303,7 @@ proxies:
   - name: Super-Proxy-VLESS
     type: vless
     server: <SERVER_IP>
-    port: 60001
+    port: 443
     uuid: <UUID>
     network: tcp
     tls: true
@@ -320,7 +329,7 @@ curl -k "https://<SERVER_IP>:60000/api/v1/export/singbox?token=<API_KEY>" -o con
   "type": "vless",
   "tag": "proxy",
   "server": "<SERVER_IP>",
-  "server_port": 60001,
+  "server_port": 443,
   "uuid": "<UUID>",
   "flow": "xtls-rprx-vision",
   "network": "tcp",

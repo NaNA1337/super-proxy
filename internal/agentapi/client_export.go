@@ -15,8 +15,9 @@ import (
 )
 
 // BuildRealityClientProfile resolves and verifies all parameters needed for client export.
-// The public port and address are sourced strictly from the active Xray runtime or verified config.
-// It enforces that 60000 <= port <= 61000 and NEVER falls back to 443.
+// The public port and address are sourced strictly from the active running Xray runtime endpoint.
+// Fails closed if the runtime endpoint is unavailable (stopped, crashed, or not ready).
+// It enforces that public port is strictly 443 and rejects localhost/loopback addresses.
 func BuildRealityClientProfile(r *http.Request) (*xray.RealityClientProfile, error) {
 	cfg := GetActiveVlessConfig()
 	enabled := (cfg != nil && cfg.Enabled) || os.Getenv("XRAY_VLESS_ENABLED") == "true"
@@ -24,7 +25,20 @@ func BuildRealityClientProfile(r *http.Request) (*xray.RealityClientProfile, err
 		return nil, fmt.Errorf("VLESS Reality is not enabled on this server")
 	}
 
+	// 1. Sourced strictly from verified active Runtime Endpoint!
+	// Fail-closed: absolutely no theoretical endpoint or config/env fallback.
+	rtEndpoint, err := xray.GetRuntimeVlessEndpoint()
+	if err != nil || rtEndpoint == nil {
+		return nil, fmt.Errorf("active Xray runtime endpoint is unavailable: %w", err)
+	}
+
+	// Validate runtime public port (strictly 443)
+	if err := xray.ValidateVlessPublicPort(rtEndpoint.Port); err != nil {
+		return nil, fmt.Errorf("runtime public port validation failed: %w", err)
+	}
+
 	profile := &xray.RealityClientProfile{
+		Port:          rtEndpoint.Port,
 		Flow:          xray.DefaultFlow,
 		Security:      xray.DefaultSecurity,
 		Fingerprint:   xray.DefaultRealityFP,
@@ -33,52 +47,42 @@ func BuildRealityClientProfile(r *http.Request) (*xray.RealityClientProfile, err
 		Tag:           "Super-Proxy-VLESS",
 	}
 
-	// 1. Sourced from Runtime Endpoint or verified active configuration
-	var resolvedPort int
+	// 2. Resolve public address:
+	// Preference: query param (?address=...) > request Host > runtime address > env (XRAY_VLESS_ADDRESS)
+	// Strictly NO localhost or 127.0.0.1 fallback!
 	var resolvedAddr string
-
-	rtEndpoint, err := xray.GetRuntimeVlessEndpoint()
-	if err == nil && rtEndpoint != nil {
-		resolvedPort = rtEndpoint.Port
-		if rtEndpoint.Address != "" && rtEndpoint.Address != "0.0.0.0" {
-			resolvedAddr = rtEndpoint.Address
+	if r != nil && r.URL != nil && r.URL.Query().Get("address") != "" {
+		reqAddr := r.URL.Query().Get("address")
+		if err := xray.ValidatePublicAddress(reqAddr); err == nil {
+			resolvedAddr = reqAddr
 		}
-	}
-
-	// If runtime endpoint port not yet set, inspect active config
-	if resolvedPort <= 0 && cfg != nil && cfg.Port > 0 {
-		resolvedPort = cfg.Port
-	}
-
-	// Allow environment override if valid
-	if envPortStr := os.Getenv("XRAY_VLESS_PORT"); envPortStr != "" {
-		if p, parseErr := strconv.Atoi(envPortStr); parseErr == nil && p > 0 {
-			resolvedPort = p
-		}
-	}
-
-	// Strictly validate the public port - NEVER fallback to 443
-	if err := xray.ValidatePublicPort(resolvedPort); err != nil {
-		return nil, fmt.Errorf("runtime public port validation failed: %w", err)
-	}
-	profile.Port = resolvedPort
-
-	// 2. Resolve public address: env > query param > request Host > runtime address > 127.0.0.1
-	if envAddr := os.Getenv("XRAY_VLESS_ADDRESS"); envAddr != "" {
-		resolvedAddr = envAddr
-	} else if r != nil && r.URL.Query().Get("address") != "" {
-		resolvedAddr = r.URL.Query().Get("address")
 	} else if r != nil && r.Host != "" {
 		host, _, err := net.SplitHostPort(r.Host)
 		if err != nil {
 			host = r.Host
 		}
-		if host != "" && host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		if err := xray.ValidatePublicAddress(host); err == nil {
 			resolvedAddr = host
 		}
 	}
+
+	if resolvedAddr == "" && rtEndpoint.Address != "" && rtEndpoint.Address != "0.0.0.0" {
+		if err := xray.ValidatePublicAddress(rtEndpoint.Address); err == nil {
+			resolvedAddr = rtEndpoint.Address
+		}
+	}
+
 	if resolvedAddr == "" {
-		resolvedAddr = "127.0.0.1"
+		if envAddr := os.Getenv("XRAY_VLESS_ADDRESS"); envAddr != "" {
+			if err := xray.ValidatePublicAddress(envAddr); err == nil {
+				resolvedAddr = envAddr
+			}
+		}
+	}
+
+	// Strict public address validation: rejects localhost, 127.0.0.1, 0.0.0.0, ::1, empty
+	if err := xray.ValidatePublicAddress(resolvedAddr); err != nil {
+		return nil, fmt.Errorf("cannot determine valid public client address (localhost/127.0.0.1 is prohibited): %w", err)
 	}
 	profile.Address = resolvedAddr
 

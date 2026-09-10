@@ -6,18 +6,69 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestValidatePublicPort(t *testing.T) {
-	passPorts := []int{60000, 60001, 60500, 61000}
-	for _, port := range passPorts {
-		if err := ValidatePublicPort(port); err != nil {
-			t.Errorf("expected port %d to PASS, got error: %v", port, err)
+func TestValidateVlessPublicPort(t *testing.T) {
+	// 443 strictly PASS
+	if err := ValidateVlessPublicPort(443); err != nil {
+		t.Errorf("expected port 443 to PASS, got error: %v", err)
+	}
+
+	// All other ports strictly FAIL
+	failPorts := []int{80, 1080, 8080, 60000, 60001, 60500, 61000, 0, -1, 65535}
+	for _, port := range failPorts {
+		if err := ValidateVlessPublicPort(port); err == nil {
+			t.Errorf("expected VLESS port %d to FAIL, but passed", port)
+		}
+	}
+}
+
+func TestValidateManagementPort(t *testing.T) {
+	// 60000 strictly PASS
+	if err := ValidateManagementPort(60000); err != nil {
+		t.Errorf("expected management port 60000 to PASS, got error: %v", err)
+	}
+
+	// 443 and others strictly FAIL as management
+	failPorts := []int{443, 80, 1080, 8080, 60001, 61000, 0, -1, 65535}
+	for _, port := range failPorts {
+		if err := ValidateManagementPort(port); err == nil {
+			t.Errorf("expected management port %d to FAIL, but passed", port)
+		}
+	}
+}
+
+func TestValidatePublicAddress(t *testing.T) {
+	passAddrs := []string{
+		"node.super-proxy.net",
+		"example.com",
+		"203.0.113.1",
+		"198.51.100.25",
+		"sub.domain.co.jp",
+	}
+	for _, addr := range passAddrs {
+		if err := ValidatePublicAddress(addr); err != nil {
+			t.Errorf("expected public address %q to PASS, got error: %v", addr, err)
 		}
 	}
 
-	failPorts := []int{59999, 61001, 443, 80, 1080, 8080, 0, -1, 65535}
-	for _, port := range failPorts {
-		if err := ValidatePublicPort(port); err == nil {
-			t.Errorf("expected port %d to FAIL, but passed", port)
+	failAddrs := []string{
+		"",
+		"   ",
+		"localhost",
+		"127.0.0.1",
+		"127.0.0.2",
+		"0.0.0.0",
+		"::",
+		"::1",
+		"https://node.super-proxy.net",
+		"http://node.super-proxy.net",
+		"node.super-proxy.net:443",
+		"node.super-proxy.net/path",
+		"user@node.super-proxy.net",
+		"invalid_domain_name",
+	}
+	for _, addr := range failAddrs {
+		if err := ValidatePublicAddress(addr); err == nil {
+			t.Errorf("expected public address %q to FAIL, but passed", addr)
 		}
 	}
 }
@@ -86,7 +137,7 @@ func TestValidateRealityDestination(t *testing.T) {
 func TestRealityClientProfile_Validate(t *testing.T) {
 	validProfile := RealityClientProfile{
 		Address:         "203.0.113.1",
-		Port:            60001,
+		Port:            443, // Strictly 443
 		UUID:            uuid.New().String(),
 		SNI:             "www.microsoft.com",
 		Fingerprint:     "chrome",
@@ -103,11 +154,25 @@ func TestRealityClientProfile_Validate(t *testing.T) {
 		t.Fatalf("expected valid profile to pass, got: %v", err)
 	}
 
-	// Reject port 443
-	pPort443 := validProfile
-	pPort443.Port = 443
-	if err := pPort443.Validate(); err == nil {
-		t.Errorf("expected profile with port 443 to fail")
+	// Reject port 60000
+	pPort60000 := validProfile
+	pPort60000.Port = 60000
+	if err := pPort60000.Validate(); err == nil {
+		t.Errorf("expected profile with port 60000 to fail")
+	}
+
+	// Reject port 60001
+	pPort60001 := validProfile
+	pPort60001.Port = 60001
+	if err := pPort60001.Validate(); err == nil {
+		t.Errorf("expected profile with port 60001 to fail")
+	}
+
+	// Reject localhost address
+	pLocalhost := validProfile
+	pLocalhost.Address = "127.0.0.1"
+	if err := pLocalhost.Validate(); err == nil {
+		t.Errorf("expected profile with localhost address to fail")
 	}
 
 	// Reject non-chrome fingerprint
@@ -140,22 +205,34 @@ func TestRuntimeEndpointStore(t *testing.T) {
 		t.Fatalf("expected error when no runtime endpoint registered")
 	}
 
-	// Registering port 443 must fail validation
-	badEp := PublicEndpoint{
+	// Registering port 60001 must fail validation
+	badPortEp := PublicEndpoint{
 		Address:  "203.0.113.1",
+		Port:     60001,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	}
+	if err := SetRuntimeVlessEndpoint(badPortEp); err == nil {
+		t.Errorf("expected registering port 60001 to fail")
+	}
+
+	// Registering localhost address must fail validation
+	badAddrEp := PublicEndpoint{
+		Address:  "127.0.0.1",
 		Port:     443,
 		Network:  "tcp",
 		TLS:      true,
 		Protocol: "vless",
 	}
-	if err := SetRuntimeVlessEndpoint(badEp); err == nil {
-		t.Errorf("expected registering port 443 to fail")
+	if err := SetRuntimeVlessEndpoint(badAddrEp); err == nil {
+		t.Errorf("expected registering loopback address 127.0.0.1 to fail")
 	}
 
-	// Registering valid port 60001
+	// Registering valid endpoint: port 443 and public address
 	goodEp := PublicEndpoint{
 		Address:  "203.0.113.1",
-		Port:     60001,
+		Port:     443,
 		Network:  "tcp",
 		TLS:      true,
 		Protocol: "vless",
@@ -168,7 +245,7 @@ func TestRuntimeEndpointStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to retrieve registered endpoint: %v", err)
 	}
-	if retrieved.Port != 60001 || retrieved.Address != "203.0.113.1" {
+	if retrieved.Port != 443 || retrieved.Address != "203.0.113.1" {
 		t.Errorf("retrieved endpoint mismatch: %+v", retrieved)
 	}
 

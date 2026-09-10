@@ -314,10 +314,10 @@ func TestXray_VlessRealityConfigValidation(t *testing.T) {
 		t.Errorf("expected generated x25519 keys, got empty")
 	}
 
-	// Verify that setting public port 443 fails validation
-	badPortCfg := VlessConfig{Enabled: true, Port: 443}
+	// Verify that setting public port 60001 fails validation
+	badPortCfg := VlessConfig{Enabled: true, Port: 60001}
 	if err := NormalizeVlessConfig(&badPortCfg); err == nil {
-		t.Errorf("expected NormalizeVlessConfig with public port 443 to fail")
+		t.Errorf("expected NormalizeVlessConfig with public port 60001 to fail")
 	}
 
 	// Generate full Xray config
@@ -406,3 +406,92 @@ func TestXray_VlessRealityConfigValidation(t *testing.T) {
 		t.Fatalf("Xray rejected generated VLESS Reality config: %v", err)
 	}
 }
+
+func TestXray_SupervisorLifecycleAndRuntimeEndpoint(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "xray_lifecycle_rt.json")
+	apiPort := 10285
+	socksPort := 10985
+
+	vlessCfg := VlessConfig{
+		Enabled: true,
+		Port:    443,
+	}
+	if err := NormalizeVlessConfig(&vlessCfg); err != nil {
+		t.Fatalf("NormalizeVlessConfig failed: %v", err)
+	}
+
+	err := GenerateConfigWithOptions(ConfigOptions{
+		SlotCount:   2,
+		ConfigPath:  configPath,
+		ApiPort:     apiPort,
+		SocksListen: "127.0.0.1",
+		SocksPort:   socksPort,
+		Vless:       vlessCfg,
+	})
+	if err != nil {
+		t.Fatalf("GenerateConfigWithOptions failed: %v", err)
+	}
+
+	ClearRuntimeVlessEndpoint()
+	if _, err := GetRuntimeVlessEndpoint(); err == nil {
+		t.Fatalf("expected error before start")
+	}
+
+	sup := NewSupervisor(configPath, apiPort, "127.0.0.1", socksPort, 2)
+	_ = sup.SetPublicAddress("node.super-proxy.net")
+
+	// 1. START -> READY -> endpoint exists
+	if err := sup.Start(); err != nil {
+		t.Fatalf("sup.Start failed: %v", err)
+	}
+
+	ep, err := GetRuntimeVlessEndpoint()
+	if err != nil {
+		t.Fatalf("expected runtime endpoint to exist when READY, got: %v", err)
+	}
+	if ep.Port != 443 || ep.Address != "node.super-proxy.net" {
+		t.Errorf("expected node.super-proxy.net:443, got: %+v", ep)
+	}
+
+	// 2. CRASH -> kill process -> endpoint cleared immediately
+	sup.mu.RLock()
+	cmd := sup.cmd
+	sup.mu.RUnlock()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+
+	// Wait briefly for crash detection to trigger ClearRuntimeVlessEndpoint
+	crashCleared := false
+	for i := 0; i < 20; i++ {
+		time.Sleep(50 * time.Millisecond)
+		if _, err := GetRuntimeVlessEndpoint(); err != nil {
+			crashCleared = true
+			break
+		}
+	}
+	if !crashCleared {
+		t.Errorf("expected runtime endpoint to be CLEARED immediately upon crash")
+	}
+
+	// 3. RESTART -> wait recovery -> endpoint restored
+	recovered := false
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if ep, err := GetRuntimeVlessEndpoint(); err == nil && ep != nil && ep.Port == 443 {
+			recovered = true
+			break
+		}
+	}
+	if !recovered {
+		t.Errorf("expected runtime endpoint to be RESTORED after restart recovery")
+	}
+
+	// 4. STOP -> endpoint cleared
+	_ = sup.Stop()
+	if _, err := GetRuntimeVlessEndpoint(); err == nil {
+		t.Errorf("expected runtime endpoint to be CLEARED after Stop")
+	}
+}
+

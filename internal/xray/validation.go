@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	MinPublicPort = 60000
-	MaxPublicPort = 61000
+	VlessPublicPort = 443
+	ManagementPort  = 60000
 
-	DefaultVlessPublicPort = 60001
+	DefaultVlessPublicPort = VlessPublicPort
 	DefaultRealityTarget   = "www.microsoft.com:443"
 	DefaultRealitySNI      = "www.microsoft.com"
 	DefaultRealityFP       = "chrome"
@@ -24,13 +24,64 @@ var (
 	hostnameRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
 )
 
-// ValidatePublicPort enforces production public port restrictions (60000-61000).
-// Ports outside this range (including 443, 80, 1080, 8080) are strictly forbidden
-// as client public entry points.
-func ValidatePublicPort(port int) error {
-	if port < MinPublicPort || port > MaxPublicPort {
-		return fmt.Errorf("invalid public port %d: must be strictly within range [%d, %d]", port, MinPublicPort, MaxPublicPort)
+// ValidateVlessPublicPort enforces that VLESS Reality public ingress is strictly fixed to TCP/443.
+// All other ports (including 80, 1080, 8080, 60000, 60001) are forbidden as VLESS client entry points.
+func ValidateVlessPublicPort(port int) error {
+	if port != VlessPublicPort {
+		return fmt.Errorf("invalid VLESS public ingress port %d: must be strictly %d (TCP/443)", port, VlessPublicPort)
 	}
+	return nil
+}
+
+// ValidateManagementPort enforces that Web Manager and Management API listen strictly on TCP 60000.
+// Port 443 is strictly forbidden for management access.
+func ValidateManagementPort(port int) error {
+	if port != ManagementPort {
+		return fmt.Errorf("invalid management port %d: must be strictly %d (TCP/60000)", port, ManagementPort)
+	}
+	return nil
+}
+
+// ValidatePublicPort is an alias for ValidateVlessPublicPort for backward compatibility.
+func ValidatePublicPort(port int) error {
+	return ValidateVlessPublicPort(port)
+}
+
+// ValidatePublicAddress enforces that the public endpoint address is a valid public domain or non-loopback IP.
+// Strictly rejects localhost, 127.0.0.1, 0.0.0.0, ::, ::1, and loopback ranges.
+func ValidatePublicAddress(addr string) error {
+	trimmed := strings.TrimSpace(addr)
+	if trimmed == "" {
+		return fmt.Errorf("public endpoint address cannot be empty")
+	}
+
+	// Reject URL schemes, ports, paths
+	if strings.Contains(trimmed, "://") || strings.Contains(trimmed, "/") || strings.Contains(trimmed, ":") && !strings.Contains(trimmed, "[") && strings.Count(trimmed, ":") == 1 {
+		return fmt.Errorf("public endpoint address %q must be a pure host/domain (no scheme, path, or port)", addr)
+	}
+
+	// Reject localhost keyword
+	if strings.EqualFold(trimmed, "localhost") {
+		return fmt.Errorf("public endpoint address cannot be localhost")
+	}
+
+	// Check if it is an IP address
+	cleanIP := strings.Trim(trimmed, "[]")
+	if ip := net.ParseIP(cleanIP); ip != nil {
+		if ip.IsLoopback() {
+			return fmt.Errorf("public endpoint address %q cannot be a loopback IP", addr)
+		}
+		if ip.IsUnspecified() {
+			return fmt.Errorf("public endpoint address %q cannot be an unspecified IP (0.0.0.0 / ::)", addr)
+		}
+		return nil
+	}
+
+	// Hostname validation
+	if len(trimmed) > 253 || !hostnameRegex.MatchString(trimmed) {
+		return fmt.Errorf("public endpoint address %q is not a valid hostname or IP address", addr)
+	}
+
 	return nil
 }
 

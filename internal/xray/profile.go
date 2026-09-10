@@ -22,10 +22,10 @@ func (ep *PublicEndpoint) Validate() error {
 	if ep == nil {
 		return fmt.Errorf("public endpoint is nil")
 	}
-	if strings.TrimSpace(ep.Address) == "" {
-		return fmt.Errorf("public endpoint address cannot be empty")
+	if err := ValidatePublicAddress(ep.Address); err != nil {
+		return fmt.Errorf("invalid public endpoint address: %w", err)
 	}
-	if err := ValidatePublicPort(ep.Port); err != nil {
+	if err := ValidateVlessPublicPort(ep.Port); err != nil {
 		return fmt.Errorf("invalid public endpoint port: %w", err)
 	}
 	return nil
@@ -35,7 +35,7 @@ func (ep *PublicEndpoint) Validate() error {
 // client configuration generators (VLESS URI, Clash Meta, Sing-box, Xray-core, Subscriptions).
 type RealityClientProfile struct {
 	Address         string `json:"address"`
-	Port            int    `json:"port"`
+	Port            int    `json:"port"`            // Strictly 443
 	UUID            string `json:"uuid"`
 	SNI             string `json:"sni"`
 	Fingerprint     string `json:"fingerprint"`     // Strictly "chrome"
@@ -53,10 +53,10 @@ func (p *RealityClientProfile) Validate() error {
 	if p == nil {
 		return fmt.Errorf("reality client profile is nil")
 	}
-	if strings.TrimSpace(p.Address) == "" {
-		return fmt.Errorf("profile address cannot be empty")
+	if err := ValidatePublicAddress(p.Address); err != nil {
+		return fmt.Errorf("profile address validation failed: %w", err)
 	}
-	if err := ValidatePublicPort(p.Port); err != nil {
+	if err := ValidateVlessPublicPort(p.Port); err != nil {
 		return fmt.Errorf("profile public port validation failed: %w", err)
 	}
 	if _, err := uuid.Parse(p.UUID); err != nil {
@@ -117,7 +117,7 @@ func GetRuntimeVlessEndpoint() (*PublicEndpoint, error) {
 	return &cp, nil
 }
 
-// ClearRuntimeVlessEndpoint unregisters the active runtime endpoint (e.g., when Xray stops).
+// ClearRuntimeVlessEndpoint unregisters the active runtime endpoint (e.g., when Xray stops or crashes).
 func ClearRuntimeVlessEndpoint() {
 	endpointMu.Lock()
 	defer endpointMu.Unlock()

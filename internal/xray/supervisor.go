@@ -55,6 +55,7 @@ type Supervisor struct {
 	vlessEnabled       bool
 	vlessOnly443       bool
 	vlessEndpoint      *PublicEndpoint
+	publicAddress      string
 
 	// Callbacks for metrics and observability
 	OnCrash   func(err error)
@@ -209,7 +210,17 @@ func (s *Supervisor) Start() error {
 	s.mu.Lock()
 	s.state = StateRunning
 	if s.vlessEnabled && s.vlessEndpoint != nil {
-		_ = SetRuntimeVlessEndpoint(*s.vlessEndpoint)
+		ep := *s.vlessEndpoint
+		if ep.Address == "" || ep.Address == "0.0.0.0" {
+			if s.publicAddress != "" {
+				ep.Address = s.publicAddress
+			} else if envAddr := os.Getenv("XRAY_VLESS_ADDRESS"); envAddr != "" {
+				ep.Address = envAddr
+			}
+		}
+		if ep.Address != "" && ep.Address != "0.0.0.0" {
+			_ = SetRuntimeVlessEndpoint(ep)
+		}
 	}
 	s.mu.Unlock()
 
@@ -306,6 +317,9 @@ func (s *Supervisor) monitorLoop() {
 			close(doneChan)
 		}
 
+		// Clear active runtime endpoint immediately on crash/exit
+		ClearRuntimeVlessEndpoint()
+
 		s.mu.Lock()
 		if s.stopped {
 			s.mu.Unlock()
@@ -368,6 +382,19 @@ func (s *Supervisor) monitorLoop() {
 
 		s.mu.Lock()
 		s.state = StateRunning
+		if s.vlessEnabled && s.vlessEndpoint != nil {
+			ep := *s.vlessEndpoint
+			if ep.Address == "" || ep.Address == "0.0.0.0" {
+				if s.publicAddress != "" {
+					ep.Address = s.publicAddress
+				} else if envAddr := os.Getenv("XRAY_VLESS_ADDRESS"); envAddr != "" {
+					ep.Address = envAddr
+				}
+			}
+			if ep.Address != "" && ep.Address != "0.0.0.0" {
+				_ = SetRuntimeVlessEndpoint(ep)
+			}
+		}
 		s.mu.Unlock()
 		log.Printf("[XraySupervisor] Xray successfully recovered and RUNNING.")
 
@@ -972,4 +999,20 @@ func (s *Supervisor) GetPublicEndpoint() (*PublicEndpoint, error) {
 	}
 	return s.vlessEndpoint, nil
 }
+
+// SetPublicAddress dynamically configures the public address/domain for VLESS Reality ingress
+// and updates the active runtime endpoint if the supervisor is currently running.
+func (s *Supervisor) SetPublicAddress(addr string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publicAddress = addr
+	if s.vlessEndpoint != nil {
+		s.vlessEndpoint.Address = addr
+		if s.state == StateRunning && addr != "" && addr != "0.0.0.0" {
+			return SetRuntimeVlessEndpoint(*s.vlessEndpoint)
+		}
+	}
+	return nil
+}
+
 
