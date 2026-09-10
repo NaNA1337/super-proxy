@@ -157,15 +157,14 @@ func TestLinuxNetwork_FullIntegrationHarness(t *testing.T) {
 	}
 }
 
-// TestLinuxRoutingPrimitives_A_through_G validates Linux policy routing primitives across all lifecycle phases:
+// TestLinuxRoutingPrimitives_A_through_F validates Linux policy routing primitives across all lifecycle phases:
 // Primitive A: client traffic -> fwmark -> ip rule -> routing table -> expected interface
 // Primitive B: ACTIVE slot 0 -> traffic routes via slot 0 table
 // Primitive C: slot 0 DRAINING -> existing routing preserved -> new routing uses slot 1
 // Primitive D: slot 0 DEAD -> no routing via slot 0
 // Primitive E: routing rule deleted -> traffic must fail closed (cannot fallback to host default)
 // Primitive F: IPv4 underlay bypass routing
-// Primitive G: IPv6 fail-closed (unreachable leak guard)
-func TestLinuxRoutingPrimitives_A_through_G(t *testing.T) {
+func TestLinuxRoutingPrimitives_A_through_F(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("Skipping Linux routing primitives test: requires root privileges (CAP_NET_ADMIN)")
 	}
@@ -317,23 +316,40 @@ except OSError as e:
 	if err != nil || !strings.Contains(routeF, "dev dummy1") {
 		t.Fatalf("Test F FAILED: IPv4 underlay bypass route failed: %s (err: %v)", routeF, err)
 	}
+}
 
-	// -------------------------------------------------------------
-	// Test G: IPv6 fail closed (unreachable leak protection)
-	// -------------------------------------------------------------
-	_, err = runInNetNS(ns, "ip", "-6", "rule", "add", "unreachable", "priority", "50")
+// TestLinuxRoutingPrimitives_IPv6 verifies Linux kernel IPv6 policy routing primitives
+// and socket fail-closed behavior when unreachable rule is active.
+func TestLinuxRoutingPrimitives_IPv6(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("Skipping Linux routing primitives IPv6 test: requires root privileges (CAP_NET_ADMIN)")
+	}
+
+	ns := fmt.Sprintf("sp_ipv6_%d", time.Now().UnixNano()%100000)
+	if out, err := exec.Command("ip", "netns", "add", ns).CombinedOutput(); err != nil {
+		t.Fatalf("Failed to create test netns: %v (%s)", err, string(out))
+	}
+	defer func() {
+		_ = exec.Command("ip", "netns", "del", ns).Run()
+	}()
+
+	_, _ = runInNetNS(ns, "ip", "link", "set", "lo", "up")
+
+	// 1. Primitive routing rule check: ip -6 rule add unreachable
+	_, err := runInNetNS(ns, "ip", "-6", "rule", "add", "unreachable", "priority", "50")
 	if err != nil {
 		t.Fatalf("Failed to add IPv6 unreachable rule: %v", err)
 	}
 	routeG, err := runInNetNS(ns, "ip", "-6", "route", "get", "2001:db8::1")
 	if err == nil && !strings.Contains(routeG, "unreachable") {
-		t.Fatalf("Test G FAILED: IPv6 did not fail-closed: %s", routeG)
+		t.Fatalf("IPv6 routing primitive FAILED: route did not fail-closed: %s", routeG)
 	}
 	if !strings.Contains(routeG, "unreachable") && (err == nil || !strings.Contains(err.Error(), "exit status")) {
-		t.Fatalf("Test G FAILED: IPv6 leak guard failed to block traffic: %s", routeG)
+		t.Fatalf("IPv6 routing primitive FAILED: unreachable guard failed: %s", routeG)
 	}
+	t.Logf("[IPv6 Primitive Evidence] ip -6 route get returned unreachable: %s", strings.TrimSpace(routeG))
 
-	// Real IPv6 TCP socket dial: MUST fail closed
+	// 2. Real IPv6 TCP socket dial: MUST fail closed
 	tcp6FailClosedOut, _ := runInNetNS(ns, "python3", "-c", `
 import socket, sys
 s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -346,25 +362,25 @@ except OSError as e:
     sys.exit(1) # failed closed as expected
 `)
 	if !strings.Contains(tcp6FailClosedOut, "TCP6_FAIL_CLOSED:") {
-		t.Fatalf("Test G FAILED: Real IPv6 TCP socket did not fail closed: %s", tcp6FailClosedOut)
+		t.Fatalf("IPv6 socket FAILED: Real IPv6 TCP socket did not fail closed: %s", tcp6FailClosedOut)
 	}
-	t.Logf("[Test G Evidence] Real IPv6 TCP socket failed closed as expected: %s", strings.TrimSpace(tcp6FailClosedOut))
+	t.Logf("[IPv6 Primitive Evidence] Real IPv6 TCP socket failed closed: %s", strings.TrimSpace(tcp6FailClosedOut))
 
-	// Real IPv6 UDP socket sendto: MUST fail closed
+	// 3. Real IPv6 UDP socket sendto: MUST fail closed
 	udp6FailClosedOut, _ := runInNetNS(ns, "python3", "-c", `
 import socket, sys
 s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
 try:
-    s.sendto(b"DNS_PROBE", ('2001:db8::1', 53))
+    s.sendto(b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01", ('2001:db8::1', 53))
     sys.exit(0) # leaked!
 except OSError as e:
     print("UDP6_FAIL_CLOSED:", e)
     sys.exit(1) # failed closed as expected
 `)
 	if !strings.Contains(udp6FailClosedOut, "UDP6_FAIL_CLOSED:") {
-		t.Fatalf("Test G FAILED: Real IPv6 UDP socket did not fail closed: %s", udp6FailClosedOut)
+		t.Fatalf("IPv6 socket FAILED: Real IPv6 UDP socket did not fail closed: %s", udp6FailClosedOut)
 	}
-	t.Logf("[Test G Evidence] Real IPv6 UDP socket failed closed as expected: %s", strings.TrimSpace(udp6FailClosedOut))
+	t.Logf("[IPv6 Primitive Evidence] Real IPv6 UDP socket failed closed: %s", strings.TrimSpace(udp6FailClosedOut))
 }
 
 // TestLinuxRoutingPrimitives_AntiLeak verifies:
@@ -423,12 +439,14 @@ func TestLinuxRoutingPrimitives_AntiLeak(t *testing.T) {
 	// 2. Query DNS DROP rule packet counter BEFORE sending DNS queries
 	dnsPktsBefore := getDnsDropCount()
 
-	// 3. Send real UDP DNS packet and verify it is intercepted & counted by anti-leak firewall
+	// 3. Send real UDP DNS packet (RFC 1035 format for example.com) and verify it is intercepted & counted by anti-leak firewall
 	_, _ = runInNetNS(ns, "python3", "-c", `
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 try:
-    s.sendto(b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04test\x00\x00\x01\x00\x01", ("1.1.1.1", 53))
+    # RFC 1035 Standard DNS Query: TxID 0x1234, Flags RD=1, QDCOUNT 1, QNAME example.com, QTYPE A, QCLASS IN
+    dns_query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"
+    s.sendto(dns_query, ("1.1.1.1", 53))
 except Exception as e:
     pass
 `)
@@ -442,13 +460,16 @@ except Exception as e:
 	t.Logf("[Anti-Leak Evidence] DNS UDP leak blocked by iptables (counter %d -> %d)",
 		dnsPktsBefore, dnsPktsAfterUDP)
 
-	// 5. Attempt real TCP DNS connection and verify it fails closed
+	// 5. Attempt real TCP DNS connection with DNS-over-TCP query (2-byte length prefix + RFC 1035 query)
 	_, _ = runInNetNS(ns, "python3", "-c", `
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.settimeout(0.3)
 try:
     s.connect(("1.1.1.1", 53))
+    # Send DNS-over-TCP query
+    dns_query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"
+    s.sendall(b"\x00\x1d" + dns_query)
 except Exception as e:
     pass
 `)
