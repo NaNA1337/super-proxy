@@ -2,3 +2,4 @@ super-proxy
 gosec.json
 govulncheck.txt
 release/
+dist/
