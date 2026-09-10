@@ -476,11 +476,12 @@ except Exception as e:
 
 	// 6. Verify DNS leak prevention rule matches and blocked DNS egress (tangible packet counter evidence)
 	dnsPktsFinal := getDnsDropCount()
-	if dnsPktsFinal <= dnsPktsBefore {
-		t.Fatalf("Anti-leak FAILED: DNS final counter failed to record dropped packets: before=%d, final=%d",
-			dnsPktsBefore, dnsPktsFinal)
+	if dnsPktsFinal <= dnsPktsAfterUDP {
+		t.Fatalf("Anti-leak FAILED: DNS TCP connection failed to increment drop counter: afterUDP=%d, final=%d",
+			dnsPktsAfterUDP, dnsPktsFinal)
 	}
-	t.Logf("[Anti-Leak Evidence] Total DNS packets dropped by firewall: %d (before: %d)", dnsPktsFinal, dnsPktsBefore)
+	t.Logf("[Anti-Leak Evidence] TCP DNS dropped by firewall (counter %d -> %d, delta=%d)",
+		dnsPktsAfterUDP, dnsPktsFinal, dnsPktsFinal-dnsPktsAfterUDP)
 
 	// 7. Policy routing fail-closed unreachable rule
 	// Remove default route to dummy0

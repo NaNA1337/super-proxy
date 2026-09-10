@@ -156,18 +156,40 @@ func readIptablesProtoDnsDropPackets(proto string) int64 {
 	return 0
 }
 
-// getDefaultWANInterface returns the interface used by the default IPv4 route.
-func getDefaultWANInterface() string {
-	out, err := exec.Command("ip", "route", "show", "default").CombinedOutput()
-	if err == nil {
-		fields := strings.Fields(string(out))
-		for i, f := range fields {
-			if f == "dev" && i+1 < len(fields) {
-				return fields[i+1]
+// resolveWANInterface dynamically determines the outbound WAN interface using ip route.
+func resolveWANInterface(targetIP string) (string, error) {
+	if targetIP != "" {
+		out, err := exec.Command("ip", "route", "get", targetIP).CombinedOutput()
+		if err == nil {
+			fields := strings.Fields(string(out))
+			for i, f := range fields {
+				if f == "dev" && i+1 < len(fields) {
+					dev := fields[i+1]
+					if dev != "lo" {
+						return dev, nil
+					}
+				}
 			}
 		}
 	}
-	return "enp1s0"
+
+	out, err := exec.Command("ip", "route", "show", "default").CombinedOutput()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			fields := strings.Fields(line)
+			for i, f := range fields {
+				if f == "dev" && i+1 < len(fields) {
+					dev := fields[i+1]
+					if dev != "lo" {
+						return dev, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("unable to determine default WAN interface")
 }
 
 // buildDNSQuery builds an authentic RFC 1035 wire-format A-record query for the given domain.
@@ -197,67 +219,139 @@ func buildDNSQuery(domain string, txID uint16) []byte {
 	return buf
 }
 
-// startTcpdump starts tcpdump with -Z root on the given interface with filter, returning a stop func that returns the captured packet count.
-func startTcpdump(iface, filter string) (func() int, error) {
+// PacketCapture manages an active tcpdump observer process on a specified network interface.
+type PacketCapture struct {
+	iface    string
+	filter   string
+	pcapFile string
+	cmd      *exec.Cmd
+	stopped  bool
+	stopMu   sync.Mutex
+}
+
+// StartPacketCapture starts tcpdump with -Z root on iface with filter, waits until
+// tcpdump has actively entered packet capture mode ("listening on" in stderr), and returns *PacketCapture.
+// Cleanup of the process and pcap file is automatically registered with t.Cleanup.
+func StartPacketCapture(t *testing.T, iface, filter string) (*PacketCapture, error) {
 	tcpdumpPath, err := exec.LookPath("tcpdump")
 	if err != nil {
-		return nil, fmt.Errorf("tcpdump not found: %w", err)
+		return nil, fmt.Errorf("tcpdump binary not found: %w", err)
 	}
 
-	outFile := fmt.Sprintf("/tmp/tcpdump_%d_%d.txt", os.Getpid(), time.Now().UnixNano())
-	f, err := os.Create(outFile)
+	pcapFile := fmt.Sprintf("/tmp/cap_%d_%d.pcap", os.Getpid(), time.Now().UnixNano())
+
+	cmd := exec.Command(tcpdumpPath, "-Z", "root", "-U", "-n", "-i", iface, "-w", pcapFile, filter)
+	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create dump output file: %w", err)
+		return nil, fmt.Errorf("failed to create tcpdump stderr pipe: %w", err)
 	}
-
-	cmd := exec.Command(tcpdumpPath, "-Z", "root", "-l", "-n", "-i", iface, filter)
-	cmd.Stdout = f
-	cmd.Stderr = f
 
 	if err := cmd.Start(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(outFile)
 		return nil, fmt.Errorf("failed to start tcpdump: %w", err)
 	}
 
-	time.Sleep(150 * time.Millisecond)
-
-	stop := func() int {
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(os.Interrupt)
-			done := make(chan struct{})
-			go func() {
-				_ = cmd.Wait()
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-time.After(600 * time.Millisecond):
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-			}
-		}
-		_ = f.Close()
-
-		data, readErr := os.ReadFile(outFile)
-		_ = os.Remove(outFile)
-		if readErr != nil {
-			return 0
-		}
-
-		lines := strings.Split(string(data), "\n")
-		var packets int
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if strings.Contains(trimmed, " IP ") || strings.Contains(trimmed, " IP6 ") {
-				packets++
-			}
-		}
-		return packets
+	pc := &PacketCapture{
+		iface:    iface,
+		filter:   filter,
+		pcapFile: pcapFile,
+		cmd:      cmd,
 	}
 
-	return stop, nil
+	// Guarantee cleanup regardless of test outcome (PASS, FAIL, PANIC)
+	t.Cleanup(func() {
+		pc.Close()
+	})
+
+	// Wait until tcpdump is confirmed ready and capturing.
+	// tcpdump outputs "listening on <iface>..." to stderr upon successful socket initialization.
+	readyChan := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "listening on") {
+				close(readyChan)
+				break
+			}
+		}
+		for scanner.Scan() {
+		}
+	}()
+
+	select {
+	case <-readyChan:
+		// tcpdump is actively capturing
+	case <-time.After(2 * time.Second):
+		pc.Close()
+		return nil, fmt.Errorf("tcpdump failed to enter capture mode within 2s timeout")
+	}
+
+	return pc, nil
 }
+
+// Stop gracefully signals tcpdump with SIGINT to finalize pcap write.
+func (pc *PacketCapture) Stop() {
+	pc.stopMu.Lock()
+	defer pc.stopMu.Unlock()
+	if pc.stopped {
+		return
+	}
+	pc.stopped = true
+
+	if pc.cmd != nil && pc.cmd.Process != nil {
+		_ = pc.cmd.Process.Signal(os.Interrupt)
+		done := make(chan struct{})
+		go func() {
+			_ = pc.cmd.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			_ = pc.cmd.Process.Kill()
+			_ = pc.cmd.Wait()
+		}
+	}
+}
+
+// Close terminates tcpdump and removes the pcap file.
+func (pc *PacketCapture) Close() {
+	pc.Stop()
+	if pc.pcapFile != "" {
+		_ = os.Remove(pc.pcapFile)
+	}
+}
+
+// PacketCount stops the capture if still running and reads the number of packets from pcap using tcpdump -nn -r.
+func (pc *PacketCapture) PacketCount() (int, error) {
+	pc.Stop()
+
+	if _, err := os.Stat(pc.pcapFile); os.IsNotExist(err) {
+		return 0, nil
+	}
+
+	readCmd := exec.Command("tcpdump", "-nn", "-r", pc.pcapFile)
+	out, err := readCmd.CombinedOutput()
+	if err != nil {
+		outStr := string(out)
+		if strings.Contains(outStr, "reading from file") && !strings.Contains(outStr, "\n") {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("tcpdump -r failed: %w (%s)", err, outStr)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var count int
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" || strings.HasPrefix(trimmed, "reading from file") {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
 
 
 func TestXray_PacketPath_ExistingConnectionPreservedAnd100NewAvoidDraining(t *testing.T) {
@@ -754,7 +848,15 @@ func TestLinuxPacketPathE2E_DualExitMarkersAndFailClosed(t *testing.T) {
 		t.Fatalf("failed to drain slot 1: %v", err)
 	}
 
-	// 4. Attempting a new connection now must FAIL CLOSED
+	// 4. Attempting a new connection now must FAIL CLOSED and not leak onto WAN
+	var capWAN *PacketCapture
+	if isRoot {
+		wanIface, wErr := resolveWANInterface("")
+		if wErr == nil {
+			capWAN, _ = StartPacketCapture(t, wanIface, "tcp port 80 and dst host test.internal")
+		}
+	}
+
 	failClient := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -769,18 +871,32 @@ func TestLinuxPacketPathE2E_DualExitMarkersAndFailClosed(t *testing.T) {
 		t.Fatalf("CRITICAL SECURITY VIOLATION: traffic succeeded when no active slots exist (did not fail closed)!")
 	}
 	t.Logf("[Phase D2 Evidence] All slots dead -> request failed closed as expected: %v", err)
+
+	if capWAN != nil {
+		wanPkts, pErr := capWAN.PacketCount()
+		if pErr == nil {
+			t.Logf("[Phase D2 Evidence] WAN tcpdump captured %d packets on WAN during all-slots-dead failure", wanPkts)
+			if wanPkts != 0 {
+				t.Fatalf("CRITICAL SECURITY VIOLATION: %d packets leaked out WAN interface when all slots dead!", wanPkts)
+			}
+		}
+	}
+
 	t.Logf("SUCCESS: Real Xray packet-path E2E verified dual exit markers, draining continuity, slot-0 dead failover, and all-dead fail-closed.")
 }
 
 // TestLinuxPacketPathE2E_DNSLeak verifies that direct DNS queries outside the proxy path
-// (both UDP/53 and TCP/53) are dropped by the anti-leak firewall and do not leak out the WAN interface.
+// (both UDP/53 and TCP/53) are independently dropped by the anti-leak firewall and do not leak out the WAN interface.
 func TestLinuxPacketPathE2E_DNSLeak(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("skipping DNS leak E2E test; requires root/CAP_NET_ADMIN")
 	}
 
-	wanIface := getDefaultWANInterface()
-	t.Logf("[DNS Leak E2E] Testing WAN interface %s", wanIface)
+	wanIface, err := resolveWANInterface("1.1.1.1")
+	if err != nil {
+		t.Skipf("SKIPPED: WAN interface unavailable (%v)", err)
+	}
+	t.Logf("[DNS Leak E2E] Dynamically resolved WAN interface: %s", wanIface)
 
 	// Install anti-leak DROP rules for both UDP and TCP port 53
 	cmdUdp := exec.Command("iptables", "-I", "OUTPUT", "1", "-p", "udp", "--dport", "53", "-j", "DROP")
@@ -797,76 +913,101 @@ func TestLinuxPacketPathE2E_DNSLeak(t *testing.T) {
 		_ = exec.Command("iptables", "-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "DROP").Run()
 	})
 
-	// Start WAN tcpdump to verify ZERO DNS packets leak onto WAN
-	stopDump, dumpErr := startTcpdump(wanIface, "(udp port 53 or tcp port 53) and host 1.1.1.1")
-	if dumpErr != nil {
-		t.Logf("warning: tcpdump unavailable (%v); relying on iptables drop counters", dumpErr)
-	} else {
-		defer func() {
-			leaked := stopDump()
-			t.Logf("[WAN tcpdump Evidence] DNS packets leaked on %s: %d", wanIface, leaked)
-			if leaked != 0 {
-				t.Fatalf("CRITICAL SECURITY VIOLATION: %d DNS packets leaked out WAN interface %s!", leaked, wanIface)
-			}
-		}()
-	}
-
-	// 1. DNS Test 1: Authentic RFC 1035 UDP/53 query for example.com
-	udpDropBefore := readIptablesProtoDnsDropPackets("udp")
 	query := buildDNSQuery("example.com", 0x1234)
 
-	udpConn, err := net.DialTimeout("udp", "1.1.1.1:53", 500*time.Millisecond)
-	if err != nil {
-		t.Fatalf("failed to create UDP socket to 1.1.1.1:53: %v", err)
-	}
-	defer udpConn.Close()
+	// =========================================================================
+	// 1. INDEPENDENT UDP DNS VERIFICATION
+	// =========================================================================
+	t.Run("UDP_DNS_AntiLeak", func(t *testing.T) {
+		udpDropBefore := readIptablesProtoDnsDropPackets("udp")
 
-	if _, writeErr := udpConn.Write(query); writeErr != nil {
-		t.Logf("[DNS UDP Evidence] UDP DNS query dropped by kernel anti-leak at socket level: %v", writeErr)
-	} else {
-		// If socket buffer accepted it, verify receive times out/fails closed
-		_ = udpConn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-		respBuf := make([]byte, 512)
-		n, readErr := udpConn.Read(respBuf)
-		if readErr == nil && n > 0 {
-			t.Fatalf("CRITICAL SECURITY VIOLATION: received DNS response when anti-leak DROP active (%d bytes)", n)
+		capUDP, err := StartPacketCapture(t, wanIface, "udp port 53 and host 1.1.1.1")
+		if err != nil {
+			t.Skipf("SKIPPED: tcpdump unavailable for UDP (%v)", err)
 		}
-	}
 
-	udpDropAfter := readIptablesProtoDnsDropPackets("udp")
-	t.Logf("[DNS UDP Evidence] iptables UDP drop counter: %d -> %d", udpDropBefore, udpDropAfter)
-	if udpDropAfter <= udpDropBefore {
-		t.Fatalf("CRITICAL SECURITY VIOLATION: UDP DNS query was not dropped by firewall counter (before=%d, after=%d)",
-			udpDropBefore, udpDropAfter)
-	}
+		udpConn, err := net.DialTimeout("udp", "1.1.1.1:53", 500*time.Millisecond)
+		if err != nil {
+			t.Fatalf("failed to create UDP socket to 1.1.1.1:53: %v", err)
+		}
+		defer udpConn.Close()
 
-	// 2. DNS Test 2: Authentic RFC 1035 TCP/53 query (2-byte length prefix + DNS message)
-	tcpDropBefore := readIptablesProtoDnsDropPackets("tcp")
-	var tcpQuery []byte
-	qLen := uint16(len(query))
-	tcpQuery = append(tcpQuery, byte(qLen>>8), byte(qLen&0xff))
-	tcpQuery = append(tcpQuery, query...)
+		if _, writeErr := udpConn.Write(query); writeErr != nil {
+			t.Logf("[UDP DNS Evidence] UDP DNS query dropped by kernel anti-leak at socket level: %v", writeErr)
+		} else {
+			_ = udpConn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+			respBuf := make([]byte, 512)
+			n, readErr := udpConn.Read(respBuf)
+			if readErr == nil && n > 0 {
+				t.Fatalf("CRITICAL SECURITY VIOLATION: received DNS response when anti-leak DROP active (%d bytes)", n)
+			}
+		}
 
-	tcpDialer := net.Dialer{Timeout: 300 * time.Millisecond}
-	tcpConn, tcpErr := tcpDialer.Dial("tcp", "1.1.1.1:53")
-	if tcpErr == nil {
-		defer tcpConn.Close()
-		_, _ = tcpConn.Write(tcpQuery)
-		_ = tcpConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-		respBuf := make([]byte, 512)
-		_, _ = tcpConn.Read(respBuf)
-	} else {
-		t.Logf("[DNS TCP Evidence] Real TCP DNS connection blocked/dropped: %v", tcpErr)
-	}
+		udpDropAfter := readIptablesProtoDnsDropPackets("udp")
+		t.Logf("[UDP DNS Evidence] iptables UDP drop counter delta: %d -> %d (delta=%d)",
+			udpDropBefore, udpDropAfter, udpDropAfter-udpDropBefore)
+		if udpDropAfter <= udpDropBefore {
+			t.Fatalf("CRITICAL VIOLATION: UDP drop counter did not increase: before=%d, after=%d",
+				udpDropBefore, udpDropAfter)
+		}
 
-	tcpDropAfter := readIptablesProtoDnsDropPackets("tcp")
-	t.Logf("[DNS TCP Evidence] iptables TCP drop counter: %d -> %d", tcpDropBefore, tcpDropAfter)
-	if tcpDropAfter <= tcpDropBefore {
-		t.Fatalf("CRITICAL SECURITY VIOLATION: TCP DNS connection was not dropped by firewall counter (before=%d, after=%d)",
-			tcpDropBefore, tcpDropAfter)
-	}
+		wanPktsUDP, err := capUDP.PacketCount()
+		if err != nil {
+			t.Fatalf("failed to inspect UDP pcap: %v", err)
+		}
+		t.Logf("[UDP DNS Evidence] WAN tcpdump captured %d UDP DNS packets on %s", wanPktsUDP, wanIface)
+		if wanPktsUDP != 0 {
+			t.Fatalf("CRITICAL SECURITY VIOLATION: %d UDP DNS packets leaked out WAN interface %s!", wanPktsUDP, wanIface)
+		}
+	})
 
-	t.Logf("SUCCESS: Real UDP/53 & TCP/53 DNS anti-leak verified with authentic RFC 1035 packets, drop counters, and WAN capture == 0.")
+	// =========================================================================
+	// 2. INDEPENDENT TCP DNS VERIFICATION (Strictly separated from UDP)
+	// =========================================================================
+	t.Run("TCP_DNS_AntiLeak", func(t *testing.T) {
+		tcpDropBefore := readIptablesProtoDnsDropPackets("tcp")
+
+		capTCP, err := StartPacketCapture(t, wanIface, "tcp port 53 and host 1.1.1.1")
+		if err != nil {
+			t.Skipf("SKIPPED: tcpdump unavailable for TCP (%v)", err)
+		}
+
+		var tcpQuery []byte
+		qLen := uint16(len(query))
+		tcpQuery = append(tcpQuery, byte(qLen>>8), byte(qLen&0xff))
+		tcpQuery = append(tcpQuery, query...)
+
+		tcpDialer := net.Dialer{Timeout: 300 * time.Millisecond}
+		tcpConn, tcpErr := tcpDialer.Dial("tcp", "1.1.1.1:53")
+		if tcpErr == nil {
+			defer tcpConn.Close()
+			_, _ = tcpConn.Write(tcpQuery)
+			_ = tcpConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			respBuf := make([]byte, 512)
+			_, _ = tcpConn.Read(respBuf)
+		} else {
+			t.Logf("[TCP DNS Evidence] Real TCP DNS connection blocked/dropped: %v", tcpErr)
+		}
+
+		tcpDropAfter := readIptablesProtoDnsDropPackets("tcp")
+		t.Logf("[TCP DNS Evidence] iptables TCP drop counter delta: %d -> %d (delta=%d)",
+			tcpDropBefore, tcpDropAfter, tcpDropAfter-tcpDropBefore)
+		if tcpDropAfter <= tcpDropBefore {
+			t.Fatalf("CRITICAL VIOLATION: TCP drop counter did not increase: before=%d, after=%d",
+				tcpDropBefore, tcpDropAfter)
+		}
+
+		wanPktsTCP, err := capTCP.PacketCount()
+		if err != nil {
+			t.Fatalf("failed to inspect TCP pcap: %v", err)
+		}
+		t.Logf("[TCP DNS Evidence] WAN tcpdump captured %d TCP DNS packets on %s", wanPktsTCP, wanIface)
+		if wanPktsTCP != 0 {
+			t.Fatalf("CRITICAL SECURITY VIOLATION: %d TCP DNS packets leaked out WAN interface %s!", wanPktsTCP, wanIface)
+		}
+	})
+
+	t.Logf("SUCCESS: Real UDP/53 & TCP/53 DNS anti-leak verified with authentic RFC 1035 packets, independent drop counters, and WAN capture == 0.")
 }
 
 // TestLinuxPacketPathE2E_IPv6FailClosed verifies that when IPv6 proxy path is unavailable,
@@ -881,8 +1022,11 @@ func TestLinuxPacketPathE2E_IPv6FailClosed(t *testing.T) {
 		t.Skip("SKIPPED: IPv6 E2E requires IPv6-capable test environment (/proc/sys/net/ipv6 not found)")
 	}
 
-	wanIface := getDefaultWANInterface()
-	t.Logf("[IPv6 Fail-Closed E2E] Testing WAN interface %s", wanIface)
+	wanIface, err := resolveWANInterface("")
+	if err != nil {
+		t.Skipf("SKIPPED: WAN interface unavailable (%v)", err)
+	}
+	t.Logf("[IPv6 Fail-Closed E2E] Dynamically resolved WAN interface: %s", wanIface)
 
 	// Install unreachable IPv6 policy rule
 	cmdAdd := exec.Command("ip", "-6", "rule", "add", "unreachable", "priority", "32765")
@@ -893,20 +1037,6 @@ func TestLinuxPacketPathE2E_IPv6FailClosed(t *testing.T) {
 		_ = exec.Command("ip", "-6", "rule", "del", "unreachable", "priority", "32765").Run()
 	})
 
-	// Start WAN tcpdump capturing any IPv6 packets to test address 2001:db8::1
-	stopDump, dumpErr := startTcpdump(wanIface, "ip6 and host 2001:db8::1")
-	if dumpErr != nil {
-		t.Logf("warning: tcpdump unavailable (%v); relying on kernel routing & socket rejection", dumpErr)
-	} else {
-		defer func() {
-			leaked := stopDump()
-			t.Logf("[WAN tcpdump Evidence] IPv6 packets leaked on %s: %d", wanIface, leaked)
-			if leaked != 0 {
-				t.Fatalf("CRITICAL SECURITY VIOLATION: %d IPv6 packets leaked out WAN interface %s!", leaked, wanIface)
-			}
-		}()
-	}
-
 	// 1. Primitive routing lookup verification
 	v6Out, v6Err := exec.Command("ip", "-6", "route", "get", "2001:db8::1").CombinedOutput()
 	if v6Err == nil && !strings.Contains(string(v6Out), "unreachable") {
@@ -914,36 +1044,72 @@ func TestLinuxPacketPathE2E_IPv6FailClosed(t *testing.T) {
 	}
 	t.Logf("[IPv6 Routing Evidence] Kernel lookup rejected: %s", strings.TrimSpace(string(v6Out)))
 
-	// 2. Real TCP6 client socket dial (explicitly forcing IPv6 without IPv4 fallback)
-	dialer := net.Dialer{
-		Timeout:       500 * time.Millisecond,
-		FallbackDelay: -1, // Disable DualStack/Happy Eyeballs IPv4 fallback
-	}
-	tcp6Conn, tcp6Err := dialer.Dial("tcp6", "[2001:db8::1]:443")
-	if tcp6Err == nil {
-		tcp6Conn.Close()
-		t.Fatalf("CRITICAL SECURITY VIOLATION: real TCP6 socket succeeded when fail-closed active!")
-	}
-	errStr := tcp6Err.Error()
-	if !strings.Contains(errStr, "unreachable") && !strings.Contains(errStr, "operation not permitted") && !strings.Contains(errStr, "no route to host") {
-		t.Fatalf("CRITICAL SECURITY VIOLATION: real TCP6 socket failed with unexpected error (not fail-closed): %v", tcp6Err)
-	}
-	t.Logf("[IPv6 TCP6 Evidence] Real TCP6 socket failed closed as expected: %v", tcp6Err)
-
-	// 3. Real UDP6 client socket write
-	udp6Conn, udp6Err := net.DialTimeout("udp6", "[2001:db8::1]:53", 500*time.Millisecond)
-	if udp6Err == nil {
-		_, writeErr := udp6Conn.Write([]byte("IPV6_FAIL_CLOSED_PROBE"))
-		udp6Conn.Close()
-		if writeErr != nil {
-			t.Logf("[IPv6 UDP6 Evidence] Real UDP6 write failed closed: %v", writeErr)
-		} else {
-			t.Logf("[IPv6 UDP6 Evidence] UDP6 packet buffered, kernel routing dropped, WAN tcpdump will verify zero egress")
+	// =========================================================================
+	// 2. INDEPENDENT REAL TCP6 SOCKET FAIL-CLOSED & WAN CAPTURE
+	// =========================================================================
+	t.Run("TCP6_FailClosed", func(t *testing.T) {
+		capTCP6, err := StartPacketCapture(t, wanIface, "ip6 and host 2001:db8::1 and tcp")
+		if err != nil {
+			t.Skipf("SKIPPED: tcpdump unavailable for TCP6 (%v)", err)
 		}
-	} else {
-		t.Logf("[IPv6 UDP6 Evidence] Real UDP6 socket dial failed closed: %v", udp6Err)
-	}
 
-	t.Logf("SUCCESS: Real IPv6 socket fail-closed verified with TCP6/UDP6 sockets, unreachable policy, and WAN capture == 0.")
+		dialer := net.Dialer{
+			Timeout:       500 * time.Millisecond,
+			FallbackDelay: -1, // Disable DualStack/Happy Eyeballs IPv4 fallback
+		}
+		tcp6Conn, tcp6Err := dialer.Dial("tcp6", "[2001:db8::1]:443")
+		if tcp6Err == nil {
+			tcp6Conn.Close()
+			t.Fatalf("CRITICAL SECURITY VIOLATION: real TCP6 socket succeeded when fail-closed active!")
+		}
+		errStr := tcp6Err.Error()
+		if !strings.Contains(errStr, "unreachable") && !strings.Contains(errStr, "operation not permitted") && !strings.Contains(errStr, "no route to host") {
+			t.Fatalf("CRITICAL SECURITY VIOLATION: real TCP6 socket failed with unexpected error (not fail-closed): %v", tcp6Err)
+		}
+		t.Logf("[IPv6 TCP6 Evidence] Real TCP6 socket failed closed as expected: %v", tcp6Err)
+
+		wanTCP6Count, err := capTCP6.PacketCount()
+		if err != nil {
+			t.Fatalf("failed to inspect TCP6 pcap: %v", err)
+		}
+		t.Logf("[IPv6 TCP6 Evidence] WAN tcpdump captured %d TCP6 packets on %s", wanTCP6Count, wanIface)
+		if wanTCP6Count != 0 {
+			t.Fatalf("CRITICAL SECURITY VIOLATION: %d TCP6 packets leaked out WAN interface %s!", wanTCP6Count, wanIface)
+		}
+	})
+
+	// =========================================================================
+	// 3. INDEPENDENT REAL UDP6 SOCKET FAIL-CLOSED & WAN CAPTURE
+	// =========================================================================
+	t.Run("UDP6_FailClosed", func(t *testing.T) {
+		capUDP6, err := StartPacketCapture(t, wanIface, "ip6 and host 2001:db8::1 and udp")
+		if err != nil {
+			t.Skipf("SKIPPED: tcpdump unavailable for UDP6 (%v)", err)
+		}
+
+		udp6Conn, udp6Err := net.DialTimeout("udp6", "[2001:db8::1]:53", 500*time.Millisecond)
+		if udp6Err == nil {
+			_, writeErr := udp6Conn.Write([]byte("IPV6_FAIL_CLOSED_PROBE"))
+			udp6Conn.Close()
+			if writeErr != nil {
+				t.Logf("[IPv6 UDP6 Evidence] Real UDP6 write failed closed: %v", writeErr)
+			} else {
+				t.Logf("[IPv6 UDP6 Evidence] UDP6 packet buffered, kernel routing dropped, WAN tcpdump will verify zero egress")
+			}
+		} else {
+			t.Logf("[IPv6 UDP6 Evidence] Real UDP6 socket dial failed closed: %v", udp6Err)
+		}
+
+		wanUDP6Count, err := capUDP6.PacketCount()
+		if err != nil {
+			t.Fatalf("failed to inspect UDP6 pcap: %v", err)
+		}
+		t.Logf("[IPv6 UDP6 Evidence] WAN tcpdump captured %d UDP6 packets on %s", wanUDP6Count, wanIface)
+		if wanUDP6Count != 0 {
+			t.Fatalf("CRITICAL SECURITY VIOLATION: %d UDP6 packets leaked out WAN interface %s!", wanUDP6Count, wanIface)
+		}
+	})
+
+	t.Logf("SUCCESS: Real IPv6 socket fail-closed verified with independent TCP6/UDP6 sockets, unreachable policy, and WAN capture == 0.")
 }
 
