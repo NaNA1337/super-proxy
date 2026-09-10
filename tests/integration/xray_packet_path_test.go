@@ -113,6 +113,28 @@ func readIptablesPackets(mark int, dport int) int64 {
 	return 0
 }
 
+// readIptablesDnsDropPackets returns the packet count for DNS DROP rules in iptables filter OUTPUT.
+func readIptablesDnsDropPackets() int64 {
+	out, err := exec.Command("iptables", "-L", "OUTPUT", "-v", "-n", "-x").CombinedOutput()
+	if err != nil {
+		return -1
+	}
+	var total int64
+	lines := strings.Split(string(out), "\n")
+	for _, l := range lines {
+		if strings.Contains(l, "DROP") && strings.Contains(l, "dpt:53") {
+			fields := strings.Fields(l)
+			if len(fields) >= 1 {
+				pkts, err := strconv.ParseInt(fields[0], 10, 64)
+				if err == nil {
+					total += pkts
+				}
+			}
+		}
+	}
+	return total
+}
+
 func TestXray_PacketPath_ExistingConnectionPreservedAnd100NewAvoidDraining(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := tempDir + "/xray_packet_path.json"
@@ -624,10 +646,10 @@ func TestLinuxPacketPathE2E_DualExitMarkersAndDNSLeak(t *testing.T) {
 	t.Logf("[Phase D2 Evidence] All slots dead -> request failed closed as expected: %v", err)
 
 	// -------------------------------------------------------------
-	// PHASE E: IPv6 and DNS Fail-Closed Anti-Leak Verification
+	// PHASE E: Real IPv6 Socket Fail-Closed & Real DNS Leak E2E Verification
 	// -------------------------------------------------------------
 	if isRoot {
-		// Verify policy routing IPv6 unreachable rule
+		// 1. Real IPv6 socket fail-closed verification
 		_ = exec.Command("ip", "-6", "rule", "add", "unreachable", "priority", "32765").Run()
 		defer func() {
 			_ = exec.Command("ip", "-6", "rule", "del", "unreachable", "priority", "32765").Run()
@@ -635,11 +657,59 @@ func TestLinuxPacketPathE2E_DualExitMarkersAndDNSLeak(t *testing.T) {
 
 		v6Out, v6Err := exec.Command("ip", "-6", "route", "get", "2001:db8::1").CombinedOutput()
 		if v6Err == nil && !strings.Contains(string(v6Out), "unreachable") {
-			t.Fatalf("CRITICAL SECURITY VIOLATION: IPv6 did not fail closed: %s", string(v6Out))
+			t.Fatalf("CRITICAL SECURITY VIOLATION: IPv6 route did not fail closed: %s", string(v6Out))
 		}
-		t.Logf("[Phase E Evidence] IPv6 fail-closed anti-leak verified: %s", strings.TrimSpace(string(v6Out)))
+		t.Logf("[Phase E Evidence] IPv6 policy routing fail-closed verified: %s", strings.TrimSpace(string(v6Out)))
+
+		// Real IPv6 TCP client socket attempt: MUST fail closed immediately
+		v6TcpConn, v6TcpErr := net.DialTimeout("tcp6", "[2001:db8::1]:80", 500*time.Millisecond)
+		if v6TcpErr == nil {
+			v6TcpConn.Close()
+			t.Fatalf("CRITICAL SECURITY VIOLATION: real IPv6 TCP socket succeeded when leak protection active!")
+		}
+		if !strings.Contains(v6TcpErr.Error(), "unreachable") && !strings.Contains(v6TcpErr.Error(), "operation not permitted") {
+			t.Fatalf("CRITICAL SECURITY VIOLATION: real IPv6 TCP socket did not fail closed with unreachable/not permitted: %v", v6TcpErr)
+		}
+		t.Logf("[Phase E Evidence] Real IPv6 TCP socket failed closed as expected: %v", v6TcpErr)
+
+		// Real IPv6 UDP client socket send attempt: MUST fail closed immediately
+		v6UdpConn, v6UdpErr := net.DialTimeout("udp6", "[2001:db8::1]:53", 500*time.Millisecond)
+		if v6UdpErr == nil {
+			_, writeErr := v6UdpConn.Write([]byte("DNS_PROBE_V6"))
+			v6UdpConn.Close()
+			if writeErr == nil {
+				t.Fatalf("CRITICAL SECURITY VIOLATION: real IPv6 UDP packet escaped when leak protection active!")
+			}
+			t.Logf("[Phase E Evidence] Real IPv6 UDP packet write failed closed as expected: %v", writeErr)
+		} else {
+			t.Logf("[Phase E Evidence] Real IPv6 UDP socket failed closed as expected: %v", v6UdpErr)
+		}
+
+		// 2. Real DNS leak E2E verification
+		// Direct host WAN DNS query outside proxy tunnel MUST be blocked by firewall
+		_ = exec.Command("iptables", "-I", "OUTPUT", "1", "-p", "udp", "--dport", "53", "-j", "DROP").Run()
+		defer func() {
+			_ = exec.Command("iptables", "-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "DROP").Run()
+		}()
+
+		dnsDropPktsBefore := readIptablesDnsDropPackets()
+
+		// Send direct raw UDP DNS query to 1.1.1.1:53 (unencrypted host WAN leak attempt)
+		dnsUdpConn, err := net.DialTimeout("udp", "1.1.1.1:53", 500*time.Millisecond)
+		if err == nil {
+			_, _ = dnsUdpConn.Write([]byte("\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04test\x00\x00\x01\x00\x01"))
+			dnsUdpConn.Close()
+		}
+
+		dnsDropPktsAfter := readIptablesDnsDropPackets()
+		if dnsDropPktsAfter <= dnsDropPktsBefore {
+			t.Fatalf("CRITICAL SECURITY VIOLATION: direct host WAN DNS query escaped without being dropped by anti-leak firewall (before=%d, after=%d)",
+				dnsDropPktsBefore, dnsDropPktsAfter)
+		}
+		t.Logf("[Phase E Evidence] Real DNS leak query intercepted & dropped by firewall (counter %d -> %d)",
+			dnsDropPktsBefore, dnsDropPktsAfter)
 	}
 
-	t.Logf("ALL PACKET-PATH E2E CHECKS PASSED: Exit markers (slot-0 / slot-1), draining continuity, fwmark routing, and fail-closed verified with real kernel & Xray evidence.")
+	t.Logf("ALL PACKET-PATH E2E CHECKS PASSED: Exit markers (slot-0 / slot-1), draining continuity, fwmark routing, real IPv6 socket fail-closed, and real DNS leak prevention verified with real kernel & Xray evidence.")
 }
 

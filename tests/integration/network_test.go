@@ -332,6 +332,39 @@ except OSError as e:
 	if !strings.Contains(routeG, "unreachable") && (err == nil || !strings.Contains(err.Error(), "exit status")) {
 		t.Fatalf("Test G FAILED: IPv6 leak guard failed to block traffic: %s", routeG)
 	}
+
+	// Real IPv6 TCP socket dial: MUST fail closed
+	tcp6FailClosedOut, _ := runInNetNS(ns, "python3", "-c", `
+import socket, sys
+s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+s.settimeout(0.5)
+try:
+    s.connect(('2001:db8::1', 80))
+    sys.exit(0) # leaked!
+except OSError as e:
+    print("TCP6_FAIL_CLOSED:", e)
+    sys.exit(1) # failed closed as expected
+`)
+	if !strings.Contains(tcp6FailClosedOut, "TCP6_FAIL_CLOSED:") {
+		t.Fatalf("Test G FAILED: Real IPv6 TCP socket did not fail closed: %s", tcp6FailClosedOut)
+	}
+	t.Logf("[Test G Evidence] Real IPv6 TCP socket failed closed as expected: %s", strings.TrimSpace(tcp6FailClosedOut))
+
+	// Real IPv6 UDP socket sendto: MUST fail closed
+	udp6FailClosedOut, _ := runInNetNS(ns, "python3", "-c", `
+import socket, sys
+s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+try:
+    s.sendto(b"DNS_PROBE", ('2001:db8::1', 53))
+    sys.exit(0) # leaked!
+except OSError as e:
+    print("UDP6_FAIL_CLOSED:", e)
+    sys.exit(1) # failed closed as expected
+`)
+	if !strings.Contains(udp6FailClosedOut, "UDP6_FAIL_CLOSED:") {
+		t.Fatalf("Test G FAILED: Real IPv6 UDP socket did not fail closed: %s", udp6FailClosedOut)
+	}
+	t.Logf("[Test G Evidence] Real IPv6 UDP socket failed closed as expected: %s", strings.TrimSpace(udp6FailClosedOut))
 }
 
 // TestLinuxRoutingPrimitives_AntiLeak verifies:
