@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/NaNA1337/super-proxy/internal/xray"
 	"github.com/spf13/viper"
 )
 
@@ -18,6 +19,11 @@ type Config struct {
 	SpeedTest  SpeedTestConfig  `mapstructure:"speed_test"`
 	APIKey     string           `mapstructure:"api_key"`
 	API        APIConfig        `mapstructure:"api"`
+	Xray       XrayAppConfig    `mapstructure:"xray"`
+}
+
+type XrayAppConfig struct {
+	Vless xray.VlessConfig `mapstructure:"vless"`
 }
 
 type APIConfig struct {
@@ -96,6 +102,13 @@ func LoadConfig(path string) (*Config, error) {
 	viper.SetDefault("speed_test.upload_url", "https://speed.cloudflare.com/__up")
 	viper.SetDefault("speed_test.timeout_sec", 15)
 	viper.SetDefault("speed_test.ping_targets", []string{"1.1.1.1", "8.8.8.8"})
+	viper.SetDefault("xray.vless.enabled", false)
+	viper.SetDefault("xray.vless.port", 443)
+	viper.SetDefault("xray.vless.flow", "xtls-rprx-vision")
+	viper.SetDefault("xray.vless.dest", "www.microsoft.com:443")
+	viper.SetDefault("xray.vless.server_names", []string{"www.microsoft.com"})
+	viper.SetDefault("xray.vless.fingerprint", "chrome")
+	viper.SetDefault("xray.vless.only_port_443", true)
 
 	viper.SetEnvPrefix("XRAY_MANAGER")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))

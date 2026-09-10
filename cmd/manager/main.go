@@ -150,13 +150,26 @@ func main() {
 
 	// 6. Initialize Xray Supervisor (Config generation, validation, execution, and health monitoring)
 	xrayConfigPath := "configs/xray_config.json"
-	log.Printf("Generating Xray static configuration to %s ...", xrayConfigPath)
+	vlessCfg := cfg.Xray.Vless
+	if os.Getenv("XRAY_VLESS_ENABLED") == "true" {
+		vlessCfg.Enabled = true
+	}
+	if vlessCfg.Enabled {
+		if err := xray.NormalizeVlessConfig(&vlessCfg); err != nil {
+			log.Fatalf("Failed to normalize VLESS config: %v", err)
+		}
+		agentapi.SetActiveVlessConfig(&vlessCfg)
+		log.Printf("VLESS Reality enabled: port=%d, dest=%s, SNI=%v, flow=%s, fingerprint=%s, only_port_443=%v",
+			vlessCfg.Port, vlessCfg.Dest, vlessCfg.ServerNames, vlessCfg.Flow, vlessCfg.Fingerprint, vlessCfg.OnlyPort443)
+	}
+
 	if err := xray.GenerateConfigWithOptions(xray.ConfigOptions{
 		SlotCount:   3,
 		ConfigPath:  xrayConfigPath,
 		SocksListen: "127.0.0.1",
 		SocksPort:   1080,
 		ApiPort:     10085,
+		Vless:       vlessCfg,
 	}); err != nil {
 		log.Fatalf("Failed to generate Xray config: %v", err)
 	}

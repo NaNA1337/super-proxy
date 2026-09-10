@@ -279,3 +279,124 @@ func TestXray_ExactSetMatchingRejectsPrefixOverlap(t *testing.T) {
 	}
 	_ = sup
 }
+
+func TestXray_VlessRealityConfigValidation(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "xray_vless.json")
+
+	vlessCfg := VlessConfig{
+		Enabled: true,
+	}
+	if err := NormalizeVlessConfig(&vlessCfg); err != nil {
+		t.Fatalf("NormalizeVlessConfig failed: %v", err)
+	}
+
+	// Verify default parameters
+	if vlessCfg.Port != 443 {
+		t.Errorf("expected port 443, got %d", vlessCfg.Port)
+	}
+	if vlessCfg.Flow != "xtls-rprx-vision" {
+		t.Errorf("expected flow xtls-rprx-vision, got %s", vlessCfg.Flow)
+	}
+	if vlessCfg.Dest != "www.microsoft.com:443" {
+		t.Errorf("expected dest www.microsoft.com:443, got %s", vlessCfg.Dest)
+	}
+	if len(vlessCfg.ServerNames) == 0 || vlessCfg.ServerNames[0] != "www.microsoft.com" {
+		t.Errorf("expected serverNames [www.microsoft.com], got %v", vlessCfg.ServerNames)
+	}
+	if vlessCfg.Fingerprint != "chrome" {
+		t.Errorf("expected fingerprint chrome, got %s", vlessCfg.Fingerprint)
+	}
+	if !vlessCfg.OnlyPort443 {
+		t.Errorf("expected OnlyPort443 true, got false")
+	}
+	if vlessCfg.PrivateKey == "" || vlessCfg.PublicKey == "" {
+		t.Errorf("expected generated x25519 keys, got empty")
+	}
+
+	// Generate full Xray config
+	err := GenerateConfigWithOptions(ConfigOptions{
+		SlotCount:   2,
+		ConfigPath:  configPath,
+		ApiPort:     10185,
+		SocksListen: "127.0.0.1",
+		SocksPort:   10980,
+		Vless:       vlessCfg,
+	})
+	if err != nil {
+		t.Fatalf("GenerateConfigWithOptions failed: %v", err)
+	}
+
+	// Parse generated config and verify structural elements
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to unmarshal config json: %v", err)
+	}
+
+	inbounds, ok := raw["inbounds"].([]interface{})
+	if !ok || len(inbounds) < 3 {
+		t.Fatalf("expected at least 3 inbounds (api, proxy, vless-in), got %d", len(inbounds))
+	}
+
+	var vlessInbound map[string]interface{}
+	for _, in := range inbounds {
+		inMap := in.(map[string]interface{})
+		if inMap["tag"] == "vless-in" {
+			vlessInbound = inMap
+			break
+		}
+	}
+	if vlessInbound == nil {
+		t.Fatalf("vless-in inbound not found in generated config")
+	}
+
+	if int(vlessInbound["port"].(float64)) != 443 {
+		t.Errorf("expected vless-in port 443, got %v", vlessInbound["port"])
+	}
+
+	streamSettings := vlessInbound["streamSettings"].(map[string]interface{})
+	if streamSettings["security"] != "reality" {
+		t.Errorf("expected security reality, got %v", streamSettings["security"])
+	}
+	realitySettings := streamSettings["realitySettings"].(map[string]interface{})
+	if realitySettings["dest"] != "www.microsoft.com:443" {
+		t.Errorf("expected reality dest www.microsoft.com:443, got %v", realitySettings["dest"])
+	}
+
+	// Verify routing rules: active-balancer-rule-vless (port 443) and vless-non-443-block
+	routing := raw["routing"].(map[string]interface{})
+	rules := routing["rules"].([]interface{})
+	var hasVless443Rule, hasVlessBlockRule bool
+	for _, r := range rules {
+		rMap := r.(map[string]interface{})
+		if rMap["ruleTag"] == "active-balancer-rule-vless" {
+			hasVless443Rule = true
+			if rMap["port"] != "443" {
+				t.Errorf("expected active-balancer-rule-vless port 443, got %v", rMap["port"])
+			}
+		}
+		if rMap["ruleTag"] == "vless-non-443-block" {
+			hasVlessBlockRule = true
+			if rMap["outboundTag"] != "block" {
+				t.Errorf("expected vless-non-443-block outboundTag block, got %v", rMap["outboundTag"])
+			}
+		}
+	}
+	if !hasVless443Rule {
+		t.Errorf("active-balancer-rule-vless missing in rules")
+	}
+	if !hasVlessBlockRule {
+		t.Errorf("vless-non-443-block missing in rules")
+	}
+
+	// Strictly validate config using the real Xray binary if installed
+	sup := NewSupervisor(configPath, 10185, "127.0.0.1", 10980, 2)
+	if err := sup.ValidateConfig(configPath); err != nil {
+		t.Fatalf("Xray rejected generated VLESS Reality config: %v", err)
+	}
+}

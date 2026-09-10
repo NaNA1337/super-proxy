@@ -13,3 +13,14 @@ discovery:
 
 reputation:
   enabled: false
+
+xray:
+  vless:
+    enabled: false
+    port: 443
+    flow: "xtls-rprx-vision"
+    dest: "www.microsoft.com:443"
+    server_names:
+      - "www.microsoft.com"
+    fingerprint: "chrome"
+    only_port_443: true

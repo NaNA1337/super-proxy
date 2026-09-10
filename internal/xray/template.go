@@ -1,13 +1,34 @@
 package xray
 
 import (
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/NaNA1337/super-proxy/internal/routing"
+	"github.com/google/uuid"
 )
+
+// VlessConfig holds options for configuring a VLESS Reality ingress.
+type VlessConfig struct {
+	Enabled     bool     `json:"enabled" mapstructure:"enabled"`
+	Listen      string   `json:"listen" mapstructure:"listen"`             // default "0.0.0.0"
+	Port        int      `json:"port" mapstructure:"port"`                 // default 443
+	UUID        string   `json:"uuid" mapstructure:"uuid"`
+	Flow        string   `json:"flow" mapstructure:"flow"`                 // default "xtls-rprx-vision"
+	Dest        string   `json:"dest" mapstructure:"dest"`                 // default "www.microsoft.com:443"
+	ServerNames []string `json:"server_names" mapstructure:"server_names"` // default ["www.microsoft.com"]
+	PrivateKey  string   `json:"private_key" mapstructure:"private_key"`
+	PublicKey   string   `json:"public_key" mapstructure:"public_key"`
+	ShortIds    []string `json:"short_ids" mapstructure:"short_ids"`
+	Fingerprint string   `json:"fingerprint" mapstructure:"fingerprint"`   // default "chrome" (uTLS)
+	OnlyPort443 bool     `json:"only_port_443" mapstructure:"only_port_443"`// default true (outbound restricted to 443)
+}
 
 // ConfigOptions holds options for generating an Xray configuration.
 type ConfigOptions struct {
@@ -19,6 +40,71 @@ type ConfigOptions struct {
 	SocksUser   string
 	SocksPass   string
 	Redirects   map[int]string // Optional: per-slot destination redirects (used for integration testing exit markers)
+	Vless       VlessConfig    // Optional: VLESS + Reality ingress configuration
+}
+
+// GenerateX25519Keypair generates an x25519 keypair formatted for Xray Reality (base64 raw URL encoded).
+func GenerateX25519Keypair() (privKey, pubKey string, err error) {
+	curve := ecdh.X25519()
+	priv, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", "", fmt.Errorf("generate x25519 key: %w", err)
+	}
+	privKey = base64.RawURLEncoding.EncodeToString(priv.Bytes())
+	pubKey = base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())
+	return privKey, pubKey, nil
+}
+
+// GenerateShortID generates an 8-byte hex string for Reality shortId.
+func GenerateShortID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// NormalizeVlessConfig applies production defaults and fills missing keys/UUID for VLESS Reality.
+func NormalizeVlessConfig(cfg *VlessConfig) error {
+	if cfg == nil || !cfg.Enabled {
+		return nil
+	}
+	if cfg.Port <= 0 {
+		cfg.Port = 443
+	}
+	if cfg.Listen == "" {
+		cfg.Listen = "0.0.0.0"
+	}
+	if cfg.UUID == "" {
+		cfg.UUID = uuid.New().String()
+	}
+	if cfg.Flow == "" {
+		cfg.Flow = "xtls-rprx-vision"
+	}
+	if cfg.Dest == "" {
+		cfg.Dest = "www.microsoft.com:443"
+	}
+	if len(cfg.ServerNames) == 0 {
+		cfg.ServerNames = []string{"www.microsoft.com"}
+	}
+	if cfg.Fingerprint == "" {
+		cfg.Fingerprint = "chrome"
+	}
+	if len(cfg.ShortIds) == 0 {
+		cfg.ShortIds = []string{GenerateShortID()}
+	}
+	if cfg.PrivateKey == "" || cfg.PublicKey == "" {
+		priv, pub, err := GenerateX25519Keypair()
+		if err != nil {
+			return err
+		}
+		if cfg.PrivateKey == "" {
+			cfg.PrivateKey = priv
+		}
+		if cfg.PublicKey == "" {
+			cfg.PublicKey = pub
+		}
+	}
+	cfg.OnlyPort443 = true
+	return nil
 }
 
 // GenerateConfig generates a static Xray configuration with the specified number of slots
@@ -139,6 +225,103 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 	}
 	generateSubsets(0, []int{})
 
+	inbounds := []map[string]interface{}{
+		{
+			"tag":      "api",
+			"port":     opts.ApiPort,
+			"listen":   "127.0.0.1",
+			"protocol": "dokodemo-door",
+			"settings": map[string]interface{}{
+				"address": "127.0.0.1",
+			},
+		},
+		{
+			"tag":      "proxy",
+			"port":     opts.SocksPort,
+			"listen":   opts.SocksListen,
+			"protocol": "socks",
+			"settings": socksSettings,
+		},
+	}
+
+	// Add VLESS Reality Inbound if configured
+	if opts.Vless.Enabled {
+		if err := NormalizeVlessConfig(&opts.Vless); err != nil {
+			return fmt.Errorf("failed to normalize vless config: %w", err)
+		}
+		vlessInbound := map[string]interface{}{
+			"tag":      "vless-in",
+			"port":     opts.Vless.Port,
+			"listen":   opts.Vless.Listen,
+			"protocol": "vless",
+			"settings": map[string]interface{}{
+				"clients": []map[string]interface{}{
+					{
+						"id":   opts.Vless.UUID,
+						"flow": opts.Vless.Flow,
+					},
+				},
+				"decryption": "none",
+			},
+			"streamSettings": map[string]interface{}{
+				"network":  "tcp",
+				"security": "reality",
+				"realitySettings": map[string]interface{}{
+					"show":        false,
+					"dest":        opts.Vless.Dest,
+					"xver":        0,
+					"serverNames": opts.Vless.ServerNames,
+					"privateKey":  opts.Vless.PrivateKey,
+					"shortIds":    opts.Vless.ShortIds,
+				},
+			},
+		}
+		inbounds = append(inbounds, vlessInbound)
+	}
+
+	rules := []map[string]interface{}{
+		{
+			"type":        "field",
+			"inboundTag":  []string{"api"},
+			"outboundTag": "api",
+		},
+	}
+
+	if opts.Vless.Enabled {
+		if opts.Vless.OnlyPort443 {
+			// VLESS: port 443 permitted through active proxy exits
+			rules = append(rules, map[string]interface{}{
+				"type":        "field",
+				"ruleTag":     "active-balancer-rule-vless",
+				"inboundTag":  []string{"vless-in"},
+				"port":        "443",
+				"outboundTag": "block", // initially block until slot active
+			})
+			// VLESS: strictly block non-443 outbound destinations
+			rules = append(rules, map[string]interface{}{
+				"type":        "field",
+				"ruleTag":     "vless-non-443-block",
+				"inboundTag":  []string{"vless-in"},
+				"outboundTag": "block",
+			})
+		} else {
+			rules = append(rules, map[string]interface{}{
+				"type":        "field",
+				"ruleTag":     "active-balancer-rule-vless",
+				"inboundTag":  []string{"vless-in"},
+				"outboundTag": "block",
+			})
+		}
+	}
+
+	// SOCKS proxy inbound rule (initially block until slot active)
+	rules = append(rules, map[string]interface{}{
+		"type":        "field",
+		"ruleTag":     "active-balancer-rule",
+		"inboundTag":  []string{"proxy"},
+		"outboundTag": "block",
+	})
+
 	// Full Xray configuration with API and Balancers
 	xrayConfig := map[string]interface{}{
 		"log": map[string]interface{}{
@@ -161,42 +344,12 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 				"statsOutboundDownlink": true,
 			},
 		},
-		"inbounds": []map[string]interface{}{
-			{
-				"tag":      "api",
-				"port":     opts.ApiPort,
-				"listen":   "127.0.0.1",
-				"protocol": "dokodemo-door",
-				"settings": map[string]interface{}{
-					"address": "127.0.0.1",
-				},
-			},
-			{
-				"tag":      "proxy",
-				"port":     opts.SocksPort,
-				"listen":   opts.SocksListen,
-				"protocol": "socks",
-				"settings": socksSettings,
-			},
-		},
+		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"routing": map[string]interface{}{
 			"domainStrategy": "AsIs",
 			"balancers":      balancers,
-			"rules": []map[string]interface{}{
-				{
-					"type":        "field",
-					"inboundTag":  []string{"api"},
-					"outboundTag": "api",
-				},
-				{
-					// Initial outbound state: synchronized to block (blackhole) until tunnels become ACTIVE
-					"type":        "field",
-					"ruleTag":     "active-balancer-rule",
-					"inboundTag":  []string{"proxy"},
-					"outboundTag": "block",
-				},
-			},
+			"rules":          rules,
 		},
 	}
 

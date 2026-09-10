@@ -13,6 +13,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
+	"github.com/NaNA1337/super-proxy/internal/xray"
 )
 
 func setupTestServer() http.Handler {
@@ -43,6 +44,9 @@ func setupTestServer() http.Handler {
 	mux.Handle("/api/v1/slots/", secureChain(http.HandlerFunc(handleSlotAction)))
 	mux.Handle("/api/v1/nodes/", secureChain(http.HandlerFunc(handleNodeDetails)))
 	mux.Handle("/api/v1/pool/qualified", secureChain(http.HandlerFunc(handlePoolQualified)))
+        mux.Handle("/api/v1/nodes", secureChain(http.HandlerFunc(handleNodesList)))
+        mux.Handle("/api/v1/routing", secureChain(http.HandlerFunc(handleRoutingOverview)))
+        mux.Handle("/api/v1/client-config", secureChain(http.HandlerFunc(handleClientConfig)))
 	mux.Handle("/api/v1/panic", secureChain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("simulated critical crash")
 	})))
@@ -193,3 +197,59 @@ func TestAPI_SecretRedaction(t *testing.T) {
 }
 
 
+
+func TestAPI_WebManagerSupplementaryEndpoints(t *testing.T) {
+	_ = database.InitDatabase(":memory:")
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	// 1. Test /api/v1/nodes
+	req, _ := http.NewRequest("GET", "/api/v1/nodes?country=JP&limit=10", nil)
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/v1/nodes, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// 2. Test /api/v1/routing
+	req, _ = http.NewRequest("GET", "/api/v1/routing", nil)
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/v1/routing, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// 3. Test /api/v1/client-config (with VLESS Reality enabled)
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:     true,
+		Port:        443,
+		UUID:        "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:        "xtls-rprx-vision",
+		Dest:        "www.microsoft.com:443",
+		ServerNames: []string{"www.microsoft.com"},
+		Fingerprint: "chrome",
+		PublicKey:   "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:    []string{"0123456789abcdef"},
+		OnlyPort443: true,
+	})
+
+	req, _ = http.NewRequest("GET", "/api/v1/client-config", nil)
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/v1/client-config, got %d: %s", rr.Code, rr.Body.String())
+	}
+	bodyStr := rr.Body.String()
+	if !strings.Contains(bodyStr, "vless") || !strings.Contains(bodyStr, "xtls-rprx-vision") {
+		t.Errorf("expected vless and xtls-rprx-vision in client config: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "www.microsoft.com") || !strings.Contains(bodyStr, "chrome") {
+		t.Errorf("expected SNI www.microsoft.com and fingerprint chrome in client config: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "vless://") {
+		t.Errorf("expected vless share link in client config: %s", bodyStr)
+	}
+}

@@ -52,9 +52,45 @@ type Supervisor struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	vlessEnabled       bool
+	vlessOnly443       bool
+
 	// Callbacks for metrics and observability
 	OnCrash   func(err error)
 	OnRestart func(attempt int)
+}
+
+func inspectConfigForVless(configPath string) (enabled bool, only443 bool) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false, false
+	}
+	var raw struct {
+		Inbounds []struct {
+			Tag string `json:"tag"`
+		} `json:"inbounds"`
+		Routing struct {
+			Rules []struct {
+				RuleTag string `json:"ruleTag"`
+			} `json:"rules"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false, false
+	}
+	for _, in := range raw.Inbounds {
+		if in.Tag == "vless-in" {
+			enabled = true
+			break
+		}
+	}
+	for _, r := range raw.Routing.Rules {
+		if r.RuleTag == "vless-non-443-block" {
+			only443 = true
+			break
+		}
+	}
+	return enabled, only443
 }
 
 // NewSupervisor creates an instance of Supervisor.
@@ -87,6 +123,8 @@ func NewSupervisor(configPath string, apiPort int, socksListen string, socksPort
 		marksMap[tag] = 100 + i // base table
 	}
 
+	vlessEnabled, vlessOnly443 := inspectConfigForVless(configPath)
+
 	return &Supervisor{
 		configPath:      configPath,
 		apiAddr:         fmt.Sprintf("127.0.0.1:%d", apiPort),
@@ -96,6 +134,8 @@ func NewSupervisor(configPath string, apiPort int, socksListen string, socksPort
 		state:           StateStopped,
 		activeOutbounds: activeMap,
 		outboundMarks:   marksMap,
+		vlessEnabled:    vlessEnabled,
+		vlessOnly443:    vlessOnly443,
 		ctx:             ctx,
 		cancel:          cancel,
 	}
@@ -118,10 +158,13 @@ func (s *Supervisor) Start() error {
 	s.mu.Lock()
 	if s.state == StateRunning || s.state == StateStarting {
 		s.mu.Unlock()
-		return errors.New("xray supervisor is already running or starting")
+		return errors.New("supervisor already running or starting")
 	}
-	s.stopped = false
 	s.state = StateStarting
+	s.stopped = false
+	if !s.vlessEnabled {
+		s.vlessEnabled, s.vlessOnly443 = inspectConfigForVless(s.configPath)
+	}
 	s.mu.Unlock()
 
 	// 1. Validate configuration before launching
@@ -395,6 +438,57 @@ func (s *Supervisor) applyCandidateRoutingLocked(candidateSlots []int, drainingS
 			"inboundTag":  []string{"api"},
 			"outboundTag": "api",
 		},
+	}
+
+	if s.vlessEnabled {
+		if len(sorted) == 0 {
+			vlessRule := map[string]interface{}{
+				"type":        "field",
+				"ruleTag":     "active-balancer-rule-vless",
+				"inboundTag":  []string{"vless-in"},
+				"outboundTag": "block",
+			}
+			if s.vlessOnly443 {
+				vlessRule["port"] = "443"
+			}
+			rules = append(rules, vlessRule)
+		} else if len(sorted) == 1 {
+			vlessRule := map[string]interface{}{
+				"type":        "field",
+				"ruleTag":     "active-balancer-rule-vless",
+				"inboundTag":  []string{"vless-in"},
+				"outboundTag": fmt.Sprintf("exit-%d", sorted[0]),
+			}
+			if s.vlessOnly443 {
+				vlessRule["port"] = "443"
+			}
+			rules = append(rules, vlessRule)
+		} else {
+			tagParts := make([]string, len(sorted))
+			for idx, sl := range sorted {
+				tagParts[idx] = fmt.Sprintf("%d", sl)
+			}
+			balancerTag := "balancer-" + strings.Join(tagParts, "-")
+			vlessRule := map[string]interface{}{
+				"type":        "field",
+				"ruleTag":     "active-balancer-rule-vless",
+				"inboundTag":  []string{"vless-in"},
+				"balancerTag": balancerTag,
+			}
+			if s.vlessOnly443 {
+				vlessRule["port"] = "443"
+			}
+			rules = append(rules, vlessRule)
+		}
+
+		if s.vlessOnly443 {
+			rules = append(rules, map[string]interface{}{
+				"type":        "field",
+				"ruleTag":     "vless-non-443-block",
+				"inboundTag":  []string{"vless-in"},
+				"outboundTag": "block",
+			})
+		}
 	}
 
 	if len(sorted) == 0 {

@@ -2,15 +2,19 @@ package agentapi
 
 import (
 	"encoding/json"
+        "fmt"
+        "strconv"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
+	"github.com/NaNA1337/super-proxy/internal/xray"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
@@ -18,9 +22,25 @@ import (
 )
 
 var (
-	appStartTime = time.Now()
-	sched        *scheduler.Scheduler
+	appStartTime  = time.Now()
+	sched         *scheduler.Scheduler
+	activeVlessMu sync.RWMutex
+	activeVless   *xray.VlessConfig
 )
+
+// SetActiveVlessConfig sets the active VLESS Reality configuration.
+func SetActiveVlessConfig(cfg *xray.VlessConfig) {
+	activeVlessMu.Lock()
+	defer activeVlessMu.Unlock()
+	activeVless = cfg
+}
+
+// GetActiveVlessConfig retrieves the active VLESS Reality configuration.
+func GetActiveVlessConfig() *xray.VlessConfig {
+	activeVlessMu.RLock()
+	defer activeVlessMu.RUnlock()
+	return activeVless
+}
 
 // SetScheduler injects the global scheduler into the API handlers
 func SetScheduler(s *scheduler.Scheduler) {
@@ -191,4 +211,220 @@ func handleNodeDetails(w http.ResponseWriter, r *http.Request) {
 func sendJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+type NodeListResponse struct {
+	Total int64         `json:"total"`
+	Nodes []models.Node `json:"nodes"`
+}
+
+func handleNodesList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	query := database.DB.Model(&models.Node{})
+
+	country := r.URL.Query().Get("country")
+	if country != "" {
+		query = query.Where("country = ?", country)
+	}
+
+	status := r.URL.Query().Get("status")
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	search := r.URL.Query().Get("search")
+	if search != "" {
+		query = query.Where("ip LIKE ? OR host_name LIKE ? OR rep_details LIKE ? OR net_asn LIKE ? OR net_isp LIKE ?",
+			"%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+	}
+
+	var total int64
+	query.Count(&total)
+
+	limit := 100
+	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 500 {
+		limit = l
+	}
+
+	offset := 0
+	if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o >= 0 {
+		offset = o
+	}
+
+	var nodes []models.Node
+	query.Order("score DESC, uptime DESC").Limit(limit).Offset(offset).Find(&nodes)
+
+	for i := range nodes {
+		nodes[i].OpenVPN = ""
+		nodes[i].OpenVPNConfig = discovery.StripSecrets(nodes[i].OpenVPNConfig)
+	}
+
+	sendJSON(w, NodeListResponse{
+		Total: total,
+		Nodes: nodes,
+	})
+}
+
+func handleRoutingOverview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	type SlotRouteInfo struct {
+		Slot      int    `json:"slot"`
+		TableID   int    `json:"table_id"`
+		Fwmark    int    `json:"fwmark"`
+		Interface string `json:"interface"`
+		NodeIP    string `json:"node_ip"`
+		Country   string `json:"country"`
+		Status    string `json:"status"`
+	}
+
+	var routes []SlotRouteInfo
+
+	if sched != nil {
+		sched.Mu.Lock()
+		for i := 0; i < sched.MaxActive; i++ {
+			tableID := 10000 + i
+			info := SlotRouteInfo{
+				Slot:      i,
+				TableID:   tableID,
+				Fwmark:    tableID,
+				Interface: fmt.Sprintf("tun%d", i),
+				Status:    "OFFLINE",
+			}
+			if tunnel, ok := sched.ActiveSlots[i]; ok && tunnel != nil {
+				info.Status = tunnel.State
+				info.Interface = tunnel.Interface
+				if tunnel.Node != nil {
+					info.NodeIP = tunnel.Node.IP
+					info.Country = tunnel.Node.Country
+				}
+			}
+			routes = append(routes, info)
+		}
+		sched.Mu.Unlock()
+	}
+
+	resp := map[string]interface{}{
+		"slots":               routes,
+		"dns_leak_protected":  true,
+		"ipv6_leak_protected": true,
+	}
+	sendJSON(w, resp)
+}
+
+func handleClientConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	protocols := []string{"socks5"}
+
+	cfg := GetActiveVlessConfig()
+	vlessEnabled := (cfg != nil && cfg.Enabled) || os.Getenv("XRAY_VLESS_ENABLED") == "true"
+	var vlessConfig map[string]interface{}
+	if vlessEnabled {
+		protocols = append(protocols, "vless")
+		vPort := 443
+		if cfg != nil && cfg.Port > 0 {
+			vPort = cfg.Port
+		} else if p, err := strconv.Atoi(os.Getenv("XRAY_VLESS_PORT")); err == nil && p > 0 {
+			vPort = p
+		}
+
+		vUUID := ""
+		if cfg != nil && cfg.UUID != "" {
+			vUUID = cfg.UUID
+		} else {
+			vUUID = os.Getenv("XRAY_VLESS_UUID")
+		}
+
+		vFlow := "xtls-rprx-vision"
+		if cfg != nil && cfg.Flow != "" {
+			vFlow = cfg.Flow
+		} else if f := os.Getenv("XRAY_VLESS_FLOW"); f != "" {
+			vFlow = f
+		}
+
+		vSNI := "www.microsoft.com"
+		if cfg != nil && len(cfg.ServerNames) > 0 {
+			vSNI = cfg.ServerNames[0]
+		} else if s := os.Getenv("XRAY_VLESS_SNI"); s != "" {
+			vSNI = s
+		}
+
+		vFingerprint := "chrome"
+		if cfg != nil && cfg.Fingerprint != "" {
+			vFingerprint = cfg.Fingerprint
+		} else if fp := os.Getenv("XRAY_VLESS_FINGERPRINT"); fp != "" {
+			vFingerprint = fp
+		}
+
+		vPubKey := ""
+		if cfg != nil && cfg.PublicKey != "" {
+			vPubKey = cfg.PublicKey
+		} else {
+			vPubKey = os.Getenv("XRAY_VLESS_PUBLIC_KEY")
+		}
+
+		vShortID := ""
+		if cfg != nil && len(cfg.ShortIds) > 0 {
+			vShortID = cfg.ShortIds[0]
+		} else {
+			vShortID = os.Getenv("XRAY_VLESS_SHORT_ID")
+		}
+
+		vAddr := os.Getenv("XRAY_VLESS_ADDRESS")
+		if vAddr == "" {
+			vAddr = "127.0.0.1"
+		}
+
+		shareLink := fmt.Sprintf("vless://%s@%s:%d?encryption=none&flow=%s&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp#Super-Proxy-VLESS",
+			vUUID, vAddr, vPort, vFlow, vSNI, vFingerprint, vPubKey, vShortID)
+
+		vlessConfig = map[string]interface{}{
+			"address":       vAddr,
+			"port":          vPort,
+			"uuid":          vUUID,
+			"security":      "reality",
+			"server_name":   vSNI,
+			"fingerprint":   vFingerprint,
+			"public_key":    vPubKey,
+			"short_id":      vShortID,
+			"flow":          vFlow,
+			"type":          "tcp",
+			"only_port_443": true,
+			"share_link":    shareLink,
+		}
+	}
+
+	sPort := 1080
+	if p, err := strconv.Atoi(os.Getenv("XRAY_SOCKS_PORT")); err == nil && p > 0 {
+		sPort = p
+	}
+	sAddr := os.Getenv("XRAY_SOCKS_ADDR")
+	if sAddr == "" {
+		sAddr = "127.0.0.1"
+	}
+
+	resp := map[string]interface{}{
+		"protocols": protocols,
+		"socks": map[string]interface{}{
+			"address": sAddr,
+			"port":    sPort,
+			"auth":    false,
+		},
+	}
+	if vlessConfig != nil {
+		resp["vless"] = vlessConfig
+	}
+
+	sendJSON(w, resp)
 }
