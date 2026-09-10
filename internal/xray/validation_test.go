@@ -241,14 +241,37 @@ func TestRuntimeEndpointStore(t *testing.T) {
 		t.Fatalf("failed to register good runtime endpoint: %v", err)
 	}
 
+	// Registering invalid network must fail validation
+	badNetEp := goodEp
+	badNetEp.Network = "udp"
+	if err := SetRuntimeVlessEndpoint(badNetEp); err == nil {
+		t.Errorf("expected registering udp network to fail")
+	}
+
+	// Registering invalid protocol must fail validation
+	badProtoEp := goodEp
+	badProtoEp.Protocol = "trojan"
+	if err := SetRuntimeVlessEndpoint(badProtoEp); err == nil {
+		t.Errorf("expected registering trojan protocol to fail")
+	}
+
+	// Registering without TLS must fail validation
+	badTlsEp := goodEp
+	badTlsEp.TLS = false
+	if err := SetRuntimeVlessEndpoint(badTlsEp); err == nil {
+		t.Errorf("expected registering without TLS to fail")
+	}
+
 	retrieved, err := GetRuntimeVlessEndpoint()
 	if err != nil {
 		t.Fatalf("failed to retrieve registered endpoint: %v", err)
 	}
-	if retrieved.Port != 443 || retrieved.Address != "203.0.113.1" {
+	if retrieved.Port != 443 || retrieved.Address != "203.0.113.1" || retrieved.Network != "tcp" || retrieved.Protocol != "vless" || !retrieved.TLS {
 		t.Errorf("retrieved endpoint mismatch: %+v", retrieved)
 	}
 
+	// Invariant 4: Clear must be idempotent
+	ClearRuntimeVlessEndpoint()
 	ClearRuntimeVlessEndpoint()
 	if _, err := GetRuntimeVlessEndpoint(); err == nil {
 		t.Fatalf("expected error after clearing runtime endpoint")

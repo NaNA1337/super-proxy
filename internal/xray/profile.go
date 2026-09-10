@@ -28,6 +28,15 @@ func (ep *PublicEndpoint) Validate() error {
 	if err := ValidateVlessPublicPort(ep.Port); err != nil {
 		return fmt.Errorf("invalid public endpoint port: %w", err)
 	}
+	if ep.Network != "tcp" {
+		return fmt.Errorf("invalid public endpoint network %q: must be \"tcp\"", ep.Network)
+	}
+	if ep.Protocol != "vless" {
+		return fmt.Errorf("invalid public endpoint protocol %q: must be \"vless\"", ep.Protocol)
+	}
+	if !ep.TLS {
+		return fmt.Errorf("invalid public endpoint security: TLS/Reality must be enabled")
+	}
 	return nil
 }
 
@@ -92,13 +101,22 @@ var (
 )
 
 // SetRuntimeVlessEndpoint safely stores the active running Xray inbound endpoint.
+// Defaults empty Network to "tcp", Protocol to "vless", and validates the complete endpoint.
+// Allocates an isolated copy internally to ensure immutability and thread safety.
 func SetRuntimeVlessEndpoint(ep PublicEndpoint) error {
+	if ep.Network == "" {
+		ep.Network = "tcp"
+	}
+	if ep.Protocol == "" {
+		ep.Protocol = "vless"
+	}
 	if err := ep.Validate(); err != nil {
 		return fmt.Errorf("failed to register runtime endpoint: %w", err)
 	}
 	endpointMu.Lock()
 	defer endpointMu.Unlock()
-	activeRuntimeEndpoint = &ep
+	cp := ep
+	activeRuntimeEndpoint = &cp
 	return nil
 }
 

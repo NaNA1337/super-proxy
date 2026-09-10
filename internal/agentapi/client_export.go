@@ -37,6 +37,25 @@ func BuildRealityClientProfile(r *http.Request) (*xray.RealityClientProfile, err
 		return nil, fmt.Errorf("runtime public port validation failed: %w", err)
 	}
 
+	// Invariant 9: Enforce active configuration consistency with runtime endpoint
+	if cfg != nil {
+		if cfg.Port != 0 && cfg.Port != rtEndpoint.Port {
+			return nil, fmt.Errorf("active config port %d does not match runtime endpoint port %d", cfg.Port, rtEndpoint.Port)
+		}
+		if cfg.Flow != "" && cfg.Flow != xray.DefaultFlow {
+			return nil, fmt.Errorf("active config flow %q does not match required %q", cfg.Flow, xray.DefaultFlow)
+		}
+		if cfg.Fingerprint != "" && cfg.Fingerprint != xray.DefaultRealityFP {
+			return nil, fmt.Errorf("active config fingerprint %q does not match required %q", cfg.Fingerprint, xray.DefaultRealityFP)
+		}
+		if len(cfg.ServerNames) > 0 && cfg.ServerNames[0] != "" && cfg.ServerNames[0] != xray.DefaultRealitySNI {
+			return nil, fmt.Errorf("active config SNI %q does not match required %q", cfg.ServerNames[0], xray.DefaultRealitySNI)
+		}
+		if cfg.Dest != "" && cfg.Dest != xray.DefaultRealityTarget {
+			return nil, fmt.Errorf("active config dest %q does not match required %q", cfg.Dest, xray.DefaultRealityTarget)
+		}
+	}
+
 	profile := &xray.RealityClientProfile{
 		Port:          rtEndpoint.Port,
 		Flow:          xray.DefaultFlow,

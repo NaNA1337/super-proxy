@@ -56,6 +56,7 @@ type Supervisor struct {
 	vlessOnly443       bool
 	vlessEndpoint      *PublicEndpoint
 	publicAddress      string
+	readyTimeout       time.Duration
 
 	// Callbacks for metrics and observability
 	OnCrash   func(err error)
@@ -110,8 +111,11 @@ func inspectConfigForVless(configPath string) (enabled bool, only443 bool, endpo
 	return enabled, only443, endpoint
 }
 
-// NewSupervisor creates an instance of Supervisor.
-func NewSupervisor(configPath string, apiPort int, socksListen string, socksPort int, slotCount int) *Supervisor {
+// NewSupervisorWithContext creates an instance of Supervisor bound to an explicit context.
+func NewSupervisorWithContext(ctx context.Context, configPath string, apiPort int, socksListen string, socksPort int, slotCount int) *Supervisor {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if apiPort <= 0 {
 		apiPort = 10085
 	}
@@ -130,7 +134,7 @@ func NewSupervisor(configPath string, apiPort int, socksListen string, socksPort
 		xrayBin = customBin
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	subCtx, cancel := context.WithCancel(ctx)
 
 	activeMap := make(map[string]bool)
 	marksMap := make(map[string]int)
@@ -154,9 +158,15 @@ func NewSupervisor(configPath string, apiPort int, socksListen string, socksPort
 		vlessEnabled:    vlessEnabled,
 		vlessOnly443:    vlessOnly443,
 		vlessEndpoint:   vlessEndpoint,
-		ctx:             ctx,
+		readyTimeout:    10 * time.Second,
+		ctx:             subCtx,
 		cancel:          cancel,
 	}
+}
+
+// NewSupervisor creates an instance of Supervisor with default background context.
+func NewSupervisor(configPath string, apiPort int, socksListen string, socksPort int, slotCount int) *Supervisor {
+	return NewSupervisorWithContext(context.Background(), configPath, apiPort, socksListen, socksPort, slotCount)
 }
 
 // ValidateConfig executes "xray run -test -config <path>" to strictly verify configuration syntax.
@@ -185,11 +195,15 @@ func (s *Supervisor) Start() error {
 	}
 	s.mu.Unlock()
 
+	// Invariant 1: Ensure endpoint is empty during startup
+	ClearRuntimeVlessEndpoint()
+
 	// 1. Validate configuration before launching
 	if err := s.ValidateConfig(s.configPath); err != nil {
 		s.mu.Lock()
 		s.state = StateStopped
 		s.mu.Unlock()
+		ClearRuntimeVlessEndpoint()
 		return fmt.Errorf("cannot start xray, config invalid: %w", err)
 	}
 
@@ -198,12 +212,18 @@ func (s *Supervisor) Start() error {
 		s.mu.Lock()
 		s.state = StateStopped
 		s.mu.Unlock()
+		ClearRuntimeVlessEndpoint()
 		return err
 	}
 
-	// 3. Wait for readiness on API and SOCKS ports
-	if err := s.waitReady(10 * time.Second); err != nil {
+	// 3. Wait for readiness on API, SOCKS, and VLESS 443 ports
+	rTimeout := s.readyTimeout
+	if rTimeout <= 0 {
+		rTimeout = 10 * time.Second
+	}
+	if err := s.waitReady(rTimeout); err != nil {
 		_ = s.Stop()
+		ClearRuntimeVlessEndpoint()
 		return fmt.Errorf("xray process started but failed readiness check: %w", err)
 	}
 
@@ -230,6 +250,15 @@ func (s *Supervisor) Start() error {
 	s.wg.Add(1)
 	go s.monitorLoop()
 
+	// 5. Context cancellation watcher
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		<-s.ctx.Done()
+		ClearRuntimeVlessEndpoint()
+		_ = s.KillCurrentProcess()
+	}()
+
 	return nil
 }
 
@@ -238,8 +267,13 @@ func (s *Supervisor) startProcessLocked() error {
 	cmd := exec.Command(s.xrayBin, "run", "-config", s.configPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
+	if os.Getenv("XRAY_DEBUG_LOGS") == "true" {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+	}
 
 	log.Printf("[XraySupervisor] Launching %s with config %s", s.xrayBin, s.configPath)
 	if err := cmd.Start(); err != nil {
@@ -248,10 +282,6 @@ func (s *Supervisor) startProcessLocked() error {
 
 	s.cmd = cmd
 	s.processDone = make(chan struct{})
-
-	// Drain logs asynchronously
-	go s.drainPipe("stdout", stdout)
-	go s.drainPipe("stderr", stderr)
 
 	return nil
 }
@@ -273,27 +303,52 @@ func (s *Supervisor) drainPipe(name string, r io.Reader) {
 	}
 }
 
-// waitReady polls the API port and SOCKS port until both accept connections or timeout occurs.
+// waitReady polls the API port, SOCKS port, and VLESS TCP 443 inbound (if enabled)
+// until all accept connections or timeout occurs.
 func (s *Supervisor) waitReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	s.mu.RLock()
+	apiAddr := s.apiAddr
+	socksAddr := s.socksAddr
+	vlessEnabled := s.vlessEnabled
+	var vlessPort int
+	if vlessEnabled && s.vlessEndpoint != nil {
+		vlessPort = s.vlessEndpoint.Port
+	}
+	s.mu.RUnlock()
+
 	for time.Now().Before(deadline) {
-		apiConn, err1 := net.DialTimeout("tcp", s.apiAddr, 200*time.Millisecond)
+		apiConn, err1 := net.DialTimeout("tcp", apiAddr, 200*time.Millisecond)
 		if err1 == nil {
 			apiConn.Close()
 		}
 
-		socksConn, err2 := net.DialTimeout("tcp", s.socksAddr, 200*time.Millisecond)
+		socksConn, err2 := net.DialTimeout("tcp", socksAddr, 200*time.Millisecond)
 		if err2 == nil {
 			socksConn.Close()
 		}
 
-		if err1 == nil && err2 == nil {
+		var err3 error
+		if vlessEnabled && vlessPort > 0 {
+			vlessConn, dErr := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(vlessPort)), 200*time.Millisecond)
+			if dErr == nil {
+				vlessConn.Close()
+			} else {
+				err3 = dErr
+			}
+		}
+
+		if err1 == nil && err2 == nil && err3 == nil {
 			return nil
 		}
 
 		time.Sleep(150 * time.Millisecond)
 	}
-	return fmt.Errorf("timeout waiting for xray readiness on API %s and SOCKS %s", s.apiAddr, s.socksAddr)
+
+	if vlessEnabled && vlessPort > 0 {
+		return fmt.Errorf("timeout waiting for xray readiness on API %s, SOCKS %s, and VLESS TCP :%d", apiAddr, socksAddr, vlessPort)
+	}
+	return fmt.Errorf("timeout waiting for xray readiness on API %s and SOCKS %s", apiAddr, socksAddr)
 }
 
 // monitorLoop waits for the Xray process to exit and automatically restarts it with exponential backoff.
@@ -325,6 +380,21 @@ func (s *Supervisor) monitorLoop() {
 			s.mu.Unlock()
 			return
 		}
+		if s.state == StateRestarting {
+			// Explicit manual restart is in progress; wait for it to complete
+			s.mu.Unlock()
+			for {
+				time.Sleep(50 * time.Millisecond)
+				s.mu.RLock()
+				st := s.state
+				stopped := s.stopped
+				s.mu.RUnlock()
+				if stopped || st == StateRunning || st == StateStopped {
+					break
+				}
+			}
+			continue
+		}
 
 		s.consecutiveCrashes++
 		s.restarts++
@@ -348,6 +418,7 @@ func (s *Supervisor) monitorLoop() {
 
 		select {
 		case <-s.ctx.Done():
+			ClearRuntimeVlessEndpoint()
 			return
 		case <-time.After(backoff):
 		}
@@ -374,9 +445,13 @@ func (s *Supervisor) monitorLoop() {
 		}
 		s.mu.Unlock()
 
-		if readyErr := s.waitReady(10 * time.Second); readyErr != nil {
+		rTimeout := s.readyTimeout
+		if rTimeout <= 0 {
+			rTimeout = 10 * time.Second
+		}
+		if readyErr := s.waitReady(rTimeout); readyErr != nil {
 			log.Printf("[XraySupervisor] Restarted xray failed readiness: %v", readyErr)
-			_ = s.killCurrentProcess()
+			_ = s.KillCurrentProcess()
 			continue
 		}
 
@@ -960,28 +1035,191 @@ func (s *Supervisor) Stop() error {
 	log.Println("[XraySupervisor] Stopping Xray process...")
 
 	if cmd != nil && cmd.Process != nil && done != nil {
-		// Send SIGTERM
+		pid := cmd.Process.Pid
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 
 		select {
 		case <-done:
 			log.Println("[XraySupervisor] Xray exited cleanly.")
-		case <-time.After(5 * time.Second):
-			log.Println("[XraySupervisor] Xray did not exit within 5s, sending SIGKILL...")
+		case <-time.After(2 * time.Second):
+			log.Println("[XraySupervisor] Xray did not exit within 2s, sending SIGKILL...")
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
 			_ = cmd.Process.Kill()
-			<-done
-			log.Println("[XraySupervisor] Xray killed.")
+			select {
+			case <-done:
+				log.Println("[XraySupervisor] Xray killed.")
+			case <-time.After(1 * time.Second):
+				log.Println("[XraySupervisor] Warning: process wait timed out")
+			}
 		}
 	}
 
 	s.wg.Wait()
+	ClearRuntimeVlessEndpoint()
 	return nil
 }
 
-func (s *Supervisor) killCurrentProcess() error {
+// Restart performs a zero-stale-window restart of the Xray process.
+// Invariant 3: Clears the runtime endpoint BEFORE the old process is terminated or considered unavailable.
+func (s *Supervisor) Restart() error {
+	// Step 1: Clear runtime endpoint immediately BEFORE initiating shutdown of the old process
+	ClearRuntimeVlessEndpoint()
+
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return errors.New("supervisor is stopped")
+	}
+	if s.state == StateRestarting {
+		s.mu.Unlock()
+		return errors.New("supervisor is already restarting")
+	}
+	s.state = StateRestarting
+	cmd := s.cmd
+	done := s.processDone
+	s.mu.Unlock()
+
+	// Step 2: Terminate current process
+	if cmd != nil && cmd.Process != nil && done != nil {
+		pid := cmd.Process.Pid
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			_ = cmd.Process.Kill()
+			select {
+			case <-done:
+			case <-time.After(1 * time.Second):
+			}
+		}
+	}
+
+	// Double-enforce cleared endpoint during transition
+	ClearRuntimeVlessEndpoint()
+
+	// Step 3: Re-validate configuration before spawning
+	if err := s.ValidateConfig(s.configPath); err != nil {
+		s.mu.Lock()
+		s.state = StateStopped
+		s.mu.Unlock()
+		ClearRuntimeVlessEndpoint()
+		return fmt.Errorf("configuration validation failed during restart: %w", err)
+	}
+
+	// Step 4: Launch new process
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		ClearRuntimeVlessEndpoint()
+		return errors.New("supervisor was stopped during restart")
+	}
+	if err := s.startProcessLocked(); err != nil {
+		s.state = StateStopped
+		s.mu.Unlock()
+		ClearRuntimeVlessEndpoint()
+		return fmt.Errorf("failed to start new xray process during restart: %w", err)
+	}
+	s.mu.Unlock()
+
+	// Step 5: Wait for readiness on API, SOCKS, and VLESS TCP 443
+	rTimeout := s.readyTimeout
+	if rTimeout <= 0 {
+		rTimeout = 10 * time.Second
+	}
+	if err := s.waitReady(rTimeout); err != nil {
+		_ = s.KillCurrentProcess()
+		s.mu.Lock()
+		s.state = StateStopped
+		s.mu.Unlock()
+		ClearRuntimeVlessEndpoint()
+		return fmt.Errorf("new xray process failed readiness check during restart: %w", err)
+	}
+
+	// Step 6: Process is READY - register runtime VLESS endpoint atomically
+	s.mu.Lock()
+	s.state = StateRunning
+	s.consecutiveCrashes = 0
+	s.restarts++
+	s.lastRestart = time.Now()
+	if s.vlessEnabled && s.vlessEndpoint != nil {
+		ep := *s.vlessEndpoint
+		if ep.Address == "" || ep.Address == "0.0.0.0" {
+			if s.publicAddress != "" {
+				ep.Address = s.publicAddress
+			} else if envAddr := os.Getenv("XRAY_VLESS_ADDRESS"); envAddr != "" {
+				ep.Address = envAddr
+			}
+		}
+		if ep.Address != "" && ep.Address != "0.0.0.0" {
+			_ = SetRuntimeVlessEndpoint(ep)
+		}
+	}
+	s.mu.Unlock()
+
+	log.Printf("[XraySupervisor] Xray restarted successfully and is READY")
+	return nil
+}
+
+// CheckHealth verifies that the Xray process is running and that all listeners
+// (API, SOCKS, and VLESS TCP 443 if enabled) are actively accepting connections.
+// If any check fails, it immediately clears the runtime VLESS endpoint to fail closed.
+func (s *Supervisor) CheckHealth() error {
+	s.mu.RLock()
+	st := s.state
+	stopped := s.stopped
+	apiAddr := s.apiAddr
+	socksAddr := s.socksAddr
+	vlessEnabled := s.vlessEnabled
+	var vlessPort int
+	if vlessEnabled && s.vlessEndpoint != nil {
+		vlessPort = s.vlessEndpoint.Port
+	}
+	s.mu.RUnlock()
+
+	if stopped || st != StateRunning {
+		ClearRuntimeVlessEndpoint()
+		return fmt.Errorf("xray is not running (state: %s, stopped: %v)", st, stopped)
+	}
+
+	// Verify API listener
+	apiConn, err := net.DialTimeout("tcp", apiAddr, 500*time.Millisecond)
+	if err != nil {
+		ClearRuntimeVlessEndpoint()
+		return fmt.Errorf("health check failed on API %s: %w", apiAddr, err)
+	}
+	apiConn.Close()
+
+	// Verify SOCKS listener
+	socksConn, err := net.DialTimeout("tcp", socksAddr, 500*time.Millisecond)
+	if err != nil {
+		ClearRuntimeVlessEndpoint()
+		return fmt.Errorf("health check failed on SOCKS %s: %w", socksAddr, err)
+	}
+	socksConn.Close()
+
+	// Verify VLESS TCP 443 listener
+	if vlessEnabled && vlessPort > 0 {
+		vlessConn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(vlessPort)), 500*time.Millisecond)
+		if err != nil {
+			ClearRuntimeVlessEndpoint()
+			return fmt.Errorf("health check failed on VLESS TCP :%d: %w", vlessPort, err)
+		}
+		vlessConn.Close()
+	}
+
+	return nil
+}
+
+// KillCurrentProcess terminates the active Xray child process directly (used to simulate crash or force kill).
+func (s *Supervisor) KillCurrentProcess() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cmd != nil && s.cmd.Process != nil {
+		pid := s.cmd.Process.Pid
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		return s.cmd.Process.Kill()
 	}
 	return nil
@@ -1015,4 +1253,17 @@ func (s *Supervisor) SetPublicAddress(addr string) error {
 	return nil
 }
 
+// SetBinaryPath configures a custom binary path for the supervisor (e.g. for testing or non-standard paths).
+func (s *Supervisor) SetBinaryPath(bin string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.xrayBin = bin
+}
+
+// SetReadyTimeout overrides the default readiness timeout (10s) for testing or custom environments.
+func (s *Supervisor) SetReadyTimeout(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readyTimeout = d
+}
 

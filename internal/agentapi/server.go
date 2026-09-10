@@ -32,12 +32,45 @@ func StartServerWithAddr(listenAddr string, port int, schedulerInstance *schedul
 		log.Printf("[AgentAPI] WARNING: Binding to PUBLIC address %s:%d! Enforcing mandatory TLS, Bearer token authentication, and IP rate limiting.", listenAddr, port)
 	}
 
+	handler := NewHandler(schedulerInstance, configKey)
+	addr := fmt.Sprintf("%s:%d", listenAddr, port)
+
+	// Generate in-memory self-signed TLS cert
+	tlsCert, err := LoadOrGenerateCert("configs/cert.pem", "configs/key.pem")
+	if err != nil {
+		log.Fatalf("[AgentAPI] Failed to generate TLS certificate: %v", err)
+	}
+
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{*tlsCert},
+			MinVersion:   tls.VersionTLS12,
+		},
+	}
+
+	go func() {
+		log.Printf("[AgentAPI] Server listening securely on %s", addr)
+		if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("[AgentAPI] Failed to start server: %v", err)
+		}
+	}()
+
+	return server
+}
+
+// NewHandler constructs and returns the fully configured HTTP handler for the Agent API.
+func NewHandler(schedulerInstance *scheduler.Scheduler, configKey string) http.Handler {
 	SetScheduler(schedulerInstance)
 	InitAuth(configKey)
 
 	mux := http.NewServeMux()
 
-	// panicRecoveryMiddleware recovers from panics and limits request body size
 	panicRecoveryMiddleware := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
@@ -63,8 +96,8 @@ func StartServerWithAddr(listenAddr string, port int, schedulerInstance *schedul
 	mux.Handle("/api/v1/slots", secureChain(http.HandlerFunc(handleSlots)))
 	mux.Handle("/api/v1/pool", secureChain(http.HandlerFunc(handlePool)))
 	mux.Handle("/api/v1/pool/qualified", secureChain(http.HandlerFunc(handlePoolQualified)))
-        mux.Handle("/api/v1/nodes", secureChain(http.HandlerFunc(handleNodesList)))
-        mux.Handle("/api/v1/routing", secureChain(http.HandlerFunc(handleRoutingOverview)))
+	mux.Handle("/api/v1/nodes", secureChain(http.HandlerFunc(handleNodesList)))
+	mux.Handle("/api/v1/routing", secureChain(http.HandlerFunc(handleRoutingOverview)))
 	mux.Handle("/api/v1/client-config", secureChain(http.HandlerFunc(handleClientConfig)))
 	mux.Handle("/api/v1/export/clash", secureChain(http.HandlerFunc(handleExportClash)))
 	mux.Handle("/api/v1/export/singbox", secureChain(http.HandlerFunc(handleExportSingbox)))
@@ -77,33 +110,5 @@ func StartServerWithAddr(listenAddr string, port int, schedulerInstance *schedul
 	// Metrics must be authenticated
 	mux.Handle("/metrics", secureChain(promhttp.Handler()))
 
-	addr := fmt.Sprintf("%s:%d", listenAddr, port)
-
-	// Generate in-memory self-signed TLS cert
-	tlsCert, err := LoadOrGenerateCert("configs/cert.pem", "configs/key.pem")
-	if err != nil {
-		log.Fatalf("[AgentAPI] Failed to generate TLS certificate: %v", err)
-	}
-
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{*tlsCert},
-			MinVersion:   tls.VersionTLS12,
-		},
-	}
-
-	go func() {
-		log.Printf("[AgentAPI] Server listening securely on %s", addr)
-		if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("[AgentAPI] Failed to start server: %v", err)
-		}
-	}()
-
-	return server
+	return mux
 }
