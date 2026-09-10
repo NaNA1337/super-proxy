@@ -75,6 +75,129 @@ func GetDefaultIPv6Gateway() (string, string, error) {
 	return gw, iface, nil
 }
 
+// EnsureEndpointBypassRoute guarantees that the host route for serverIP exits through the
+// physical interface and default gateway, preventing routing recursion into tun interfaces.
+// It implements idempotent semantics:
+// - already exists and correct -> success
+// - does not exist -> add
+// - exists but wrong (e.g. points to tunX) -> replace/fix
+// - cannot confirm -> fail closed
+func EnsureEndpointBypassRoute(serverIP string) error {
+	if serverIP == "" {
+		return fmt.Errorf("serverIP cannot be empty")
+	}
+
+	parsedIP := net.ParseIP(serverIP)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP address: %s", serverIP)
+	}
+
+	isIPv4 := parsedIP.To4() != nil
+
+	if isIPv4 {
+		gw, iface, err := GetDefaultGateway()
+		if err != nil {
+			return fmt.Errorf("failed to get IPv4 default gateway for endpoint bypass: %w", err)
+		}
+
+		cidr := fmt.Sprintf("%s/32", serverIP)
+
+		// 1. Inspect existing exact route
+		showCmd := exec.Command("ip", "route", "show", "exact", cidr)
+		showOut, _ := showCmd.CombinedOutput()
+		showStr := string(showOut)
+
+		needsInstall := false
+		if len(strings.TrimSpace(showStr)) == 0 {
+			needsInstall = true
+		} else if strings.Contains(showStr, "tun") || !strings.Contains(showStr, iface) {
+			log.Printf("[EndpointManager] Existing route for %s is misdirected (%s), replacing with physical %s via %s",
+				cidr, strings.TrimSpace(showStr), iface, gw)
+			if err := runCmd("ip", "route", "replace", cidr, "via", gw, "dev", iface); err != nil {
+				return fmt.Errorf("failed to replace misdirected route %s: %w", cidr, err)
+			}
+		} else {
+			log.Printf("[EndpointManager] Verified existing route for %s is correctly directed to %s", cidr, iface)
+		}
+
+		if needsInstall {
+			if err := runCmd("ip", "route", "add", cidr, "via", gw, "dev", iface); err != nil {
+				if strings.Contains(err.Error(), "File exists") {
+					// Fallback to replace in case of concurrent add
+					if rErr := runCmd("ip", "route", "replace", cidr, "via", gw, "dev", iface); rErr != nil {
+						return fmt.Errorf("failed to replace route %s on conflict: %w", cidr, rErr)
+					}
+				} else {
+					return fmt.Errorf("failed to add /32 endpoint bypass route for %s: %w", serverIP, err)
+				}
+			}
+		}
+
+		// 2. Read-back verification (fail closed if not routing via physical interface)
+		getCmd := exec.Command("ip", "route", "get", serverIP)
+		getOut, getErr := getCmd.CombinedOutput()
+		if getErr != nil {
+			return fmt.Errorf("route read-back verification failed for %s: %w", serverIP, getErr)
+		}
+		getStr := string(getOut)
+		if strings.Contains(getStr, "dev tun") || !strings.Contains(getStr, iface) {
+			return fmt.Errorf("FATAL: endpoint route for %s does not resolve to physical interface %s (resolved: %s)", serverIP, iface, getStr)
+		}
+
+		log.Printf("[EndpointManager] Ensured IPv4 /32 bypass route for %s via %s dev %s", serverIP, gw, iface)
+		return nil
+	}
+
+	// IPv6 Host Route /128
+	gw6, iface6, err := GetDefaultIPv6Gateway()
+	if err != nil {
+		return fmt.Errorf("FATAL: IPv6 underlay gateway not available on physical interface; refusing to route endpoint %s to avoid leak/recursion: %w", serverIP, err)
+	}
+
+	cidr6 := fmt.Sprintf("%s/128", serverIP)
+	showCmd := exec.Command("ip", "-6", "route", "show", "exact", cidr6)
+	showOut, _ := showCmd.CombinedOutput()
+	showStr := string(showOut)
+
+	needsInstall6 := false
+	if len(strings.TrimSpace(showStr)) == 0 {
+		needsInstall6 = true
+	} else if strings.Contains(showStr, "tun") || !strings.Contains(showStr, iface6) {
+		log.Printf("[EndpointManager] Existing IPv6 route for %s is misdirected (%s), replacing with physical %s via %s",
+			cidr6, strings.TrimSpace(showStr), iface6, gw6)
+		if err := runCmd("ip", "-6", "route", "replace", cidr6, "via", gw6, "dev", iface6); err != nil {
+			return fmt.Errorf("failed to replace misdirected IPv6 route %s: %w", cidr6, err)
+		}
+	} else {
+		log.Printf("[EndpointManager] Verified existing IPv6 route for %s is correctly directed to %s", cidr6, iface6)
+	}
+
+	if needsInstall6 {
+		if err := runCmd("ip", "-6", "route", "add", cidr6, "via", gw6, "dev", iface6); err != nil {
+			if strings.Contains(err.Error(), "File exists") {
+				if rErr := runCmd("ip", "-6", "route", "replace", cidr6, "via", gw6, "dev", iface6); rErr != nil {
+					return fmt.Errorf("failed to replace IPv6 route %s on conflict: %w", cidr6, rErr)
+				}
+			} else {
+				return fmt.Errorf("failed to add /128 endpoint bypass route for %s: %w", serverIP, err)
+			}
+		}
+	}
+
+	// Read-back verification
+	getCmd6 := exec.Command("ip", "-6", "route", "get", serverIP)
+	getOut6, getErr6 := getCmd6.CombinedOutput()
+	if getErr6 == nil {
+		getStr6 := string(getOut6)
+		if strings.Contains(getStr6, "dev tun") {
+			return fmt.Errorf("FATAL: IPv6 endpoint route for %s resolved into tun device (resolved: %s)", serverIP, getStr6)
+		}
+	}
+
+	log.Printf("[EndpointManager] Ensured IPv6 /128 bypass route for %s via %s dev %s", serverIP, gw6, iface6)
+	return nil
+}
+
 // AcquireEndpoint adds an explicit underlay route if not already present,
 // and increments the reference count.
 func (m *EndpointManager) AcquireEndpoint(serverIP string) error {
@@ -90,8 +213,6 @@ func (m *EndpointManager) AcquireEndpoint(serverIP string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	isIPv4 := parsedIP.To4() != nil
-
 	currentCount := m.refCounts[serverIP]
 	if currentCount > 0 {
 		m.refCounts[serverIP]++
@@ -99,40 +220,8 @@ func (m *EndpointManager) AcquireEndpoint(serverIP string) error {
 		return nil
 	}
 
-	// First reference: install the host route
-	if isIPv4 {
-		gw, iface, err := GetDefaultGateway()
-		if err != nil {
-			return fmt.Errorf("failed to get IPv4 default gateway for endpoint bypass: %w", err)
-		}
-
-		cidr := fmt.Sprintf("%s/32", serverIP)
-		if err := runCmd("ip", "route", "add", cidr, "via", gw, "dev", iface); err != nil {
-			// If route already exists in kernel table, verify it's reachable or treat as adopted
-			if strings.Contains(err.Error(), "File exists") {
-				log.Printf("[EndpointManager] Route %s already present in kernel, adopting", cidr)
-			} else {
-				return fmt.Errorf("failed to add /32 endpoint bypass route: %w", err)
-			}
-		}
-		log.Printf("[EndpointManager] Created IPv4 /32 bypass route for %s via %s dev %s", serverIP, gw, iface)
-	} else {
-		// IPv6 Host Route /128
-		gw6, iface6, err := GetDefaultIPv6Gateway()
-		if err != nil {
-			// Fail-safe: refusing to silently route IPv6 endpoint via tun/recursion
-			return fmt.Errorf("FATAL: IPv6 underlay gateway not available on physical interface; refusing to route endpoint %s to avoid leak/recursion: %w", serverIP, err)
-		}
-
-		cidr := fmt.Sprintf("%s/128", serverIP)
-		if err := runCmd("ip", "-6", "route", "add", cidr, "via", gw6, "dev", iface6); err != nil {
-			if strings.Contains(err.Error(), "File exists") {
-				log.Printf("[EndpointManager] Route %s already present in kernel, adopting", cidr)
-			} else {
-				return fmt.Errorf("failed to add /128 endpoint bypass route: %w", err)
-			}
-		}
-		log.Printf("[EndpointManager] Created IPv6 /128 bypass route for %s via %s dev %s", serverIP, gw6, iface6)
+	if err := EnsureEndpointBypassRoute(serverIP); err != nil {
+		return err
 	}
 
 	m.refCounts[serverIP] = 1

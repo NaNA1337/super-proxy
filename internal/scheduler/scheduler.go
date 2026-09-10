@@ -281,6 +281,7 @@ func (s *Scheduler) reconcileActiveSlots() {
 		if err := s.XraySupervisor.SyncActiveSlots(activeSlots); err != nil {
 			log.Printf("[Scheduler] ERROR: Failed to sync Xray active slots to %v: %v", activeSlots, err)
 			metrics.XrayErrors.Inc()
+			metrics.XraySyncErrors.Inc()
 		}
 	}
 }
@@ -295,21 +296,24 @@ func (s *Scheduler) TransitionToDraining(slot int, tunnel *openvpn.Tunnel) {
 // transitionToDrainingLocked moves a tunnel from active to draining state with isolated routing.
 // Must be called with s.Mu held.
 func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel) {
+	// 1. Immediately request Xray to exclude slot from active routing and verify runtime read-back
+	if s.XraySupervisor != nil {
+		if err := s.XraySupervisor.DrainingSlot(slot); err != nil {
+			log.Printf("[Scheduler] ERROR: Failed to drain Xray slot %d: %v. Aborting draining transition to maintain consistency.", slot, err)
+			metrics.XrayErrors.Inc()
+			metrics.DrainFailures.Inc()
+			// INVARIANT: Do NOT enter DRAINING, do NOT modify Linux draining routes, do NOT remove from ActiveSlots.
+			return
+		}
+	}
+
+	// 2. Only after Xray drain succeeds: mark tunnel state = SlotDraining
 	tunnel.Mu.Lock()
 	tunnel.State = string(SlotDraining)
 	tunnel.DrainingStartedAt = time.Now()
 	tunnel.Mu.Unlock()
 
-	// 1. Immediately transition slot to DRAINING without removing outbound handler (no rmo)
-	// (adrules routes new connections exclusively to surviving active slots)
-	if s.XraySupervisor != nil {
-		if err := s.XraySupervisor.DrainingSlot(slot); err != nil {
-			log.Printf("[Scheduler] ERROR: Failed to drain Xray slot %d: %v", slot, err)
-			metrics.XrayErrors.Inc()
-		}
-	}
-
-	// 2. Isolate existing connections into dedicated Draining Table (200 + slot)
+	// 3. Isolate existing connections into dedicated Draining Table (200 + slot)
 	drainingTableID := 200 + slot
 	tunIP, _ := routing.GetInterfaceIP(tunnel.Interface)
 	if err := routing.SetupDrainingRouting(drainingTableID, tunnel.Interface, tunIP); err != nil {
@@ -319,10 +323,10 @@ func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel)
 	s.drainingTableIDs[slot] = drainingTableID
 	s.drainingTunIPs[slot] = tunIP
 
-	// 3. FSM state transition
+	// 4. FSM state transition
 	_ = TransitionNode(database.DB, tunnel.Node, models.StatusDraining)
 
-	// 4. Move from active to draining map
+	// 5. Move from active to draining map
 	delete(s.ActiveSlots, slot)
 	s.DrainingSlots[slot] = tunnel
 

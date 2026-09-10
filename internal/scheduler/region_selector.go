@@ -20,12 +20,13 @@ type CandidateSelectionResult struct {
 }
 
 // Eligible statuses that count toward primary qualified capacity
+// (QUALIFIED + STANDBY + usable ACTIVE/HEALTHY; explicitly EXCLUDES DISCOVERED candidates
+// which have not yet passed reputation, connection, health, or speed qualification)
 var qualifiedCapacityStatuses = []string{
 	models.StatusActive,
 	models.StatusStandby,
 	models.StatusQualified,
 	models.StatusHealthy,
-	models.StatusDiscovered,
 }
 
 // Unassigned candidate statuses available to be selected for standby/active promotion

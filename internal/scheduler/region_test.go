@@ -26,14 +26,14 @@ func setupTestDB(t *testing.T) {
 func TestPrimaryPreferred(t *testing.T) {
 	setupTestDB(t)
 
-	// Seed 5 Primary nodes (JP)
+	// Seed 5 Primary qualified nodes (JP)
 	for i := 1; i <= 5; i++ {
 		database.DB.Create(&models.Node{
 			ID:       string(rune('A' + i)),
 			IP:       "192.0.2." + string(rune('0'+i)),
 			Country:  "JP",
 			Score:    100 + i,
-			Status:   models.StatusDiscovered,
+			Status:   models.StatusQualified,
 			LastSeen: time.Now(),
 		})
 	}
@@ -44,7 +44,7 @@ func TestPrimaryPreferred(t *testing.T) {
 		IP:       "198.51.100.1",
 		Country:  "US",
 		Score:    9999, // very high score!
-		Status:   models.StatusDiscovered,
+		Status:   models.StatusQualified,
 		LastSeen: time.Now(),
 	})
 
@@ -67,6 +67,41 @@ func TestPrimaryPreferred(t *testing.T) {
 	}
 	if res.Node.Country != "JP" {
 		t.Errorf("expected selected node country JP, got %s", res.Node.Country)
+	}
+}
+
+func TestDiscoveredDoesNotCountTowardQualifiedCapacity(t *testing.T) {
+	setupTestDB(t)
+
+	// Seed 10 DISCOVERED Primary nodes (JP) - none are qualified yet
+	for i := 1; i <= 10; i++ {
+		database.DB.Create(&models.Node{
+			ID:       string(rune('A' + i)),
+			IP:       "192.0.2." + string(rune('0'+i)),
+			Country:  "JP",
+			Score:    100 + i,
+			Status:   models.StatusDiscovered,
+			LastSeen: time.Now(),
+		})
+	}
+
+	cfg := config.RegionConfig{
+		Primary:  "JP",
+		Fallback: []string{"US"},
+	}
+	sched := NewScheduler(3, 2, reputation.NewEngine(), cfg) // required = 5
+
+	res, err := sched.SelectNextCandidate()
+	if err != nil {
+		t.Fatalf("unexpected error selecting candidate: %v", err)
+	}
+
+	// DISCOVERED nodes MUST NOT count toward qualified capacity!
+	if res.QualifiedCapacity != 0 {
+		t.Errorf("expected qualified capacity 0 (DISCOVERED must not count toward capacity), got %d", res.QualifiedCapacity)
+	}
+	if !res.FallbackEnabled {
+		t.Errorf("expected fallback to be ENABLED because qualified capacity (0) < required (5)")
 	}
 }
 
@@ -145,7 +180,7 @@ func TestHighScoreFallbackCannotBypassPrimary(t *testing.T) {
 		IP:       "192.0.2.1",
 		Country:  "JP",
 		Score:    10, // low score
-		Status:   models.StatusDiscovered,
+		Status:   models.StatusQualified,
 		LastSeen: time.Now(),
 	})
 
@@ -155,7 +190,7 @@ func TestHighScoreFallbackCannotBypassPrimary(t *testing.T) {
 		IP:       "198.51.100.99",
 		Country:  "US",
 		Score:    999999, // huge score
-		Status:   models.StatusDiscovered,
+		Status:   models.StatusQualified,
 		LastSeen: time.Now(),
 	})
 

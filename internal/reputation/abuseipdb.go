@@ -41,9 +41,17 @@ type abuseIPDBResponse struct {
 	} `json:"data"`
 }
 
-func (a *AbuseIPDBProvider) CheckIP(ctx context.Context, ip string) (*Result, error) {
+func (a *AbuseIPDBProvider) CheckIP(ctx context.Context, ip string) (*ReputationResult, error) {
+	now := time.Now()
 	if !a.IsHealthy() {
-		return &Result{IP: ip, Status: StatusUnknown, ProviderReason: "AbuseIPDB in rate-limit/failure backoff"}, nil
+		return &ReputationResult{
+			Provider:       "AbuseIPDB",
+			IP:             ip,
+			Status:         StatusUnknown,
+			ObservedAt:     now,
+			ProviderReason: "AbuseIPDB in rate-limit/failure backoff",
+			Error:          "provider in backoff",
+		}, nil
 	}
 
 	reqURL := fmt.Sprintf("https://api.abuseipdb.com/api/v2/check?ipAddress=%s&maxAgeInDays=90&verbose", ip)
@@ -56,29 +64,50 @@ func (a *AbuseIPDBProvider) CheckIP(ctx context.Context, ip string) (*Result, er
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		a.RecordFailure(false)
+		a.RecordFailure(false, 0)
 		return nil, fmt.Errorf("AbuseIPDB request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		a.RecordFailure(true)
-		return &Result{IP: ip, Status: StatusUnknown, ProviderReason: "AbuseIPDB 429 Too Many Requests"}, nil
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		a.RecordFailure(true, retryAfter)
+		return &ReputationResult{
+			Provider:       "AbuseIPDB",
+			IP:             ip,
+			Status:         StatusUnknown,
+			ObservedAt:     now,
+			ProviderReason: "AbuseIPDB 429 Too Many Requests",
+			Error:          "HTTP 429",
+		}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		a.RecordFailure(resp.StatusCode >= 500)
+		a.RecordFailure(resp.StatusCode >= 500, 0)
 		return nil, fmt.Errorf("AbuseIPDB returned status %d", resp.StatusCode)
 	}
 
 	var apiResp abuseIPDBResponse
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		a.RecordFailure(false)
+		a.RecordFailure(false, 0)
 		return nil, fmt.Errorf("failed to decode AbuseIPDB response: %w", err)
 	}
 	a.RecordSuccess()
 
-	res := &Result{
-		IP: ip,
+	score := apiResp.Data.AbuseConfidenceScore
+	scoreFloat := float64(score)
+	reportsCount := apiResp.Data.TotalReports
+
+	res := &ReputationResult{
+		Provider:        "AbuseIPDB",
+		IP:              ip,
+		Score:           floatPtr(scoreFloat),
+		AbuseConfidence: floatPtr(scoreFloat),
+		Reports:         intPtr(reportsCount),
+		CountryCode:     apiResp.Data.CountryCode,
+		ISP:             apiResp.Data.ISP,
+		IsTor:           boolPtr(apiResp.Data.IsTor),
+		RawCategory:     apiResp.Data.UsageType,
+		ObservedAt:      now,
 		NetworkInfo: models.NetworkClass{
 			ISP:         apiResp.Data.ISP,
 			NetworkType: apiResp.Data.UsageType,
@@ -86,11 +115,10 @@ func (a *AbuseIPDBProvider) CheckIP(ctx context.Context, ip string) (*Result, er
 		},
 	}
 
-	score := apiResp.Data.AbuseConfidenceScore
 	if score > 90 {
 		res.Status = StatusBad
 		res.HardReject = true
-		res.ProviderReason = fmt.Sprintf("Abuse confidence score: %d%% (>90%% hard reject threshold), %d reports", score, apiResp.Data.TotalReports)
+		res.ProviderReason = fmt.Sprintf("Abuse confidence score: %d%% (>90%% hard reject threshold), %d reports", score, reportsCount)
 	} else if score > 25 {
 		res.Status = StatusBad
 		res.ScorePenalty = score / 5

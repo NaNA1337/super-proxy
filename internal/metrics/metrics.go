@@ -101,4 +101,17 @@ var (
 		Name: "fallback_region_usage",
 		Help: "Total number of times a fallback region node was chosen",
 	})
+
+	DrainFailures = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "drain_failures_total",
+		Help: "Total number of failed slot drain operations",
+	})
+	XraySyncErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "xray_sync_errors_total",
+		Help: "Total number of Xray active slots sync failures",
+	})
+	XrayRuntimeMismatch = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "xray_runtime_mismatch_total",
+		Help: "Total number of discrepancies between expected and actual Xray runtime routing",
+	})
 )

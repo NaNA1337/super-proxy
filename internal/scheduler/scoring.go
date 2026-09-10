@@ -53,14 +53,19 @@ func NewScoringEngine(cfg config.ScoringConfig) *ScoringEngine {
 
 // EvaluateNode computes the final score and generates a full decision explanation.
 func (s *ScoringEngine) EvaluateNode(node *models.Node, isPrimaryRegion bool, prefixPenalty int, prefixReason string) ScoringResult {
+	return s.EvaluateNodeWithASN(node, isPrimaryRegion, prefixPenalty, prefixReason, 0, "")
+}
+
+// EvaluateNodeWithASN computes the final score incorporating ASN historical profiling and packet loss.
+func (s *ScoringEngine) EvaluateNodeWithASN(node *models.Node, isPrimaryRegion bool, prefixPenalty int, prefixReason string, asnPenalty int, asnReason string) ScoringResult {
 	var reasons []string
 
 	// Hard Reject checks
 	if node.Reputation.IsBlacklisted {
 		return ScoringResult{
-			FinalScore:  -9999,
-			Allowed:     false,
-			Explanation: fmt.Sprintf("Node %s (%s) REJECTED: blacklisted by reputation provider", node.ID, node.IP),
+			FinalScore:   -9999,
+			Allowed:      false,
+			Explanation:  fmt.Sprintf("Node %s (%s) REJECTED: blacklisted by reputation provider", node.ID, node.IP),
 			Explanations: []string{"Blacklisted by reputation provider"},
 		}
 	}
@@ -80,8 +85,9 @@ func (s *ScoringEngine) EvaluateNode(node *models.Node, isPrimaryRegion bool, pr
 
 	// 3. Performance: Speed score (1 point per Mbps download)
 	speedBonus := 0
+	speedMbps := 0.0
 	if node.Performance.DownloadSpeed > 0 {
-		speedMbps := float64(node.Performance.DownloadSpeed) / 1_000_000.0
+		speedMbps = float64(node.Performance.DownloadSpeed) / 1_000_000.0
 		speedBonus = int(speedMbps * s.cfg.SpeedWeight)
 		if speedBonus > 200 {
 			speedBonus = 200 // Cap speed bonus
@@ -100,18 +106,30 @@ func (s *ScoringEngine) EvaluateNode(node *models.Node, isPrimaryRegion bool, pr
 		}
 	}
 
-	// 5. Reputation penalty
+	// 5. Packet Loss penalty
+	lossPenalty := 0
+	if node.Performance.PacketLoss > 2.0 {
+		lossPenalty = int(node.Performance.PacketLoss * 2)
+		reasons = append(reasons, fmt.Sprintf("Packet loss penalty: -%d (%.1f%% loss)", lossPenalty, node.Performance.PacketLoss))
+	}
+
+	// 6. Reputation penalty
 	repPenalty := node.Reputation.FraudScore
 	if repPenalty > 0 {
 		reasons = append(reasons, fmt.Sprintf("Reputation fraud penalty: -%d", repPenalty))
 	}
 
-	// 6. Prefix Intelligence penalty
+	// 7. Prefix Intelligence penalty
 	if prefixPenalty > 0 {
 		reasons = append(reasons, fmt.Sprintf("Prefix risk penalty: -%d (%s)", prefixPenalty, prefixReason))
 	}
 
-	// 7. Network Intelligence penalties
+	// 8. ASN / ISP risk penalty
+	if asnPenalty > 0 {
+		reasons = append(reasons, fmt.Sprintf("ASN risk penalty: -%d (%s)", asnPenalty, asnReason))
+	}
+
+	// 9. Network Intelligence penalties
 	netPenalty := 0
 	if node.NetClass.IsHosting {
 		netPenalty += s.cfg.HostingPenalty
@@ -130,22 +148,23 @@ func (s *ScoringEngine) EvaluateNode(node *models.Node, isPrimaryRegion bool, pr
 		reasons = append(reasons, fmt.Sprintf("Tor exit penalty: -%d", s.cfg.TorPenalty))
 	}
 
-	// 8. Historical failure penalty
+	// 10. Historical failure penalty
 	failPenalty := node.FailCount * s.cfg.FailurePenalty
 	if failPenalty > 0 {
 		reasons = append(reasons, fmt.Sprintf("Failure history penalty: -%d (fails=%d)", failPenalty, node.FailCount))
 	}
 
-	finalScore := vpnGateScore + regionBonus + speedBonus + latencyBonus - repPenalty - prefixPenalty - netPenalty - failPenalty
+	finalScore := vpnGateScore + regionBonus + speedBonus + latencyBonus - lossPenalty - repPenalty - prefixPenalty - asnPenalty - netPenalty - failPenalty
 
 	allowed := finalScore >= -100
-	statusStr := "ACCEPTED"
-	if !allowed {
-		statusStr = "REJECTED (Score below threshold -100)"
+	var explanation string
+	if allowed {
+		explanation = fmt.Sprintf("Node %s (%s) QUALIFIED: FinalScore=%d (rep=%s, ASN=%s, RTT=%dms, speed=%.1fMbps, loss=%.1f%%) [%s]",
+			node.ID, node.IP, finalScore, node.Reputation.Status, node.NetClass.ASN, node.Performance.RTT, speedMbps, node.Performance.PacketLoss, strings.Join(reasons, "; "))
+	} else {
+		explanation = fmt.Sprintf("Node %s (%s) REJECTED (Score below threshold -100): FinalScore=%d [%s]",
+			node.ID, node.IP, finalScore, strings.Join(reasons, "; "))
 	}
-
-	explanation := fmt.Sprintf("Node %s (%s) %s: FinalScore=%d [%s]",
-		node.ID, node.IP, statusStr, finalScore, strings.Join(reasons, "; "))
 
 	return ScoringResult{
 		FinalScore:   finalScore,

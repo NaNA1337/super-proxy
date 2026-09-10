@@ -90,3 +90,12 @@ func TestEndpointManager_ConcurrentAcquireRelease(t *testing.T) {
 		t.Errorf("Expected final refcount 0 after balanced concurrent operations, got %d", count)
 	}
 }
+
+func TestEnsureEndpointBypassRoute_Validation(t *testing.T) {
+	if err := EnsureEndpointBypassRoute(""); err == nil {
+		t.Errorf("expected error on empty IP, got nil")
+	}
+	if err := EnsureEndpointBypassRoute("invalid_ip"); err == nil {
+		t.Errorf("expected error on invalid IP, got nil")
+	}
+}

@@ -27,6 +27,8 @@ type BenchmarkResult struct {
 	ThroughputMbps     float64
 	RTTMs              int64
 	PacketLossPct      float64
+	PacketLossStatus   string
+	SpeedStatus        string
 	CPUUsagePct        float64
 	PPS                float64
 	MTU                int
@@ -137,11 +139,15 @@ func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) Ben
 			totalRTT += time.Since(pStart).Milliseconds()
 		}
 	}
-	rttMs := int64(0)
+	rttMs := int64(-1)
+	packetLossStatus := "AVAILABLE"
+	packetLossPct := -1.0
 	if successCount > 0 {
 		rttMs = totalRTT / int64(successCount)
+		packetLossPct = (float64(probeCount-successCount) / float64(probeCount)) * 100.0
+	} else {
+		packetLossStatus = "UNAVAILABLE"
 	}
-	packetLossPct := (float64(probeCount-successCount) / float64(probeCount)) * 100.0
 
 	ctx, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
@@ -216,6 +222,11 @@ func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) Ben
 	bps := float64(bytesCount) * 8.0 / actualDuration
 	mbps := bps / 1_000_000.0
 
+	speedStatus := "AVAILABLE"
+	if bytesCount == 0 {
+		speedStatus = "NOT_MEASURED"
+	}
+
 	const target2Gbps = 2_000_000_000.0 // 2 Gbps in bps
 	reached := bps >= target2Gbps
 
@@ -235,6 +246,8 @@ func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) Ben
 		ThroughputMbps:     mbps,
 		RTTMs:              rttMs,
 		PacketLossPct:      packetLossPct,
+		PacketLossStatus:   packetLossStatus,
+		SpeedStatus:        speedStatus,
 		CPUUsagePct:        cpuUsage,
 		PPS:                pps,
 		MTU:                mtu,

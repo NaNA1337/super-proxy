@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -67,30 +68,45 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 		users, _ := strconv.Atoi(record[9])
 
 		ip := record[1]
-		port := extractPortFromBase64(record[14])
-		
-		// Create a unique ID using IP and (extracted port if possible, though VPN Gate IP is usually unique enough)
-		id := ip
-		if port != "" {
-			id = fmt.Sprintf("%s:%s", ip, port)
+		totalTraffic, _ := strconv.ParseInt(record[10], 10, 64)
+		logType := record[11]
+		operator := record[12]
+		b64Config := record[14]
+
+		rawConfig, meta, err := ParseOpenVPNConfig(b64Config)
+		if err != nil {
+			log.Printf("[Discovery] Rejecting node %s (%s): invalid OpenVPN config: %v", ip, record[0], err)
+			continue
 		}
 
+		endpointsJSON, _ := json.Marshal(meta.Endpoints)
+
+		id := fmt.Sprintf("%s:%d", ip, meta.PrimaryEndpoint.Port)
+
 		node := models.Node{
-			ID:          id,
-			HostName:    record[0],
-			IP:          ip,
-			Score:       score,
-			CountryL:    record[5],
-			Country:     record[6], // CountryShort
-			Sessions:    sessions,
-			Uptime:      uptime,
-			Users:       users,
-			Message:     record[13],
-			OpenVPN:     record[14], // Base64 encoded
-			Status:      models.StatusDiscovered,
-			LastSeen:    now,
-			FirstSeen:   now,
-			FailCount:   0,
+			ID:            id,
+			HostName:      record[0],
+			IP:            ip,
+			Score:         score,
+			CountryL:      record[5],
+			Country:       record[6], // CountryShort
+			Sessions:      sessions,
+			Uptime:        uptime,
+			Users:         users,
+			TotalTraffic:  totalTraffic,
+			LogType:       logType,
+			Operator:      operator,
+			Message:       record[13],
+			OpenVPN:       b64Config,
+			OpenVPNConfig: rawConfig,
+			EndpointsJSON: string(endpointsJSON),
+			EndpointHost:  meta.PrimaryEndpoint.Host,
+			EndpointPort:  meta.PrimaryEndpoint.Port,
+			EndpointProto: meta.PrimaryEndpoint.Proto,
+			Status:        models.StatusDiscovered,
+			LastSeen:      now,
+			FirstSeen:     now,
+			FailCount:     0,
 			Performance: models.PerformanceMetrics{
 				RTT:        ping,
 				Throughput: speed,
@@ -101,12 +117,4 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 	}
 
 	return nodes, nil
-}
-
-// extractPortFromBase64 tries to extract the port from the Base64 config
-// This is a placeholder since we might not strictly need the port for the ID if IP is unique
-func extractPortFromBase64(b64 string) string {
-	// Full base64 decode and parse OpenVPN config could be implemented here
-	// For Phase 1, we rely on IP as primary identifier or IP:HostName
-	return ""
 }

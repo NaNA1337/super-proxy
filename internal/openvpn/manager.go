@@ -3,7 +3,6 @@ package openvpn
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/routing"
 )
@@ -39,12 +39,12 @@ type Tunnel struct {
 
 // StartTunnel decodes config, injects route-nopull, and starts the OpenVPN process
 func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel, error) {
-	// 1. Decode config
-	configData, err := base64.StdEncoding.DecodeString(node.OpenVPN)
+	// 1. Validate & decode untrusted config
+	rawConfig, _, err := discovery.ParseOpenVPNConfig(node.OpenVPN)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode openvpn config: %w", err)
+		return nil, fmt.Errorf("failed to validate untrusted openvpn config: %w", err)
 	}
-	cfgStr := string(configData)
+	cfgStr := rawConfig
 
 	// 2. Inject route-nopull to prevent overwriting main routing table
 	if !strings.Contains(cfgStr, "route-nopull") {

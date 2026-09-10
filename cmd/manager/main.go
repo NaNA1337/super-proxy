@@ -75,6 +75,7 @@ func main() {
 		FailurePolicy: cfg.Reputation.FailurePolicy,
 		CacheTTL:      24 * time.Hour,
 	})
+	repEngine.SetDB(database.DB)
 	if cfg.Reputation.Enabled {
 		// AbuseIPDB
 		abuseKey := cfg.Reputation.AbuseIPDBKey

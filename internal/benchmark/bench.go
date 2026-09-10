@@ -163,13 +163,15 @@ func BenchmarkInterfaceWithConfig(ctx context.Context, interfaceName string, cfg
 		interfaceName, rtt, packetLossPct, downloadBps, uploadBps, uploadStatus, totalDuration)
 
 	return &models.PerformanceMetrics{
-		RTT:           rtt,
-		Throughput:    downloadBps,
-		DownloadSpeed: downloadBps,
-		UploadSpeed:   uploadBps,
-		UploadStatus:  uploadStatus,
-		PacketLoss:    packetLossPct,
-		DurationMs:    totalDuration,
-		LastChecked:   time.Now(),
+		RTT:              rtt,
+		Throughput:       downloadBps,
+		DownloadSpeed:    downloadBps,
+		UploadSpeed:      uploadBps,
+		UploadStatus:     uploadStatus,
+		SpeedStatus:      "AVAILABLE",
+		PacketLoss:       packetLossPct,
+		PacketLossStatus: "AVAILABLE",
+		DurationMs:       totalDuration,
+		LastChecked:      time.Now(),
 	}, nil
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +21,37 @@ const (
 	StatusUnknown ReputationStatus = "UNKNOWN"
 )
 
-// Result defines the outcome of a reputation check
+// ReputationResult encapsulates detailed structured evidence from an individual provider.
+type ReputationResult struct {
+	Provider        string           `json:"provider"`
+	IP              string           `json:"ip"`
+	Status          ReputationStatus `json:"status"` // GOOD, BAD, UNKNOWN
+	Score           *float64         `json:"score,omitempty"`
+	AbuseConfidence *float64         `json:"abuse_confidence,omitempty"`
+	FraudScore      *float64         `json:"fraud_score,omitempty"`
+	IsVPN           *bool            `json:"is_vpn,omitempty"`
+	IsProxy         *bool            `json:"is_proxy,omitempty"`
+	IsTor           *bool            `json:"is_tor,omitempty"`
+	IsHosting       *bool            `json:"is_hosting,omitempty"`
+	IsResidential   *bool            `json:"is_residential,omitempty"`
+	ASN             string           `json:"asn,omitempty"`
+	ISP             string           `json:"isp,omitempty"`
+	Organization    string           `json:"organization,omitempty"`
+	Country         string           `json:"country,omitempty"`
+	CountryCode     string           `json:"country_code,omitempty"`
+	Reports         *int             `json:"reports,omitempty"`
+	RawCategory     string           `json:"raw_category,omitempty"`
+	ObservedAt      time.Time        `json:"observed_at"`
+	Error           string           `json:"error,omitempty"`
+
+	// Derived qualification attributes
+	HardReject     bool                `json:"hard_reject"`
+	ScorePenalty   int                 `json:"score_penalty"`
+	ProviderReason string              `json:"provider_reason"`
+	NetworkInfo    models.NetworkClass `json:"network_info"`
+}
+
+// Result defines the aggregate outcome of all reputation evaluations for an IP.
 type Result struct {
 	IP             string
 	Status         ReputationStatus
@@ -27,16 +59,17 @@ type Result struct {
 	ScorePenalty   int
 	ProviderReason string
 	NetworkInfo    models.NetworkClass
+	Evidences      []ReputationResult
 }
 
-// Provider represents a reputation API provider (AbuseIPDB, GreyNoise, IPQS, IPInfo)
+// Provider represents a reputation API provider (AbuseIPDB, GreyNoise, IPQS, IPInfo).
 type Provider interface {
-	CheckIP(ctx context.Context, ip string) (*Result, error)
+	CheckIP(ctx context.Context, ip string) (*ReputationResult, error)
 	Name() string
 	IsHealthy() bool
 }
 
-// BaseProvider tracks backoff and health for API rate-limits and timeouts.
+// BaseProvider tracks backoff, 429 Retry-After, and health for API rate-limits and timeouts.
 type BaseProvider struct {
 	providerName   string
 	mu             sync.RWMutex
@@ -65,18 +98,47 @@ func (b *BaseProvider) RecordSuccess() {
 	b.backoffUntil = time.Time{}
 }
 
-func (b *BaseProvider) RecordFailure(isRateLimit bool) {
+func (b *BaseProvider) RecordFailure(isRateLimit bool, retryAfter time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.consecFailures++
 	if isRateLimit {
-		// Backoff for 5 minutes on HTTP 429
-		b.backoffUntil = time.Now().Add(5 * time.Minute)
+		if retryAfter > 0 {
+			b.backoffUntil = time.Now().Add(retryAfter)
+		} else {
+			// Exponential backoff: 1m, 2m, 4m, up to 1h
+			multiplier := 1 << (b.consecFailures - 1)
+			if multiplier > 60 {
+				multiplier = 60
+			}
+			b.backoffUntil = time.Now().Add(time.Duration(multiplier) * time.Minute)
+		}
 	} else if b.consecFailures >= 3 {
 		// Backoff for 1 minute on repeated errors
 		b.backoffUntil = time.Now().Add(1 * time.Minute)
 	}
 }
+
+func parseRetryAfter(header string) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(header); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if t, err := http.ParseTime(header); err == nil {
+		diff := time.Until(t)
+		if diff > 0 {
+			return diff
+		}
+	}
+	return 0
+}
+
+func boolPtr(b bool) *bool          { return &b }
+func floatPtr(f float64) *float64   { return &f }
+func intPtr(i int) *int             { return &i }
 
 // ==========================================
 // 1. GreyNoise Provider
@@ -106,9 +168,17 @@ type greyNoiseResponse struct {
 	Message        string `json:"message"`
 }
 
-func (g *GreyNoiseProvider) CheckIP(ctx context.Context, ip string) (*Result, error) {
+func (g *GreyNoiseProvider) CheckIP(ctx context.Context, ip string) (*ReputationResult, error) {
+	now := time.Now()
 	if !g.IsHealthy() {
-		return &Result{IP: ip, Status: StatusUnknown, ProviderReason: "GreyNoise in backoff"}, nil
+		return &ReputationResult{
+			Provider:       "GreyNoise",
+			IP:             ip,
+			Status:         StatusUnknown,
+			ObservedAt:     now,
+			ProviderReason: "GreyNoise in backoff",
+			Error:          "provider in backoff",
+		}, nil
 	}
 
 	reqURL := fmt.Sprintf("https://api.greynoise.io/v3/community/%s", ip)
@@ -123,32 +193,52 @@ func (g *GreyNoiseProvider) CheckIP(ctx context.Context, ip string) (*Result, er
 
 	resp, err := g.client.Do(req)
 	if err != nil {
-		g.RecordFailure(false)
+		g.RecordFailure(false, 0)
 		return nil, fmt.Errorf("GreyNoise request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		g.RecordFailure(true)
-		return &Result{IP: ip, Status: StatusUnknown, ProviderReason: "GreyNoise 429 Too Many Requests"}, nil
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		g.RecordFailure(true, retryAfter)
+		return &ReputationResult{
+			Provider:       "GreyNoise",
+			IP:             ip,
+			Status:         StatusUnknown,
+			ObservedAt:     now,
+			ProviderReason: "GreyNoise 429 Too Many Requests",
+			Error:          "HTTP 429",
+		}, nil
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		g.RecordSuccess()
-		return &Result{IP: ip, Status: StatusGood, ProviderReason: "GreyNoise: not observed in internet background scanning"}, nil
+		return &ReputationResult{
+			Provider:       "GreyNoise",
+			IP:             ip,
+			Status:         StatusGood,
+			ObservedAt:     now,
+			ProviderReason: "GreyNoise: not observed in internet background scanning",
+		}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		g.RecordFailure(resp.StatusCode >= 500)
+		g.RecordFailure(resp.StatusCode >= 500, 0)
 		return nil, fmt.Errorf("GreyNoise returned status %d", resp.StatusCode)
 	}
 
 	var apiResp greyNoiseResponse
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		g.RecordFailure(false)
+		g.RecordFailure(false, 0)
 		return nil, fmt.Errorf("failed to decode GreyNoise response: %w", err)
 	}
 	g.RecordSuccess()
 
-	res := &Result{IP: ip}
+	res := &ReputationResult{
+		Provider:    "GreyNoise",
+		IP:          ip,
+		RawCategory: apiResp.Name,
+		ObservedAt:  now,
+	}
+
 	if apiResp.Classification == "malicious" {
 		res.Status = StatusBad
 		res.HardReject = true
@@ -199,9 +289,17 @@ type ipqsResponse struct {
 	BotStatus    bool   `json:"bot_status"`
 }
 
-func (q *IPQSProvider) CheckIP(ctx context.Context, ip string) (*Result, error) {
+func (q *IPQSProvider) CheckIP(ctx context.Context, ip string) (*ReputationResult, error) {
+	now := time.Now()
 	if !q.IsHealthy() {
-		return &Result{IP: ip, Status: StatusUnknown, ProviderReason: "IPQS in backoff"}, nil
+		return &ReputationResult{
+			Provider:       "IPQS",
+			IP:             ip,
+			Status:         StatusUnknown,
+			ObservedAt:     now,
+			ProviderReason: "IPQS in backoff",
+			Error:          "provider in backoff",
+		}, nil
 	}
 
 	reqURL := fmt.Sprintf("https://ipqualityscore.com/api/json/ip/%s/%s?strictness=1&allow_public_access_points=true", q.apiKey, ip)
@@ -212,36 +310,64 @@ func (q *IPQSProvider) CheckIP(ctx context.Context, ip string) (*Result, error) 
 
 	resp, err := q.client.Do(req)
 	if err != nil {
-		q.RecordFailure(false)
+		q.RecordFailure(false, 0)
 		return nil, fmt.Errorf("IPQS request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		q.RecordFailure(true)
-		return &Result{IP: ip, Status: StatusUnknown, ProviderReason: "IPQS 429 Too Many Requests"}, nil
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		q.RecordFailure(true, retryAfter)
+		return &ReputationResult{
+			Provider:       "IPQS",
+			IP:             ip,
+			Status:         StatusUnknown,
+			ObservedAt:     now,
+			ProviderReason: "IPQS 429 Too Many Requests",
+			Error:          "HTTP 429",
+		}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		q.RecordFailure(resp.StatusCode >= 500)
+		q.RecordFailure(resp.StatusCode >= 500, 0)
 		return nil, fmt.Errorf("IPQS returned status %d", resp.StatusCode)
 	}
 
 	var apiResp ipqsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		q.RecordFailure(false)
+		q.RecordFailure(false, 0)
 		return nil, fmt.Errorf("failed to decode IPQS response: %w", err)
 	}
 	q.RecordSuccess()
 
-	res := &Result{
-		IP: ip,
+	asnStr := ""
+	if apiResp.ASN > 0 {
+		asnStr = fmt.Sprintf("AS%d", apiResp.ASN)
+	}
+
+	isVPN := apiResp.VPN || apiResp.ActiveVPN
+	isProxy := apiResp.Proxy
+	isTor := apiResp.Tor || apiResp.ActiveTor
+
+	res := &ReputationResult{
+		Provider:     "IPQS",
+		IP:           ip,
+		FraudScore:   floatPtr(float64(apiResp.FraudScore)),
+		Score:        floatPtr(float64(apiResp.FraudScore)),
+		IsVPN:        boolPtr(isVPN),
+		IsProxy:      boolPtr(isProxy),
+		IsTor:        boolPtr(isTor),
+		ASN:          asnStr,
+		ISP:          apiResp.ISP,
+		Organization: apiResp.Organization,
+		CountryCode:  apiResp.CountryCode,
+		ObservedAt:   now,
 		NetworkInfo: models.NetworkClass{
-			ASN:          fmt.Sprintf("AS%d", apiResp.ASN),
+			ASN:          asnStr,
 			ISP:          apiResp.ISP,
 			Organization: apiResp.Organization,
-			IsVPN:        apiResp.VPN || apiResp.ActiveVPN,
-			IsProxy:      apiResp.Proxy,
-			IsTor:        apiResp.Tor || apiResp.ActiveTor,
+			IsVPN:        isVPN,
+			IsProxy:      isProxy,
+			IsTor:        isTor,
 		},
 	}
 
@@ -284,6 +410,7 @@ type ipInfoResponse struct {
 	IP       string `json:"ip"`
 	Hostname string `json:"hostname"`
 	Org      string `json:"org"`
+	Country  string `json:"country"`
 	Privacy  struct {
 		VPN     bool   `json:"vpn"`
 		Proxy   bool   `json:"proxy"`
@@ -299,9 +426,17 @@ type ipInfoResponse struct {
 	} `json:"company"`
 }
 
-func (i *IPInfoProvider) CheckIP(ctx context.Context, ip string) (*Result, error) {
+func (i *IPInfoProvider) CheckIP(ctx context.Context, ip string) (*ReputationResult, error) {
+	now := time.Now()
 	if !i.IsHealthy() {
-		return &Result{IP: ip, Status: StatusUnknown, ProviderReason: "IPInfo in backoff"}, nil
+		return &ReputationResult{
+			Provider:       "IPInfo",
+			IP:             ip,
+			Status:         StatusUnknown,
+			ObservedAt:     now,
+			ProviderReason: "IPInfo in backoff",
+			Error:          "provider in backoff",
+		}, nil
 	}
 
 	reqURL := fmt.Sprintf("https://ipinfo.io/%s/json", ip)
@@ -315,39 +450,76 @@ func (i *IPInfoProvider) CheckIP(ctx context.Context, ip string) (*Result, error
 
 	resp, err := i.client.Do(req)
 	if err != nil {
-		i.RecordFailure(false)
+		i.RecordFailure(false, 0)
 		return nil, fmt.Errorf("IPInfo request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		i.RecordFailure(true)
-		return &Result{IP: ip, Status: StatusUnknown, ProviderReason: "IPInfo 429 Too Many Requests"}, nil
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		i.RecordFailure(true, retryAfter)
+		return &ReputationResult{
+			Provider:       "IPInfo",
+			IP:             ip,
+			Status:         StatusUnknown,
+			ObservedAt:     now,
+			ProviderReason: "IPInfo 429 Too Many Requests",
+			Error:          "HTTP 429",
+		}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		i.RecordFailure(resp.StatusCode >= 500)
+		i.RecordFailure(resp.StatusCode >= 500, 0)
 		return nil, fmt.Errorf("IPInfo returned status %d", resp.StatusCode)
 	}
 
 	var apiResp ipInfoResponse
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		i.RecordFailure(false)
+		i.RecordFailure(false, 0)
 		return nil, fmt.Errorf("failed to decode IPInfo response: %w", err)
 	}
 	i.RecordSuccess()
 
-	res := &Result{
-		IP:     ip,
-		Status: StatusGood,
+	// Parse ASN from org field (e.g. "AS15169 Google LLC")
+	asn := ""
+	orgName := apiResp.Org
+	if strings.HasPrefix(apiResp.Org, "AS") {
+		parts := strings.SplitN(apiResp.Org, " ", 2)
+		asn = parts[0]
+		if len(parts) > 1 {
+			orgName = parts[1]
+		}
+	}
+
+	isHosting := apiResp.Privacy.Hosting || apiResp.Company.Type == "hosting"
+	isVPN := apiResp.Privacy.VPN
+	isProxy := apiResp.Privacy.Proxy
+	isTor := apiResp.Privacy.Tor
+	isResidential := apiResp.Company.Type == "isp" && !isHosting
+
+	res := &ReputationResult{
+		Provider:      "IPInfo",
+		IP:            ip,
+		Status:        StatusGood,
+		IsVPN:         boolPtr(isVPN),
+		IsProxy:       boolPtr(isProxy),
+		IsTor:         boolPtr(isTor),
+		IsHosting:     boolPtr(isHosting),
+		IsResidential: boolPtr(isResidential),
+		ASN:           asn,
+		Organization:  orgName,
+		CountryCode:   apiResp.Country,
+		RawCategory:   apiResp.Company.Type,
+		ObservedAt:    now,
 		NetworkInfo: models.NetworkClass{
-			Organization: apiResp.Org,
+			ASN:          asn,
+			Organization: orgName,
 			NetworkType:  apiResp.Company.Type,
-			IsVPN:        apiResp.Privacy.VPN,
-			IsProxy:      apiResp.Privacy.Proxy,
-			IsTor:        apiResp.Privacy.Tor,
-			IsHosting:    apiResp.Privacy.Hosting || apiResp.Company.Type == "hosting",
+			IsVPN:        isVPN,
+			IsProxy:      isProxy,
+			IsTor:        isTor,
+			IsHosting:    isHosting,
 		},
-		ProviderReason: fmt.Sprintf("IPInfo: Org=%s, Hosting=%v, VPN=%v", apiResp.Org, apiResp.Privacy.Hosting, apiResp.Privacy.VPN),
+		ProviderReason: fmt.Sprintf("IPInfo: Org=%s, Hosting=%v, VPN=%v", orgName, isHosting, isVPN),
 	}
 
 	return res, nil
@@ -361,12 +533,14 @@ type NullProvider struct{}
 
 func (n *NullProvider) Name() string    { return "NullProvider" }
 func (n *NullProvider) IsHealthy() bool { return true }
-func (n *NullProvider) CheckIP(ctx context.Context, ip string) (*Result, error) {
-	return &Result{
+func (n *NullProvider) CheckIP(ctx context.Context, ip string) (*ReputationResult, error) {
+	return &ReputationResult{
+		Provider:       "NullProvider",
 		IP:             ip,
 		Status:         StatusUnknown,
 		HardReject:     false,
 		ScorePenalty:   0,
+		ObservedAt:     time.Now(),
 		ProviderReason: "NullProvider: reputation checking bypassed",
 	}, nil
 }

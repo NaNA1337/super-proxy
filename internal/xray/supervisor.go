@@ -508,18 +508,97 @@ func (s *Supervisor) verifyRuntimeRoutingLocked(expectedSlots []int, drainingSlo
 		if errBi != nil || !strings.Contains(string(outBi), "Selects:") {
 			return fmt.Errorf("runtime read-back mismatch: balancer %s not active via bi: %v (output: %s)", expectedBalancer, errBi, string(outBi))
 		}
+		// Parse structured selectors from balancer output
+		actualSelectors := make(map[string]bool)
+		inSelects := false
+		for _, line := range strings.Split(string(outBi), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.Contains(trimmed, "Selects:") {
+				inSelects = true
+				continue
+			}
+			if inSelects {
+				if strings.HasPrefix(trimmed, "- ") {
+					inSelects = false
+					continue
+				}
+				fields := strings.Fields(trimmed)
+				for _, f := range fields {
+					if strings.HasPrefix(f, "exit-") {
+						actualSelectors[f] = true
+					}
+				}
+			}
+		}
 
-		// Also verify draining slot is not in the balancer's selector pool
+		// Strict set comparison: every expected slot must be present
+		for _, sl := range expectedSlots {
+			expectedTag := fmt.Sprintf("exit-%d", sl)
+			if !actualSelectors[expectedTag] {
+				return fmt.Errorf("runtime read-back mismatch: expected slot %s not selected by balancer %s (actual: %v)",
+					expectedTag, expectedBalancer, actualSelectors)
+			}
+		}
+
+		// Also strictly verify draining slot is not in the balancer's selector pool
 		if drainingSlot >= 0 {
 			drainingTag := fmt.Sprintf("exit-%d", drainingSlot)
-			if strings.Contains(string(outBi), drainingTag) {
-				return fmt.Errorf("CRITICAL VIOLATION: draining slot %s found in active balancer %s: %s", drainingTag, expectedBalancer, string(outBi))
+			if actualSelectors[drainingTag] {
+				return fmt.Errorf("CRITICAL VIOLATION: draining slot %s found in active balancer %s: %v",
+					drainingTag, expectedBalancer, actualSelectors)
 			}
+		}
+
+		// Set cardinality match (ensuring no extraneous outbounds are active)
+		if len(actualSelectors) != len(expectedSlots) {
+			return fmt.Errorf("runtime read-back mismatch: balancer %s has %d selectors, expected %d (actual: %v)",
+				expectedBalancer, len(actualSelectors), len(expectedSlots), actualSelectors)
 		}
 	}
 
 	log.Printf("[XraySupervisor] Runtime read-back VERIFIED: active slots=%v, draining slot %d excluded", expectedSlots, drainingSlot)
 	return nil
+}
+
+// rollbackRoutingLocked restores previous desired slot state on runtime failure.
+func (s *Supervisor) rollbackRoutingLocked(oldSlots []int) {
+	log.Printf("[XraySupervisor] ROLLBACK: Reverting Xray runtime routing to previous desired slots %v", oldSlots)
+
+	// Restore internal memory state
+	for i := 0; i < s.slotCount; i++ {
+		t := fmt.Sprintf("exit-%d", i)
+		s.activeOutbounds[t] = false
+	}
+	for _, sl := range oldSlots {
+		t := fmt.Sprintf("exit-%d", sl)
+		s.activeOutbounds[t] = true
+	}
+
+	// Re-apply old desired configuration to Xray runtime
+	if syncErr := s.syncActiveSlotsLocked(oldSlots); syncErr != nil {
+		log.Printf("[XraySupervisor] CRITICAL DEGRADED SAFETY STATE: rollback sync failed: %v", syncErr)
+		return
+	}
+
+	// Verify old configuration is restored
+	if verifyErr := s.verifyRuntimeRoutingLocked(oldSlots, -1); verifyErr != nil {
+		log.Printf("[XraySupervisor] CRITICAL DEGRADED SAFETY STATE: rollback verification failed: %v", verifyErr)
+		return
+	}
+
+	log.Printf("[XraySupervisor] Rollback SUCCESSFUL: Xray runtime restored to %v", oldSlots)
+}
+
+func (s *Supervisor) getActiveSlotsLocked() []int {
+	var active []int
+	for i := 0; i < s.slotCount; i++ {
+		t := fmt.Sprintf("exit-%d", i)
+		if s.activeOutbounds[t] {
+			active = append(active, i)
+		}
+	}
+	sort.Ints(active)
+	return active
 }
 
 // DrainingSlot transitions a slot to DRAINING without removing its outbound handler.
@@ -536,23 +615,24 @@ func (s *Supervisor) DrainingSlot(slot int) error {
 		return nil
 	}
 
-	s.activeOutbounds[tag] = false
+	oldSlots := s.getActiveSlotsLocked()
+
 	surviving := []int{}
-	for i := 0; i < s.slotCount; i++ {
-		t := fmt.Sprintf("exit-%d", i)
-		if s.activeOutbounds[t] {
-			surviving = append(surviving, i)
+	for _, sl := range oldSlots {
+		if sl != slot {
+			surviving = append(surviving, sl)
 		}
 	}
 
+	s.activeOutbounds[tag] = false
 	if err := s.syncActiveSlotsLocked(surviving); err != nil {
-		s.activeOutbounds[tag] = true // rollback
+		s.rollbackRoutingLocked(oldSlots)
 		return fmt.Errorf("failed to sync active slots during drain of slot %d: %w", slot, err)
 	}
 
 	// Strict runtime read-back verification for the draining slot
 	if err := s.verifyRuntimeRoutingLocked(surviving, slot); err != nil {
-		s.activeOutbounds[tag] = true // rollback
+		s.rollbackRoutingLocked(oldSlots)
 		return fmt.Errorf("draining runtime read-back verification failed for slot %d: %w", slot, err)
 	}
 
@@ -566,18 +646,24 @@ func (s *Supervisor) ActivateSlot(slot int) error {
 	defer s.mu.Unlock()
 
 	tag := fmt.Sprintf("exit-%d", slot)
+	oldSlots := s.getActiveSlotsLocked()
+
+	activeSet := make(map[int]bool)
+	for _, sl := range oldSlots {
+		activeSet[sl] = true
+	}
+	activeSet[slot] = true
+
+	active := make([]int, 0, len(activeSet))
+	for sl := range activeSet {
+		active = append(active, sl)
+	}
+	sort.Ints(active)
+
 	s.activeOutbounds[tag] = true
 
-	active := []int{}
-	for i := 0; i < s.slotCount; i++ {
-		t := fmt.Sprintf("exit-%d", i)
-		if s.activeOutbounds[t] {
-			active = append(active, i)
-		}
-	}
-
 	if err := s.syncActiveSlotsLocked(active); err != nil {
-		s.activeOutbounds[tag] = false // rollback
+		s.rollbackRoutingLocked(oldSlots)
 		return fmt.Errorf("failed to activate slot %d in Xray routing: %w", slot, err)
 	}
 	return nil
