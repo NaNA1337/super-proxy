@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/xray"
 	"gopkg.in/yaml.v3"
@@ -67,13 +68,18 @@ func BuildRealityClientProfile(r *http.Request) (*xray.RealityClientProfile, err
 	}
 
 	// 2. Resolve public address:
-	// Preference: query param (?address=...) > request Host > runtime address > env (XRAY_VLESS_ADDRESS)
+	// Preference: query param (?address=...) > runtime address > request Host > env (XRAY_VLESS_ADDRESS)
 	// Strictly NO localhost or 127.0.0.1 fallback!
 	var resolvedAddr string
 	if r != nil && r.URL != nil && r.URL.Query().Get("address") != "" {
 		reqAddr := r.URL.Query().Get("address")
-		if err := xray.ValidatePublicAddress(reqAddr); err == nil {
-			resolvedAddr = reqAddr
+		if err := xray.ValidatePublicAddress(reqAddr); err != nil {
+			return nil, fmt.Errorf("cannot determine valid public client address (localhost/127.0.0.1 is prohibited): %w", err)
+		}
+		resolvedAddr = reqAddr
+	} else if rtEndpoint.Address != "" && rtEndpoint.Address != "0.0.0.0" {
+		if err := xray.ValidatePublicAddress(rtEndpoint.Address); err == nil {
+			resolvedAddr = rtEndpoint.Address
 		}
 	} else if r != nil && r.Host != "" {
 		host, _, err := net.SplitHostPort(r.Host)
@@ -82,12 +88,6 @@ func BuildRealityClientProfile(r *http.Request) (*xray.RealityClientProfile, err
 		}
 		if err := xray.ValidatePublicAddress(host); err == nil {
 			resolvedAddr = host
-		}
-	}
-
-	if resolvedAddr == "" && rtEndpoint.Address != "" && rtEndpoint.Address != "0.0.0.0" {
-		if err := xray.ValidatePublicAddress(rtEndpoint.Address); err == nil {
-			resolvedAddr = rtEndpoint.Address
 		}
 	}
 
@@ -414,26 +414,231 @@ func BuildSubscription(p *xray.RealityClientProfile) (string, error) {
 	return base64.StdEncoding.EncodeToString([]byte(link + "\n")), nil
 }
 
+// NodeInfo describes the egress node identifying information.
+type NodeInfo struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Region  string `json:"region"`
+	Country string `json:"country"`
+	Status  string `json:"status,omitempty"`
+}
+
+// EndpointInfo describes the public client ingress endpoint.
+type EndpointInfo struct {
+	Address  string `json:"address"`
+	Port     int    `json:"port"`
+	Network  string `json:"network"`
+	Protocol string `json:"protocol"`
+	TLS      bool   `json:"tls"`
+}
+
+// RealityInfo describes the active Reality parameters for client connection.
+type RealityInfo struct {
+	ServerName  string `json:"server_name"`
+	Fingerprint string `json:"fingerprint"`
+	Flow        string `json:"flow"`
+	Destination string `json:"destination"`
+}
+
+// ClientProfileItem contains the rendered export for a specific client format.
+type ClientProfileItem struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Format   string `json:"format"`
+	MimeType string `json:"mime_type"`
+	Filename string `json:"filename"`
+	Content  string `json:"content"`
+}
+
+// ClientConfigBundle is the unified canonical bundle containing all client configurations.
+type ClientConfigBundle struct {
+	SchemaVersion int                 `json:"schema_version"`
+	GeneratedAt   string              `json:"generated_at"`
+	Node          NodeInfo            `json:"node"`
+	Endpoint      EndpointInfo        `json:"endpoint"`
+	Reality       RealityInfo         `json:"reality"`
+	Profiles      []ClientProfileItem `json:"profiles"`
+}
+
+// BuildClientConfigBundle builds the unified client configuration bundle.
+// It is the single source of truth for /api/v1/client-config/all and all client export endpoints.
+// Fails closed immediately if runtime endpoint is unavailable or active config is inconsistent.
+func BuildClientConfigBundle(r *http.Request) (*ClientConfigBundle, error) {
+	profile, err := BuildRealityClientProfile(r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Double-check consistency invariants on runtime profile
+	if profile.Port != 443 {
+		return nil, fmt.Errorf("runtime client endpoint port must be 443, got %d", profile.Port)
+	}
+	if profile.Flow != xray.DefaultFlow {
+		return nil, fmt.Errorf("runtime client flow %q does not match required %q", profile.Flow, xray.DefaultFlow)
+	}
+	if profile.Fingerprint != xray.DefaultRealityFP {
+		return nil, fmt.Errorf("runtime client fingerprint %q does not match required %q", profile.Fingerprint, xray.DefaultRealityFP)
+	}
+	if profile.SNI != xray.DefaultRealitySNI {
+		return nil, fmt.Errorf("runtime client SNI %q does not match required %q", profile.SNI, xray.DefaultRealitySNI)
+	}
+	if profile.RealityTarget != xray.DefaultRealityTarget {
+		return nil, fmt.Errorf("runtime client destination %q does not match required %q", profile.RealityTarget, xray.DefaultRealityTarget)
+	}
+	if err := xray.ValidatePublicAddress(profile.Address); err != nil {
+		return nil, fmt.Errorf("runtime client address is invalid: %w", err)
+	}
+
+	// 1. VLESS URI
+	vlessURI, err := BuildVlessShareLink(profile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate VLESS URI: %w", err)
+	}
+
+	// 2. Clash Meta YAML
+	clashYAML, err := BuildClashMetaProfileYAML(profile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Clash Meta profile: %w", err)
+	}
+
+	// 3. Sing-box JSON
+	singboxMap, err := BuildSingboxProfileJSON(profile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Singbox profile: %w", err)
+	}
+	singboxJSON, err := json.MarshalIndent(singboxMap, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal Singbox JSON: %w", err)
+	}
+
+	// 4. Xray-core JSON
+	xrayMap, err := BuildXrayClientConfig(profile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Xray config: %w", err)
+	}
+	xrayJSON, err := json.MarshalIndent(xrayMap, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal Xray JSON: %w", err)
+	}
+
+	// 5. Subscription (Base64)
+	subBase64, err := BuildSubscription(profile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate subscription: %w", err)
+	}
+
+	// Resolve node metadata without duplicating storage
+	nodeID, _ := os.Hostname()
+	if nodeID == "" {
+		nodeID = "super-proxy-node"
+	}
+	nodeName := os.Getenv("NODE_NAME")
+	if nodeName == "" {
+		nodeName = "Super-Proxy Egress Node"
+	}
+	nodeRegion := os.Getenv("XRAY_MANAGER_REGION")
+	if nodeRegion == "" && sched != nil && sched.RegionConfig.Primary != "" {
+		nodeRegion = sched.RegionConfig.Primary
+	}
+	if nodeRegion == "" {
+		nodeRegion = "JP"
+	}
+	nodeCountry := os.Getenv("XRAY_MANAGER_COUNTRY")
+	if nodeCountry == "" {
+		nodeCountry = nodeRegion
+	}
+
+	bundle := &ClientConfigBundle{
+		SchemaVersion: 1,
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		Node: NodeInfo{
+			ID:      nodeID,
+			Name:    nodeName,
+			Region:  nodeRegion,
+			Country: nodeCountry,
+			Status:  "online",
+		},
+		Endpoint: EndpointInfo{
+			Address:  profile.Address,
+			Port:     profile.Port,
+			Network:  "tcp",
+			Protocol: "vless",
+			TLS:      true,
+		},
+		Reality: RealityInfo{
+			ServerName:  profile.SNI,
+			Fingerprint: profile.Fingerprint,
+			Flow:        profile.Flow,
+			Destination: profile.RealityTarget,
+		},
+		Profiles: []ClientProfileItem{
+			{
+				ID:       "vless",
+				Name:     "VLESS",
+				Format:   "uri",
+				MimeType: "text/plain",
+				Filename: "vless.txt",
+				Content:  vlessURI,
+			},
+			{
+				ID:       "clash-meta",
+				Name:     "Clash Meta",
+				Format:   "yaml",
+				MimeType: "application/yaml",
+				Filename: "clash-meta.yaml",
+				Content:  string(clashYAML),
+			},
+			{
+				ID:       "sing-box",
+				Name:     "sing-box",
+				Format:   "json",
+				MimeType: "application/json",
+				Filename: "sing-box.json",
+				Content:  string(singboxJSON),
+			},
+			{
+				ID:       "xray",
+				Name:     "Xray",
+				Format:   "json",
+				MimeType: "application/json",
+				Filename: "xray.json",
+				Content:  string(xrayJSON),
+			},
+			{
+				ID:       "subscription",
+				Name:     "Base64 Subscription",
+				Format:   "base64",
+				MimeType: "text/plain",
+				Filename: "subscription.txt",
+				Content:  subBase64,
+			},
+		},
+	}
+
+	return bundle, nil
+}
+
 // HTTP Handler: /api/v1/export/clash
 func handleExportClash(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	profile, err := BuildRealityClientProfile(r)
+	bundle, err := BuildClientConfigBundle(r)
 	if err != nil {
 		http.Error(w, "Client export unavailable: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	data, err := BuildClashMetaProfileYAML(profile)
-	if err != nil {
-		http.Error(w, "Failed to generate Clash config: "+err.Error(), http.StatusInternalServerError)
-		return
+	for _, p := range bundle.Profiles {
+		if p.ID == "clash-meta" {
+			w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+			w.Header().Set("Content-Disposition", "attachment; filename=\"super-proxy-clash.yaml\"")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(p.Content))
+			return
+		}
 	}
-	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
-	w.Header().Set("Content-Disposition", "attachment; filename=\"super-proxy-clash.yaml\"")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	http.Error(w, "Clash profile not found in bundle", http.StatusInternalServerError)
 }
 
 // HTTP Handler: /api/v1/export/singbox
@@ -442,20 +647,21 @@ func handleExportSingbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	profile, err := BuildRealityClientProfile(r)
+	bundle, err := BuildClientConfigBundle(r)
 	if err != nil {
 		http.Error(w, "Client export unavailable: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	sbConfig, err := BuildSingboxProfileJSON(profile)
-	if err != nil {
-		http.Error(w, "Failed to generate Singbox config: "+err.Error(), http.StatusInternalServerError)
-		return
+	for _, p := range bundle.Profiles {
+		if p.ID == "sing-box" {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Content-Disposition", "attachment; filename=\"super-proxy-singbox.json\"")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(p.Content + "\n"))
+			return
+		}
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Content-Disposition", "attachment; filename=\"super-proxy-singbox.json\"")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(sbConfig)
+	http.Error(w, "Sing-box profile not found in bundle", http.StatusInternalServerError)
 }
 
 // HTTP Handler: /api/v1/export/xray
@@ -464,20 +670,21 @@ func handleExportXray(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	profile, err := BuildRealityClientProfile(r)
+	bundle, err := BuildClientConfigBundle(r)
 	if err != nil {
 		http.Error(w, "Client export unavailable: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	xrayConfig, err := BuildXrayClientConfig(profile)
-	if err != nil {
-		http.Error(w, "Failed to generate Xray config: "+err.Error(), http.StatusInternalServerError)
-		return
+	for _, p := range bundle.Profiles {
+		if p.ID == "xray" {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Content-Disposition", "attachment; filename=\"super-proxy-xray.json\"")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(p.Content + "\n"))
+			return
+		}
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Content-Disposition", "attachment; filename=\"super-proxy-xray.json\"")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(xrayConfig)
+	http.Error(w, "Xray profile not found in bundle", http.StatusInternalServerError)
 }
 
 // HTTP Handler: /api/v1/export/sub
@@ -486,17 +693,34 @@ func handleExportSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	profile, err := BuildRealityClientProfile(r)
+	bundle, err := BuildClientConfigBundle(r)
 	if err != nil {
 		http.Error(w, "Subscription unavailable: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	sub, err := BuildSubscription(profile)
-	if err != nil {
-		http.Error(w, "Failed to build subscription: "+err.Error(), http.StatusInternalServerError)
+	for _, p := range bundle.Profiles {
+		if p.ID == "subscription" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(p.Content))
+			return
+		}
+	}
+	http.Error(w, "Subscription profile not found in bundle", http.StatusInternalServerError)
+}
+
+// HTTP Handler: /api/v1/client-config/all
+func handleClientConfigAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	bundle, err := BuildClientConfigBundle(r)
+	if err != nil {
+		http.Error(w, "runtime client endpoint unavailable: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(sub))
+	_ = json.NewEncoder(w).Encode(bundle)
 }

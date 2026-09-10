@@ -99,6 +99,7 @@ func NewHandler(schedulerInstance *scheduler.Scheduler, configKey string) http.H
 	mux.Handle("/api/v1/nodes", secureChain(http.HandlerFunc(handleNodesList)))
 	mux.Handle("/api/v1/routing", secureChain(http.HandlerFunc(handleRoutingOverview)))
 	mux.Handle("/api/v1/client-config", secureChain(http.HandlerFunc(handleClientConfig)))
+	mux.Handle("/api/v1/client-config/all", secureChain(http.HandlerFunc(handleClientConfigAll)))
 	mux.Handle("/api/v1/export/clash", secureChain(http.HandlerFunc(handleExportClash)))
 	mux.Handle("/api/v1/export/singbox", secureChain(http.HandlerFunc(handleExportSingbox)))
 	mux.Handle("/api/v1/export/xray", secureChain(http.HandlerFunc(handleExportXray)))

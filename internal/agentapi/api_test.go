@@ -2,16 +2,21 @@ package agentapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/config"
 	"github.com/NaNA1337/super-proxy/internal/database"
@@ -19,6 +24,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/NaNA1337/super-proxy/internal/xray"
+	"gopkg.in/yaml.v3"
 )
 
 func setupTestServer() http.Handler {
@@ -52,6 +58,7 @@ func setupTestServer() http.Handler {
         mux.Handle("/api/v1/nodes", secureChain(http.HandlerFunc(handleNodesList)))
         mux.Handle("/api/v1/routing", secureChain(http.HandlerFunc(handleRoutingOverview)))
         mux.Handle("/api/v1/client-config", secureChain(http.HandlerFunc(handleClientConfig)))
+        mux.Handle("/api/v1/client-config/all", secureChain(http.HandlerFunc(handleClientConfigAll)))
 	mux.Handle("/api/v1/export/clash", secureChain(http.HandlerFunc(handleExportClash)))
 	mux.Handle("/api/v1/export/singbox", secureChain(http.HandlerFunc(handleExportSingbox)))
 	mux.Handle("/api/v1/export/xray", secureChain(http.HandlerFunc(handleExportXray)))
@@ -758,4 +765,576 @@ func TestAPI_SubscriptionTokenHashingAndRevocation(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 Forbidden after token revocation, got %d", rr.Code)
 	}
+}
+
+func TestClientConfigAll(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "203.0.113.10",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	defer xray.ClearRuntimeVlessEndpoint()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                443,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	req, _ := http.NewRequest("GET", "/api/v1/client-config/all", nil)
+	req.RemoteAddr = "192.0.2.20:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/v1/client-config/all, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var bundle ClientConfigBundle
+	if err := json.Unmarshal(rr.Body.Bytes(), &bundle); err != nil {
+		t.Fatalf("failed to unmarshal ClientConfigBundle JSON: %v", err)
+	}
+
+	if bundle.SchemaVersion != 1 {
+		t.Errorf("expected schema_version 1, got %d", bundle.SchemaVersion)
+	}
+	if bundle.GeneratedAt == "" {
+		t.Errorf("expected non-empty generated_at")
+	}
+	if bundle.Endpoint.Address != "203.0.113.10" || bundle.Endpoint.Port != 443 || bundle.Endpoint.Network != "tcp" || bundle.Endpoint.Protocol != "vless" || !bundle.Endpoint.TLS {
+		t.Errorf("unexpected endpoint fields in bundle: %+v", bundle.Endpoint)
+	}
+	if bundle.Reality.ServerName != "www.microsoft.com" || bundle.Reality.Fingerprint != "chrome" || bundle.Reality.Flow != "xtls-rprx-vision" || bundle.Reality.Destination != "www.microsoft.com:443" {
+		t.Errorf("unexpected reality fields in bundle: %+v", bundle.Reality)
+	}
+
+	requiredProfiles := []string{"vless", "clash-meta", "sing-box", "xray", "subscription"}
+	foundMap := make(map[string]ClientProfileItem)
+	for _, p := range bundle.Profiles {
+		if strings.TrimSpace(p.Content) == "" {
+			t.Errorf("profile %q content is unexpectedly empty", p.ID)
+		}
+		foundMap[p.ID] = p
+	}
+
+	for _, reqID := range requiredProfiles {
+		if _, ok := foundMap[reqID]; !ok {
+			t.Errorf("missing required profile %q in bundle", reqID)
+		}
+	}
+}
+
+func TestClientConfigAllRuntimeEndpoint(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	// Set runtime endpoint: example.com:443
+	err := xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "example.com",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	if err != nil {
+		t.Fatalf("SetRuntimeVlessEndpoint failed: %v", err)
+	}
+	defer xray.ClearRuntimeVlessEndpoint()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                443,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	req, _ := http.NewRequest("GET", "/api/v1/client-config/all", nil)
+	req.RemoteAddr = "192.0.2.20:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var bundle ClientConfigBundle
+	if err := json.Unmarshal(rr.Body.Bytes(), &bundle); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+
+	if bundle.Endpoint.Address != "example.com" || bundle.Endpoint.Port != 443 {
+		t.Fatalf("bundle endpoint expected example.com:443, got %s:%d", bundle.Endpoint.Address, bundle.Endpoint.Port)
+	}
+
+	// Verify all profiles use example.com:443
+	for _, p := range bundle.Profiles {
+		switch p.ID {
+		case "vless":
+			if !strings.Contains(p.Content, "@example.com:443?") {
+				t.Errorf("vless profile missing example.com:443: %s", p.Content)
+			}
+		case "clash-meta":
+			if !strings.Contains(p.Content, "server: example.com") || !strings.Contains(p.Content, "port: 443") {
+				t.Errorf("clash-meta profile missing example.com:443: %s", p.Content)
+			}
+		case "sing-box":
+			if !strings.Contains(p.Content, "\"server\": \"example.com\"") || !strings.Contains(p.Content, "\"server_port\": 443") {
+				t.Errorf("sing-box profile missing example.com:443: %s", p.Content)
+			}
+		case "xray":
+			if !strings.Contains(p.Content, "\"address\": \"example.com\"") || !strings.Contains(p.Content, "\"port\": 443") {
+				t.Errorf("xray profile missing example.com:443: %s", p.Content)
+			}
+		case "subscription":
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(p.Content))
+			if err != nil {
+				t.Fatalf("failed to decode base64 subscription: %v", err)
+			}
+			if !strings.Contains(string(decoded), "@example.com:443?") {
+				t.Errorf("decoded subscription missing example.com:443: %s", string(decoded))
+			}
+		}
+	}
+}
+
+func TestClientConfigAllRuntimeUnavailable(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                443,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	// Clear runtime endpoint
+	xray.ClearRuntimeVlessEndpoint()
+
+	req, _ := http.NewRequest("GET", "/api/v1/client-config/all", nil)
+	req.RemoteAddr = "192.0.2.20:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when runtime endpoint is unavailable, got %d: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "runtime client endpoint unavailable") {
+		t.Errorf("expected error message to state 'runtime client endpoint unavailable', got: %s", body)
+	}
+	if strings.Contains(body, "schema_version") || strings.Contains(body, "profiles") {
+		t.Errorf("expected no bundle body on failure, got: %s", body)
+	}
+}
+
+func TestClientConfigAllInvalidPublicAddress(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "203.0.113.10",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	defer xray.ClearRuntimeVlessEndpoint()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                443,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	badAddresses := []string{"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+	for _, bad := range badAddresses {
+		req, _ := http.NewRequest("GET", "/api/v1/client-config/all?address="+bad, nil)
+		req.RemoteAddr = "192.0.2.20:12345"
+		req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 Bad Request for bad address %q, got %d: %s", bad, rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "runtime client endpoint unavailable") {
+			t.Errorf("expected error message to state 'runtime client endpoint unavailable', got: %s", rr.Body.String())
+		}
+	}
+}
+
+func TestClientConfigAllConsistency(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "203.0.113.10",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	defer xray.ClearRuntimeVlessEndpoint()
+
+	baseConfig := func() *xray.VlessConfig {
+		return &xray.VlessConfig{
+			Enabled:             true,
+			Port:                443,
+			UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+			Flow:                "xtls-rprx-vision",
+			Dest:                "www.microsoft.com:443",
+			ServerNames:         []string{"www.microsoft.com"},
+			Fingerprint:         "chrome",
+			PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+			ShortIds:            []string{"0123456789abcdef"},
+			OutboundOnlyPort443: true,
+		}
+	}
+
+	testCases := []struct {
+		name   string
+		modify func(c *xray.VlessConfig)
+	}{
+		{"mismatched port", func(c *xray.VlessConfig) { c.Port = 8443 }},
+		{"mismatched SNI", func(c *xray.VlessConfig) { c.ServerNames = []string{"other.domain.com"} }},
+		{"mismatched flow", func(c *xray.VlessConfig) { c.Flow = "xtls-rprx-direct" }},
+		{"mismatched fingerprint", func(c *xray.VlessConfig) { c.Fingerprint = "firefox" }},
+		{"mismatched destination", func(c *xray.VlessConfig) { c.Dest = "other.domain.com:443" }},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			tc.modify(cfg)
+			SetActiveVlessConfig(cfg)
+
+			req, _ := http.NewRequest("GET", "/api/v1/client-config/all", nil)
+			req.RemoteAddr = "192.0.2.20:12345"
+			req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("[%s] expected 400 Bad Request on inconsistency, got %d: %s", tc.name, rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), "runtime client endpoint unavailable") {
+				t.Errorf("[%s] expected 'runtime client endpoint unavailable' in response, got: %s", tc.name, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestClientConfigAllNoSecrets(t *testing.T) {
+	handler := setupTestServer()
+	apiToken := "super-secret-agent-api-token-xyz987"
+	InitAuth(apiToken)
+
+	_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "203.0.113.10",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	defer xray.ClearRuntimeVlessEndpoint()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                443,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	req, _ := http.NewRequest("GET", "/api/v1/client-config/all", nil)
+	req.RemoteAddr = "192.0.2.20:12345"
+	req.Header.Set("Authorization", "Bearer "+apiToken)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	body := rr.Body.String()
+	prohibitedPatterns := []string{
+		"private_key",
+		"privatekey",
+		"-----BEGIN PRIVATE KEY-----",
+		"-----BEGIN RSA PRIVATE KEY-----",
+		"-----BEGIN EC PRIVATE KEY-----",
+		apiToken,
+	}
+
+	for _, pat := range prohibitedPatterns {
+		if strings.Contains(body, pat) {
+			t.Errorf("CRITICAL SECURITY VIOLATION: response contains prohibited secret substring %q", pat)
+		}
+	}
+}
+
+func TestClientConfigAllMatchesIndividualExports(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "203.0.113.10",
+		Port:     443,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	defer xray.ClearRuntimeVlessEndpoint()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                443,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	// 1. Call /api/v1/client-config/all
+	req, _ := http.NewRequest("GET", "/api/v1/client-config/all", nil)
+	req.RemoteAddr = "192.0.2.20:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rrAll := httptest.NewRecorder()
+	handler.ServeHTTP(rrAll, req)
+	if rrAll.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on client-config/all, got %d: %s", rrAll.Code, rrAll.Body.String())
+	}
+
+	var bundle ClientConfigBundle
+	if err := json.Unmarshal(rrAll.Body.Bytes(), &bundle); err != nil {
+		t.Fatalf("failed to unmarshal bundle: %v", err)
+	}
+
+	profileMap := make(map[string]string)
+	for _, p := range bundle.Profiles {
+		profileMap[p.ID] = p.Content
+	}
+
+	// 2. Compare Clash Meta with /api/v1/export/clash
+	req, _ = http.NewRequest("GET", "/api/v1/export/clash", nil)
+	req.RemoteAddr = "192.0.2.20:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rrClash := httptest.NewRecorder()
+	handler.ServeHTTP(rrClash, req)
+	if rrClash.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /export/clash, got %d", rrClash.Code)
+	}
+	var clashFromExport, clashFromBundle map[string]interface{}
+	if err := yaml.Unmarshal(rrClash.Body.Bytes(), &clashFromExport); err != nil {
+		t.Fatalf("failed to unmarshal clash export YAML: %v", err)
+	}
+	if err := yaml.Unmarshal([]byte(profileMap["clash-meta"]), &clashFromBundle); err != nil {
+		t.Fatalf("failed to unmarshal clash bundle YAML: %v", err)
+	}
+	if !reflect.DeepEqual(clashFromExport, clashFromBundle) {
+		t.Errorf("clash export YAML and bundle clash-meta YAML structural mismatch")
+	}
+
+	// 3. Compare Sing-box with /api/v1/export/singbox
+	req, _ = http.NewRequest("GET", "/api/v1/export/singbox", nil)
+	req.RemoteAddr = "192.0.2.20:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rrSingbox := httptest.NewRecorder()
+	handler.ServeHTTP(rrSingbox, req)
+	if rrSingbox.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /export/singbox, got %d", rrSingbox.Code)
+	}
+	var sbFromExport, sbFromBundle map[string]interface{}
+	if err := json.Unmarshal(rrSingbox.Body.Bytes(), &sbFromExport); err != nil {
+		t.Fatalf("failed to unmarshal singbox export JSON: %v", err)
+	}
+	if err := json.Unmarshal([]byte(profileMap["sing-box"]), &sbFromBundle); err != nil {
+		t.Fatalf("failed to unmarshal singbox bundle JSON: %v", err)
+	}
+	if !reflect.DeepEqual(sbFromExport, sbFromBundle) {
+		t.Errorf("singbox export JSON and bundle sing-box JSON structural mismatch")
+	}
+
+	// 4. Compare Xray with /api/v1/export/xray
+	req, _ = http.NewRequest("GET", "/api/v1/export/xray", nil)
+	req.RemoteAddr = "192.0.2.20:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rrXray := httptest.NewRecorder()
+	handler.ServeHTTP(rrXray, req)
+	if rrXray.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /export/xray, got %d", rrXray.Code)
+	}
+	var xrayFromExport, xrayFromBundle map[string]interface{}
+	if err := json.Unmarshal(rrXray.Body.Bytes(), &xrayFromExport); err != nil {
+		t.Fatalf("failed to unmarshal xray export JSON: %v", err)
+	}
+	if err := json.Unmarshal([]byte(profileMap["xray"]), &xrayFromBundle); err != nil {
+		t.Fatalf("failed to unmarshal xray bundle JSON: %v", err)
+	}
+	if !reflect.DeepEqual(xrayFromExport, xrayFromBundle) {
+		t.Errorf("xray export JSON and bundle xray JSON structural mismatch")
+	}
+
+	// 5. Compare Subscription with /api/v1/export/sub
+	req, _ = http.NewRequest("GET", "/api/v1/export/sub", nil)
+	req.RemoteAddr = "192.0.2.20:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rrSub := httptest.NewRecorder()
+	handler.ServeHTTP(rrSub, req)
+	if rrSub.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /export/sub, got %d", rrSub.Code)
+	}
+	if strings.TrimSpace(rrSub.Body.String()) != strings.TrimSpace(profileMap["subscription"]) {
+		t.Errorf("subscription export and bundle subscription content mismatch")
+	}
+}
+
+func TestClientConfigAll_ConcurrentRuntimeSwitch(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                443,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Goroutine 1: toggling runtime endpoint
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		endpoints := []string{"node-01.super-proxy.net", "node-02.super-proxy.net", "node-03.super-proxy.net"}
+		idx := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if idx%4 == 0 {
+					xray.ClearRuntimeVlessEndpoint()
+				} else {
+					_ = xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+						Address:  endpoints[idx%len(endpoints)],
+						Port:     443,
+						Network:  "tcp",
+						TLS:      true,
+						Protocol: "vless",
+					})
+				}
+				idx++
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Multiple worker goroutines hammering /api/v1/client-config/all
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			reqNum := 0
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					reqNum++
+					req, _ := http.NewRequest("GET", "/api/v1/client-config/all", nil)
+					req.RemoteAddr = fmt.Sprintf("192.0.2.%d:12345", (workerID*25+reqNum)%240+1)
+					req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+					rr := httptest.NewRecorder()
+					handler.ServeHTTP(rr, req)
+
+					if rr.Code == http.StatusOK {
+						var b ClientConfigBundle
+						if err := json.Unmarshal(rr.Body.Bytes(), &b); err != nil {
+							t.Errorf("failed to unmarshal JSON during concurrent test: %v", err)
+							continue
+						}
+						// Invariants check
+						if b.Endpoint.Port != 443 {
+							t.Errorf("VIOLATION: returned port %d (must be 443)", b.Endpoint.Port)
+						}
+						if b.Endpoint.Address == "127.0.0.1" || b.Endpoint.Address == "localhost" || b.Endpoint.Address == "0.0.0.0" {
+							t.Errorf("VIOLATION: returned localhost/unspecified address: %s", b.Endpoint.Address)
+						}
+						for _, p := range b.Profiles {
+							if strings.Contains(p.Content, "@localhost") || strings.Contains(p.Content, "@127.0.0.1") ||
+								strings.Contains(p.Content, "server: 127.0.0.1") || strings.Contains(p.Content, "server: localhost") ||
+								strings.Contains(p.Content, "\"server\": \"127.0.0.1\"") || strings.Contains(p.Content, "\"address\": \"127.0.0.1\"") {
+								t.Errorf("VIOLATION: profile contains localhost server endpoint in concurrent test: %s", p.Content)
+							}
+						}
+					} else if rr.Code == http.StatusBadRequest {
+						if !strings.Contains(rr.Body.String(), "runtime client endpoint unavailable") {
+							t.Errorf("unexpected error body: %s", rr.Body.String())
+						}
+					} else if rr.Code == http.StatusTooManyRequests {
+						// Rate limiter triggered, acceptable under heavy load
+					} else {
+						t.Errorf("unexpected status code during concurrent test: %d", rr.Code)
+					}
+					time.Sleep(1 * time.Millisecond)
+				}
+			}
+		}(worker)
+	}
+
+	wg.Wait()
+	xray.ClearRuntimeVlessEndpoint()
 }

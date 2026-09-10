@@ -192,6 +192,7 @@ Authorization: Bearer <your-configured-api-key>
 | `GET` | `/api/v1/pool/qualified` | 查询当前通过质量与信誉检测的合格备用节点池 |
 | `POST` | `/api/v1/slots/{slot_id}/switch` | 触发指定槽位的手动故障切换与排空迁移 |
 | `GET` | `/api/v1/operations/{op_id}` | 查询异步状态机任务进展与执行结果 |
+| `GET` | `/api/v1/client-config/all` | 统一获取全部客户端配置与分享信息包（Manager 官方推荐 Canonical API） |
 | `GET` | `/api/v1/client-config` | 查询客户端聚合配置（含分享链接、Clash/Sing-box/Xray 配置结构体） |
 | `GET` | `/api/v1/export/clash` | 导出 Clash Meta (Mihomo) 配置文件（YAML 格式） |
 | `GET` | `/api/v1/export/singbox` | 导出 Sing-box 客户端完整配置（JSON 格式） |
@@ -279,6 +280,33 @@ TCP 60000 → Web Manager / Management API (HTTPS / TLS)
 ```
 
 所有客户端配置（VLESS URI、Clash Meta、Sing-box、Xray JSON、Subscription）统一直接来源于实际运行中的 Xray Inbound 运行时端点（TCP/443）。当 Xray 处于停止、崩溃或未就绪状态时，端点自动注销并触发 Fail-Closed，拒绝导出理论失效配置；公网分享链接禁止回退至 localhost/127.0.0.1。
+
+### 0. 统一客户端配置包（Manager 官方主入口 Canonical API）
+
+`GET /api/v1/client-config/all` 是 Manager 获取完整客户端配置的 canonical API。Manager 不应该自行实现 Reality/VLESS 参数拼接，调用此接口即可一次性获取当前真实运行状态下所有可用客户端配置。
+
+```bash
+curl -k -H "Authorization: Bearer <API_KEY>" \
+  https://<SERVER_IP>:60000/api/v1/client-config/all
+```
+
+统一响应模型 `ClientConfigBundle`：
+- `schema_version`: 协议版本（数值 `1`）
+- `generated_at`: UTC 生成时间戳（RFC3339）
+- `node`: 节点元数据（`id`, `name`, `region`, `country`, `status`）
+- `endpoint`: 客户端连接公网入口（`address`, `port: 443`, `network: "tcp"`, `protocol: "vless"`, `tls: true`）
+- `reality`: Reality 握手参数（`server_name: "www.microsoft.com"`, `fingerprint: "chrome"`, `flow: "xtls-rprx-vision"`, `destination: "www.microsoft.com:443"`）
+- `profiles`: 聚合的多客户端配置列表（全部对应运行时 443 端点）：
+  - `vless`: 标准 `vless://` URI 链接
+  - `clash-meta`: 开箱即用的 Clash Meta (Mihomo) YAML 完整配置文件
+  - `sing-box`: 开箱即用的 Sing-box JSON 完整配置文件
+  - `xray`: 原生 Xray-core JSON 客户端配置文件
+  - `subscription`: 标准 Base64 订阅内容
+
+> **安全与一致性保证**：
+> 1. **唯一事实来源**：配置直接来源于 Xray 运行实例登记的真实运行时端点（Runtime VLESS Endpoint）。
+> 2. **Fail-Closed 保护**：当 Xray 停止、崩溃或未就绪时，接口立即返回 HTTP 400 (`runtime client endpoint unavailable`)，杜绝假端点或 localhost 泄漏。
+> 3. **防信息泄露**：绝不返回 Reality 私钥、OpenVPN 密钥、Agent API token 或其他敏感 Secret。
 
 ### 1. 通用订阅与分享链接 (v2rayN / v2rayNG / Shadowrocket / NekoBox / Karing)
 

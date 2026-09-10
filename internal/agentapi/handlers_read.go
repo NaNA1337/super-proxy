@@ -357,6 +357,7 @@ func handleClientConfig(w http.ResponseWriter, r *http.Request) {
 			"sing_box_outbound":  singboxOutbound,
 			"xray_client_config": xrayConfig,
 			"export_endpoints": map[string]string{
+				"all":     "/api/v1/client-config/all",
 				"clash":   "/api/v1/export/clash",
 				"singbox": "/api/v1/export/singbox",
 				"xray":    "/api/v1/export/xray",

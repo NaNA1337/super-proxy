@@ -191,6 +191,7 @@ func TestSupervisor_Lifecycle_Test2_CrashClearsEndpointAndExportsFailClosed(t *t
 
 	// Now verify ALL export endpoints fail-closed when crashed
 	endpoints := []string{
+		"/api/v1/client-config/all",
 		"/api/v1/export/clash",
 		"/api/v1/export/singbox",
 		"/api/v1/export/xray",
@@ -511,6 +512,7 @@ func TestSupervisor_Lifecycle_Test8_ConcurrentExportDuringRestart(t *testing.T) 
 	var countMu sync.Mutex
 
 	exportPaths := []string{
+		"/api/v1/client-config/all",
 		"/api/v1/export/clash",
 		"/api/v1/export/singbox",
 		"/api/v1/export/xray",
