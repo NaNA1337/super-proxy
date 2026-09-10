@@ -78,40 +78,65 @@ Super-Proxy 是一个运行于 Linux 系统的多出口透明代理网关管理�
 
 ---
 
-## 安装
+## 生产部署流程
 
-### 方式一：Debian / Ubuntu 预编译安装包
+### 1. 组件关系与定位
 
-从 GitHub Releases 下载最新的 `.deb` 安装包：
+- **Super-Proxy (本仓库)**：运行在 Linux 出口网关服务器的底层核心 Daemon。负责策略路由维护、OpenVPN 多隧道并发、连接平滑排空（Draining）、防泄漏阻断（Fail-Closed）、Xray 运行时监督与 VLESS Reality 入站代理（TCP 443）。同时开放 Control Plane Management API（TCP 60000）。
+- **Super-Proxy Manager (官方 WebUI 管理端)**：独立部署的可视化集中控制台项目：[https://github.com/NaNA1337/super-proxy-manager](https://github.com/NaNA1337/super-proxy-manager)。Manager 通过 HTTPS 与 API Bearer Token 连接节点的 60000 端口，实现出口槽位监控、主动故障切换、节点信誉审查以及统一获取客户端配置。
+
+### 2. 前置准备与网络规划
+
+1. **操作系统支持**：Linux (Debian 11/12, Ubuntu 20.04/22.04/24.04, CentOS/RHEL 8/9)。
+2. **系统依赖工具**：
+   ```bash
+   sudo apt-get update && sudo apt-get install -y openvpn iproute2 iptables ca-certificates curl
+   ```
+3. **Xray-core 安装**：
+   系统内置的 Xray Supervisor 负责调用 `xray` 二进制，请确保系统中已安装 `xray`（建议路径 `/usr/local/bin/xray` 或 `/usr/bin/xray`）：
+   ```bash
+   bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+   ```
+4. **端口与防火墙规则**：
+   生产环境严格实施最小端口暴露面原则：
+   - **TCP 443**：放行公网入站（专用于 VLESS + Reality + XTLS Vision 客户端入口）。
+   - **TCP 60000**：Control Plane Management API。若 Web Manager 独立部署在管控机器，建议防火墙只允许 Manager 服务器 IP 访问；若同机或本地访问，可绑定 `127.0.0.1:60000`。
+   - 其余入站端口全部 DROP。
+
+### 3. 安装 Super-Proxy
+
+#### 方式一：Debian / Ubuntu 预编译安装包（推荐）
+
+从 GitHub Releases 获取标准规范命名的 `.deb` 安装包：
 
 ```bash
-# 下载安装包
-wget https://github.com/NaNA1337/super-proxy/releases/download/v1.0.0/Linux-x64.deb
+# 下载 Release 发布的规范 deb 安装包
+wget https://github.com/NaNA1337/super-proxy/releases/download/v1.1.0/super-proxy_1.1.0_amd64.deb
 
-# 安装
-sudo dpkg -i Linux-x64.deb
+# 安装软件包
+sudo dpkg -i super-proxy_1.1.0_amd64.deb
 sudo apt-get install -f -y
 ```
 
-安装包将自动部署以下文件：
-- 可执行文件：`/usr/bin/super-proxy`、`/usr/bin/super-proxy-benchmark`
-- 配置文件目录：`/etc/super-proxy/config.yaml`（权限设为 0600）
-- Systemd 服务单元：`/lib/systemd/system/super-proxy.service`
+安装包将自动部署以下组件：
+- 核心二进制：`/usr/bin/super-proxy`、`/usr/bin/super-proxy-benchmark`
+- 配置文件：`/etc/super-proxy/config.yaml`（权限设为 0600）
+- Systemd 守护进程服务单元：`/lib/systemd/system/super-proxy.service`
 
-### 方式二：源码编译
+#### 方式二：源码编译
 
 ```bash
 git clone https://github.com/NaNA1337/super-proxy.git
 cd super-proxy
-go build -trimpath -ldflags="-s -w" -o super-proxy ./cmd/manager
-go build -trimpath -ldflags="-s -w" -o super-proxy-benchmark ./cmd/benchmark
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o super-proxy ./cmd/manager
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o super-proxy-benchmark ./cmd/benchmark
+sudo install -m 755 super-proxy /usr/bin/
+sudo install -m 755 super-proxy-benchmark /usr/bin/
 ```
 
----
+### 4. 配置文件指南 (`/etc/super-proxy/config.yaml`)
 
-## 配置文件说明
-
-配置文件默认位于 `/etc/super-proxy/config.yaml`。
+配置文件默认位于 `/etc/super-proxy/config.yaml`：
 
 ```yaml
 # 出口节点区域偏好
@@ -121,56 +146,90 @@ region:
     - KR
     - SG
 
-# 数据库存储路径（存储节点元数据与健康状态，不存储私钥）
+# 数据库存储路径（存储节点元数据与健康状态，私钥仅常驻内存）
 database:
-  path: /var/lib/super-proxy/xray_manager.db
+  path: /etc/super-proxy/xray_manager.db
 
 # 节点发现来源与刷新周期（分钟）
 discovery:
   url: "http://www.vpngate.net/api/iphone/"
   interval: 15
 
-# IP 信誉过滤引擎（防拉黑过滤）
+# IP 信誉过滤引擎（选填）
 reputation:
   enabled: false
   failure_policy: allow  # allow: 查库失败时放行; block: 查库失败时拒绝
   api_key: ""            # AbuseIPDB API 密钥（选填）
 
-# Agent API 控制面服务
+# Control Plane API 控制面服务
 api:
-  listen: "127.0.0.1:60000"
-  key: "change-this-to-a-strong-token"
+  listen: "0.0.0.0"
+  port: 60000
+  key: "your-strong-production-api-token"  # 务必修改为强随机 API Token
+
+# Xray VLESS Reality 入口服务
+xray:
+  vless:
+    enabled: true
+    port: 443
+    flow: "xtls-rprx-vision"
+    dest: "www.microsoft.com:443"
+    server_names:
+      - "www.microsoft.com"
+    fingerprint: "chrome"
+    outbound_only_443: true
 ```
 
----
+#### 环境变量覆盖（可选，优先级高于配置文件）
 
-## 服务管理
+可通过环境变量或 systemd service 文件注入参数：
+- `AGENT_API_KEY`: Control Plane Bearer Token
+- `XRAY_VLESS_ENABLED`: `true`
+- `XRAY_VLESS_ADDRESS`: 节点对外连接公网 IP 或解析域名
+- `XRAY_VLESS_UUID`: 指定客户端连接 UUID（未指定时自动生成持久化）
+- `XRAY_VLESS_PUBLIC_KEY`: Reality X25519 公钥
+- `XRAY_VLESS_PRIVATE_KEY`: Reality X25519 私钥（仅用于 Xray 运行时配置，API 绝不外泄）
+- `XRAY_VLESS_SHORT_ID`: Reality 16 进制短 ID
 
-### 使用 systemd 管理
+### 5. 守护进程管理
 
 ```bash
-# 启动服务
-systemctl start super-proxy
+# 重载服务并设置开机启动
+sudo systemctl daemon-reload
+sudo systemctl enable --now super-proxy
 
-# 查看运行状态
-systemctl status super-proxy
+# 检查服务运行状态
+sudo systemctl status super-proxy
 
-# 开机自启
-systemctl enable super-proxy
-
-# 查看日志
-journalctl -u super-proxy -f
+# 实时查看守护进程日志
+sudo journalctl -u super-proxy -f
 ```
 
-### 命令行运行
+### 6. 运行验证与诊断
 
 ```bash
-# 指定配置文件启动
-sudo super-proxy /etc/super-proxy/config.yaml
-
-# 运行网络路由诊断命令
+# 1. 运行内核策略路由与接口诊断
 sudo super-proxy diagnose routing
+
+# 2. 检查节点健康与基础状态
+curl -k -H "Authorization: Bearer <API_KEY>" https://127.0.0.1:60000/api/v1/status
+
+# 3. 检查出口槽位分配与活动隧道 IP
+curl -k -H "Authorization: Bearer <API_KEY>" https://127.0.0.1:60000/api/v1/current-exits
+
+# 4. 验证统一客户端配置包接口（确认 443 端口与各 profile 正常生成）
+curl -k -H "Authorization: Bearer <API_KEY>" https://127.0.0.1:60000/api/v1/client-config/all
 ```
+
+### 7. 对接官方 WebUI Manager
+
+官方前端管理后台：[https://github.com/NaNA1337/super-proxy-manager](https://github.com/NaNA1337/super-proxy-manager)
+
+1. 部署并启动 `super-proxy-manager` 容器或服务。
+2. 在 Manager 管理后台添加当前节点实例：
+   - **Node URL**：`https://<EGRESS_NODE_IP>:60000`
+   - **API Token**：填写 `/etc/super-proxy/config.yaml` 中配置的 `key`（或 `AGENT_API_KEY`）
+3. 接入后，WebUI Manager 可集中查看各出口槽位状态、手动触发节点故障切换与连接排空，并通过 `/api/v1/client-config/all` 一键向用户分发全部客户端配置。
 
 ---
 
