@@ -2,8 +2,11 @@ package discovery
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/NaNA1337/super-proxy/internal/models"
 )
 
 func TestParseOpenVPNConfig_ValidSingleRemote(t *testing.T) {
@@ -271,3 +274,73 @@ func TestParseOpenVPNConfig_RejectionCases(t *testing.T) {
 		})
 	}
 }
+
+func TestStripSecrets_RedactsAllSensitiveMaterial(t *testing.T) {
+	rawWithSecrets := `
+client
+dev tun
+proto udp
+remote 198.51.100.1 1194
+<key>
+-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQD...SUPER_SECRET_KEY...
+-----END PRIVATE KEY-----
+</key>
+<tls-auth>
+-----BEGIN OpenVPN Static key V1-----
+abc123secretkey456
+-----END OpenVPN Static key V1-----
+</tls-auth>
+<tls-crypt>
+secret_crypt_key
+</tls-crypt>
+`
+
+	sanitized := StripSecrets(rawWithSecrets)
+
+	if strings.Contains(sanitized, "SUPER_SECRET_KEY") {
+		t.Fatalf("CRITICAL LEAK: sanitized config still contains raw private key!")
+	}
+	if strings.Contains(sanitized, "abc123secretkey456") {
+		t.Fatalf("CRITICAL LEAK: sanitized config still contains tls-auth secret!")
+	}
+	if strings.Contains(sanitized, "secret_crypt_key") {
+		t.Fatalf("CRITICAL LEAK: sanitized config still contains tls-crypt secret!")
+	}
+	if !strings.Contains(sanitized, "[PRIVATE KEY REDACTED]") {
+		t.Errorf("expected [PRIVATE KEY REDACTED] placeholder in sanitized config")
+	}
+	if !strings.Contains(sanitized, "[TLS-AUTH REDACTED]") {
+		t.Errorf("expected [TLS-AUTH REDACTED] placeholder in sanitized config")
+	}
+}
+
+func TestNodeJSON_NeverLeaksPrivateKeyOrRawConfig(t *testing.T) {
+	node := &models.Node{
+		ID:            "198.51.100.1",
+		IP:            "198.51.100.1",
+		OpenVPN:       "SGVsbG8gV29ybGQgLSBSQVcgQ09ORklHIENPTlRBSU5JTkcgUFJJVkFURSBLRVk=", // Base64 raw
+		OpenVPNConfig: "<key>\n[PRIVATE KEY REDACTED]\n</key>",
+	}
+
+	jsonData, err := json.Marshal(node)
+	if err != nil {
+		t.Fatalf("failed to marshal node: %v", err)
+	}
+
+	jsonStr := string(jsonData)
+
+	// 1. Raw base64 config must NEVER appear in JSON (due to json:"-")
+	if strings.Contains(jsonStr, "SGVsbG8gV29ybGQ") {
+		t.Fatalf("CRITICAL LEAK: Node JSON contains raw OpenVPN Base64 config!")
+	}
+	if strings.Contains(jsonStr, "openvpn_config_base64") {
+		t.Fatalf("CRITICAL LEAK: openvpn_config_base64 field present in Node JSON!")
+	}
+
+	// 2. Private key text must not be present
+	if strings.Contains(jsonStr, "-----BEGIN PRIVATE KEY-----") {
+		t.Fatalf("CRITICAL LEAK: Node JSON contains actual private key block!")
+	}
+}
+

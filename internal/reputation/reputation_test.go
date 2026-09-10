@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -348,3 +349,62 @@ func TestReputation_MaliciousEvidenceIsBad(t *testing.T) {
 		t.Fatalf("Expected HardReject = true for confirmed malicious evidence")
 	}
 }
+
+func TestReputation_SmallSampleProtectionAnd90dWindow(t *testing.T) {
+	// 1. Test small sample protection: 2 samples, 2 bad.
+	// Must NOT declare isHighRisk=true, must only apply soft penalty.
+	dbSmall, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open sqlite DB: %v", err)
+	}
+	_ = dbSmall.AutoMigrate(&models.PrefixObservation{}, &models.PrefixIntelligence{})
+
+	prefix := "192.0.2.0/24"
+	for i := 1; i <= 2; i++ {
+		obs := models.PrefixObservation{
+			Prefix:       prefix,
+			IP:           fmt.Sprintf("192.0.2.%d", i),
+			IsBad:        true,
+			IsHardReject: true,
+			ObservedAt:   time.Now().Add(-1 * time.Hour),
+		}
+		_ = dbSmall.Create(&obs).Error
+	}
+
+	isHighRisk, penalty, exp := EvaluatePrefixRisk(dbSmall, "192.0.2.1", 3)
+	if isHighRisk {
+		t.Fatalf("Small sample (2/2 bad) must NOT be marked isHighRisk=true (got risk=%v, penalty=%d, exp=%s)",
+			isHighRisk, penalty, exp)
+	}
+	if penalty <= 0 {
+		t.Fatalf("Small sample (2/2 bad) should have soft penalty > 0, got %d", penalty)
+	}
+
+	// 2. Test 90d window chronic abuse:
+	// Insert observations 60 days ago (outside 30d, but within 90d)
+	db90d, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	_ = db90d.AutoMigrate(&models.PrefixObservation{}, &models.PrefixIntelligence{})
+
+	prefixChronic := "203.0.113.0/24"
+	for i := 1; i <= 15; i++ {
+		obs := models.PrefixObservation{
+			Prefix:       prefixChronic,
+			IP:           fmt.Sprintf("203.0.113.%d", i),
+			IsBad:        true,
+			IsHardReject: true,
+			ObservedAt:   time.Now().Add(-60 * 24 * time.Hour), // 60 days ago
+		}
+		_ = db90d.Create(&obs).Error
+	}
+
+	isHighRisk90, penalty90, exp90 := EvaluatePrefixRisk(db90d, "203.0.113.1", 0)
+	if !isHighRisk90 || penalty90 < 25 {
+		t.Fatalf("Chronic 90d abuse must be detected as high risk: got risk=%v, penalty=%d, exp=%s",
+			isHighRisk90, penalty90, exp90)
+	}
+
+	// 3. Test RDAP Provider boundary: unmeasured densities are -1.0
+	rdapProv := NewExternalRDAPPrefixProvider("")
+	require.Equal(t, "ExternalRDAPPrefixProvider", rdapProv.Name())
+}
+

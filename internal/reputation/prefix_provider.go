@@ -238,11 +238,17 @@ func (e *ExternalRDAPPrefixProvider) LookupPrefix(ctx context.Context, prefix st
 	}
 
 	intel := &PrefixIntel{
-		Prefix:       prefix,
-		Organization: rdapResp.Name,
-		LastObserved: time.Now(),
-		ProviderName: e.Name(),
-		IsExternal:   true,
+		Prefix:           prefix,
+		Organization:     rdapResp.Name,
+		AbuseDensity:     -1.0, // Unmeasured by RDAP: unknown != 0
+		MaliciousDensity: -1.0, // Unmeasured by RDAP: unknown != 0
+		HostingDensity:   -1.0, // Unmeasured by RDAP: unknown != 0
+		VPNDensity:       -1.0, // Unmeasured by RDAP: unknown != 0
+		ProxyDensity:     -1.0, // Unmeasured by RDAP: unknown != 0
+		TorDensity:       -1.0, // Unmeasured by RDAP: unknown != 0
+		LastObserved:     time.Now(),
+		ProviderName:     e.Name(),
+		IsExternal:       true,
 	}
 
 	// Cache result for 4 hours

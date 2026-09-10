@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/database"
+	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/shirou/gopsutil/v3/cpu"
@@ -157,9 +158,10 @@ func handlePoolQualified(w http.ResponseWriter, r *http.Request) {
 	// Only return nodes that have been vetted (DISCOVERED/STANDBY)
 	database.DB.Where("status IN ?", []string{"DISCOVERED", "STANDBY"}).Find(&nodes)
 	
-	// Strip out the massive OpenVPN base64 config for list endpoints to save bandwidth
+	// Strip out raw credentials and sanitize config for list endpoints
 	for i := range nodes {
 		nodes[i].OpenVPN = ""
+		nodes[i].OpenVPNConfig = discovery.StripSecrets(nodes[i].OpenVPNConfig)
 	}
 	sendJSON(w, nodes)
 }
@@ -178,6 +180,10 @@ func handleNodeDetails(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Node not found", http.StatusNotFound)
 		return
 	}
+
+	// Guarantee that raw credentials and private keys never leave via API
+	node.OpenVPN = ""
+	node.OpenVPNConfig = discovery.StripSecrets(node.OpenVPNConfig)
 
 	sendJSON(w, node)
 }

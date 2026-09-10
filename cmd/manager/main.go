@@ -19,6 +19,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/routing"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/NaNA1337/super-proxy/internal/xray"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -134,11 +135,17 @@ func main() {
 	if err != nil {
 		log.Printf("Warning: Failed initial VPN Gate fetch (will retry later): %v", err)
 	} else {
-		database.DB.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "id"}},
-			DoUpdates: clause.AssignmentColumns(models.NodeUpsertColumns),
-		}).Create(&nodes)
-		log.Printf("Bootstrapped %d nodes into database.", len(nodes))
+		err := database.DB.Transaction(func(tx *gorm.DB) error {
+			return tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "id"}},
+				DoUpdates: clause.AssignmentColumns(models.NodeUpsertColumns),
+			}).Create(&nodes).Error
+		})
+		if err != nil {
+			log.Printf("Warning: Initial node bootstrap transaction failed: %v", err)
+		} else {
+			log.Printf("Bootstrapped %d nodes into database.", len(nodes))
+		}
 	}
 
 	// 6. Initialize Xray Supervisor (Config generation, validation, execution, and health monitoring)
@@ -253,11 +260,17 @@ func runPeriodicDiscovery(ctx context.Context, url string, interval time.Duratio
 				continue
 			}
 
-			database.DB.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "id"}},
-				DoUpdates: clause.AssignmentColumns(upsertCols),
-			}).Create(&nodes)
-			log.Printf("[Discovery] Refreshed %d nodes with updated scores and configs.", len(nodes))
+			txErr := database.DB.Transaction(func(tx *gorm.DB) error {
+				return tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "id"}},
+					DoUpdates: clause.AssignmentColumns(upsertCols),
+				}).Create(&nodes).Error
+			})
+			if txErr != nil {
+				log.Printf("[Discovery] Periodic refresh transaction failed: %v", txErr)
+			} else {
+				log.Printf("[Discovery] Refreshed %d nodes with updated scores and configs.", len(nodes))
+			}
 		}
 	}
 }

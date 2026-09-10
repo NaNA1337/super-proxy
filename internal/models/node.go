@@ -76,7 +76,8 @@ type Node struct {
 	Uptime    int64  `gorm:"column:uptime" json:"uptime"` // in milliseconds
 	Users     int    `gorm:"column:users" json:"users"`
 	Message   string `gorm:"column:message" json:"message"`
-	OpenVPN   string `gorm:"column:openvpn_config_base64" json:"openvpn_config_base64"`
+	OpenVPN   string `gorm:"column:openvpn_config_base64" json:"-"` // Never exposed in JSON API responses
+	SecretRef string `gorm:"column:secret_ref" json:"secret_ref,omitempty"`
 
 	// VPN Gate Discovery metadata
 	TotalTraffic int64  `gorm:"column:total_traffic" json:"total_traffic"`
@@ -87,8 +88,8 @@ type Node struct {
 	EndpointHost  string `gorm:"index;column:endpoint_host" json:"endpoint_host"`
 	EndpointPort  int    `gorm:"index;column:endpoint_port" json:"endpoint_port"`
 	EndpointProto string `gorm:"column:endpoint_proto" json:"endpoint_proto"`
-	OpenVPNConfig string `gorm:"column:openvpn_config" json:"openvpn_config"` // Canonical safe local .ovpn config
-	EndpointsJSON string `gorm:"column:endpoints_json" json:"endpoints_json"` // JSON-encoded []OpenVPNEndpoint
+	OpenVPNConfig string `gorm:"column:openvpn_config" json:"openvpn_config,omitempty"` // Canonical safe local .ovpn config (credentials stripped)
+	EndpointsJSON string `gorm:"column:endpoints_json" json:"endpoints_json"`           // JSON-encoded []OpenVPNEndpoint
 
 	Status    string    `gorm:"index;column:status" json:"status"` // NEW, DISCOVERED, ACTIVE, FAILED, COOLDOWN, DEAD
 	LastSeen  time.Time `gorm:"column:last_seen" json:"last_seen"`

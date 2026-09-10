@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -455,6 +456,77 @@ func GenerateSafeOpenVPNConfig(cfg *SafeOpenVPNConfig) string {
 	}
 
 	return b.String()
+}
+
+// GenerateSanitizedOpenVPNConfig produces a clean template config with all private keys redacted.
+func GenerateSanitizedOpenVPNConfig(cfg *SafeOpenVPNConfig) string {
+	var b strings.Builder
+	b.WriteString("# Super-Proxy Sanitized OpenVPN Configuration Template\n")
+	b.WriteString("client\n")
+	if cfg.Dev != "" {
+		fmt.Fprintf(&b, "dev %s\n", cfg.Dev)
+	} else {
+		b.WriteString("dev tun\n")
+	}
+	b.WriteString("dev-type tun\n")
+
+	proto := cfg.Protocol
+	if proto == "" {
+		proto = "udp"
+	}
+	fmt.Fprintf(&b, "proto %s\n", proto)
+
+	for _, ep := range cfg.Endpoints {
+		fmt.Fprintf(&b, "remote %s %d\n", ep.Host, ep.Port)
+	}
+
+	b.WriteString("nobind\n")
+	b.WriteString("route-nopull\n")
+
+	if cfg.Cipher != "" {
+		fmt.Fprintf(&b, "cipher %s\n", cfg.Cipher)
+	}
+	if cfg.DataCiphers != "" {
+		fmt.Fprintf(&b, "data-ciphers %s\n", cfg.DataCiphers)
+	}
+	if cfg.Auth != "" {
+		fmt.Fprintf(&b, "auth %s\n", cfg.Auth)
+	}
+	if cfg.RemoteCertTLS != "" {
+		fmt.Fprintf(&b, "remote-cert-tls %s\n", cfg.RemoteCertTLS)
+	}
+	if cfg.VerifyX509Name != "" {
+		fmt.Fprintf(&b, "verify-x509-name %s\n", cfg.VerifyX509Name)
+	}
+	if cfg.TLSVersionMin != "" {
+		fmt.Fprintf(&b, "tls-version-min %s\n", cfg.TLSVersionMin)
+	}
+
+	if cfg.InlineCA != "" {
+		b.WriteString("<ca>\n[CA CERTIFICATE REDACTED]\n</ca>\n")
+	}
+	if cfg.InlineCert != "" {
+		b.WriteString("<cert>\n[CLIENT CERTIFICATE REDACTED]\n</cert>\n")
+	}
+	if cfg.InlineKey != "" {
+		b.WriteString("<key>\n[PRIVATE KEY REDACTED]\n</key>\n")
+	}
+
+	return b.String()
+}
+
+// StripSecrets removes private keys and sensitive credentials from any OpenVPN config text.
+func StripSecrets(cfgStr string) string {
+	reKey := regexp.MustCompile(`(?s)<key>.*?</key>`)
+	cfgStr = reKey.ReplaceAllString(cfgStr, "<key>\n[PRIVATE KEY REDACTED]\n</key>")
+
+	reTLSAuth := regexp.MustCompile(`(?s)<tls-auth>.*?</tls-auth>`)
+	cfgStr = reTLSAuth.ReplaceAllString(cfgStr, "<tls-auth>\n[TLS-AUTH REDACTED]\n</tls-auth>")
+
+	reTLSCrypt := regexp.MustCompile(`(?s)<tls-crypt>.*?</tls-crypt>`)
+	cfgStr = reTLSCrypt.ReplaceAllString(cfgStr, "<tls-crypt>\n[TLS-CRYPT REDACTED]\n</tls-crypt>")
+
+	return cfgStr
 }
 
 func validatePEMLine(line string) error {

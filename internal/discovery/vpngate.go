@@ -98,7 +98,7 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 			Operator:      operator,
 			Message:       record[13],
 			OpenVPN:       b64Config,
-			OpenVPNConfig: rawConfig,
+			OpenVPNConfig: StripSecrets(rawConfig),
 			EndpointsJSON: string(endpointsJSON),
 			EndpointHost:  meta.PrimaryEndpoint.Host,
 			EndpointPort:  meta.PrimaryEndpoint.Port,

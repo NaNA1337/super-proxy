@@ -29,7 +29,8 @@ const (
 // BenchmarkConfig defines endpoints and limits for node performance qualification.
 type BenchmarkConfig struct {
 	RTTTargetURL  string
-	ICMPTarget    string // Host or IP to ping for true ICMP packet loss (e.g. "1.1.1.1" or "127.0.0.1")
+	ICMPTarget    string   // Host or IP to ping for true ICMP packet loss (e.g. "1.1.1.1" or "127.0.0.1")
+	ICMPTargets   []string // Configurable ICMP targets (e.g. ["1.1.1.1", "8.8.8.8"]) for median aggregation
 	DownloadURL   string
 	UploadURL     string
 	DownloadBytes int64
@@ -42,6 +43,7 @@ func DefaultBenchmarkConfig() BenchmarkConfig {
 	return BenchmarkConfig{
 		RTTTargetURL:  "https://1.1.1.1",
 		ICMPTarget:    "1.1.1.1",
+		ICMPTargets:   []string{"1.1.1.1", "8.8.8.8"},
 		DownloadURL:   "https://speed.cloudflare.com/__down?bytes=5000000",
 		UploadURL:     "https://speed.cloudflare.com/__up",
 		DownloadBytes: 5000000,
@@ -89,6 +91,53 @@ func measureICMPPacketLoss(ctx context.Context, interfaceName, target string) (f
 		return -1.0, StatusError
 	}
 	return -1.0, StatusUnavailable
+}
+
+// measureICMPPacketLossMulti measures packet loss across multiple configurable targets,
+// using median aggregation to eliminate false positives from single target ICMP rate-limiting.
+func measureICMPPacketLossMulti(ctx context.Context, interfaceName string, targets []string) (float64, string) {
+	if len(targets) == 0 {
+		return -1.0, StatusNotMeasured
+	}
+
+	var measuredLosses []float64
+	allNotMeasured := true
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			continue
+		}
+		allNotMeasured = false
+		loss, status := measureICMPPacketLoss(ctx, interfaceName, target)
+		if status == StatusAvailable {
+			measuredLosses = append(measuredLosses, loss)
+		}
+	}
+
+	if allNotMeasured {
+		return -1.0, StatusNotMeasured
+	}
+	if len(measuredLosses) == 0 {
+		return -1.0, StatusUnavailable
+	}
+
+	// Calculate median loss across targets
+	// Bubble / insertion sort for small slice
+	for i := 0; i < len(measuredLosses); i++ {
+		for j := i + 1; j < len(measuredLosses); j++ {
+			if measuredLosses[i] > measuredLosses[j] {
+				measuredLosses[i], measuredLosses[j] = measuredLosses[j], measuredLosses[i]
+			}
+		}
+	}
+
+	mid := len(measuredLosses) / 2
+	medianLoss := measuredLosses[mid]
+	if len(measuredLosses)%2 == 0 {
+		medianLoss = (measuredLosses[mid-1] + measuredLosses[mid]) / 2.0
+	}
+
+	return medianLoss, StatusAvailable
 }
 
 // BenchmarkInterfaceWithConfig executes performance benchmarks using a custom configuration.
@@ -163,7 +212,11 @@ func BenchmarkInterfaceWithConfig(ctx context.Context, interfaceName string, cfg
 	}
 
 	// 2. Genuine ICMP Packet Loss Measurement (Never fake AVAILABLE or 0% without ICMP)
-	packetLossPct, packetLossStatus := measureICMPPacketLoss(ctx, interfaceName, cfg.ICMPTarget)
+	targets := cfg.ICMPTargets
+	if len(targets) == 0 && cfg.ICMPTarget != "" {
+		targets = []string{cfg.ICMPTarget}
+	}
+	packetLossPct, packetLossStatus := measureICMPPacketLossMulti(ctx, interfaceName, targets)
 
 	// 3. Download Throughput Test
 	var downloadBps int64

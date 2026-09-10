@@ -163,3 +163,32 @@ func TestBenchmark_AllProbesFailReturnsError(t *testing.T) {
 		t.Fatalf("expected benchmark to return error when all probes fail, got nil")
 	}
 }
+
+func TestBenchmark_ConfigurableMultiPingTargets(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer ts.Close()
+
+	cfg := BenchmarkConfig{
+		RTTTargetURL: ts.URL,
+		ICMPTargets:  []string{"127.0.0.1", "127.0.0.2"},
+		Timeout:      3 * time.Second,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	metrics, err := BenchmarkInterfaceWithConfig(ctx, "lo", cfg)
+	if err != nil {
+		t.Fatalf("unexpected benchmark failure: %v", err)
+	}
+
+	if metrics.PacketLossStatus != StatusAvailable {
+		t.Errorf("expected PacketLossStatus AVAILABLE with multi-targets, got %s", metrics.PacketLossStatus)
+	}
+	if metrics.PacketLoss < 0 {
+		t.Errorf("expected non-negative median packet loss, got %.1f", metrics.PacketLoss)
+	}
+}

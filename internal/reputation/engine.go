@@ -190,7 +190,8 @@ func (e *Engine) EvaluateIP(ctx context.Context, ip string) (*Result, error) {
 			finalResult.ScorePenalty += lenientPenalty
 			finalResult.ProviderReason += fmt.Sprintf(" [Policy: lenient UNKNOWN applied penalty -%d]", lenientPenalty)
 		}
-		log.Printf("[Reputation] IP %s reputation check UNKNOWN: %s", ip, finalResult.ProviderReason)
+		log.Printf("[Reputation] IP %s audit: all %d providers failed -> evidence UNKNOWN -> scoring impact (penalty=-%d, policy=%s) -> final decision (Status=%s, HardReject=%v, Reason=%s)",
+			ip, len(providers), finalResult.ScorePenalty, policy, finalResult.Status, finalResult.HardReject, finalResult.ProviderReason)
 		return finalResult, nil
 	}
 
@@ -203,6 +204,11 @@ func (e *Engine) EvaluateIP(ctx context.Context, ip string) (*Result, error) {
 			finalResult.ScorePenalty += lenientPenalty
 			finalResult.ProviderReason += fmt.Sprintf(" [Policy: lenient UNKNOWN applied penalty -%d]", lenientPenalty)
 		}
+		log.Printf("[Reputation] IP %s audit: %d/%d providers failed/unknown -> evidence UNKNOWN -> scoring impact (penalty=-%d, policy=%s) -> final decision (Status=%s, HardReject=%v, Reason=%s)",
+			ip, unknownCount, len(providers), finalResult.ScorePenalty, policy, finalResult.Status, finalResult.HardReject, finalResult.ProviderReason)
+	} else {
+		log.Printf("[Reputation] IP %s evaluation complete: Status=%s, Penalty=-%d, HardReject=%v, Reason=%s",
+			ip, finalResult.Status, finalResult.ScorePenalty, finalResult.HardReject, finalResult.ProviderReason)
 	}
 
 	// Persist consolidated NetworkIntelligence and ASNObservation to DB

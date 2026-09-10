@@ -49,9 +49,11 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp config file: %w", err)
 	}
+	_ = os.Chmod(tmpFile.Name(), 0600)
 	defer tmpFile.Close()
 
 	if _, err := tmpFile.WriteString(safeConfigStr); err != nil {
+		secureDeleteTempConfig(tmpFile.Name())
 		return nil, err
 	}
 
@@ -62,7 +64,7 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 	// 3. Prevent routing recursion (P0-5) — MUST succeed before starting OpenVPN
 	if err := routing.AddEndpointBypassRule(node.IP); err != nil {
 		cancel()
-		os.Remove(tmpFile.Name())
+		secureDeleteTempConfig(tmpFile.Name())
 		return nil, fmt.Errorf("FATAL: failed to add endpoint bypass rule for %s, refusing to start tunnel to prevent routing recursion: %w", node.IP, err)
 	}
 
@@ -93,7 +95,7 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 	if err := cmd.Start(); err != nil {
 		cancel()
 		routing.RemoveEndpointBypassRule(node.IP)
-		os.Remove(tmpFile.Name())
+		secureDeleteTempConfig(tmpFile.Name())
 		return nil, fmt.Errorf("failed to start openvpn: %w", err)
 	}
 
@@ -171,11 +173,23 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel
 	return tunnel, nil
 }
 
+// secureDeleteTempConfig wipes sensitive certificate/key data before unlinking the file.
+func secureDeleteTempConfig(path string) {
+	if path == "" {
+		return
+	}
+	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+		zeroBytes := make([]byte, fi.Size())
+		_ = os.WriteFile(path, zeroBytes, 0600)
+	}
+	_ = os.Remove(path)
+}
+
 // cleanup removes temporary files and endpoint bypass rules. Safe to call multiple times.
 func (t *Tunnel) cleanup() {
 	t.cleanupOnce.Do(func() {
 		if t.tmpConfigPath != "" {
-			_ = os.Remove(t.tmpConfigPath)
+			secureDeleteTempConfig(t.tmpConfigPath)
 		}
 		if t.Node != nil && t.Node.IP != "" {
 			if err := routing.RemoveEndpointBypassRule(t.Node.IP); err != nil {

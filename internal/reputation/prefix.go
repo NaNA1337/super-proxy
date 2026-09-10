@@ -276,12 +276,13 @@ func EvaluatePrefixRisk(db *gorm.DB, ipStr string, badLimit int) (isHighRisk boo
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Query multiple observation windows
+	// Query multiple observation windows: 24h, 7d, 30d, 90d
 	w24h, _ := QueryPrefixWindow(ctx, db, prefix, Window24h)
 	w7d, _ := QueryPrefixWindow(ctx, db, prefix, Window7d)
 	w30d, _ := QueryPrefixWindow(ctx, db, prefix, Window30d)
+	w90d, _ := QueryPrefixWindow(ctx, db, prefix, Window90d)
 
-	// Primary window for evaluation is 7d, enriched with 24h short-term spikes and 30d baseline
+	// Primary window for evaluation is 7d, enriched with 24h short-term spikes and 30d/90d baseline
 	primary := w7d
 	if primary == nil || primary.SampleCount == 0 {
 		primary = w24h
@@ -289,44 +290,55 @@ func EvaluatePrefixRisk(db *gorm.DB, ipStr string, badLimit int) (isHighRisk boo
 	if primary == nil || primary.SampleCount == 0 {
 		primary = w30d
 	}
-
 	if primary == nil || primary.SampleCount == 0 {
-		return false, 0, fmt.Sprintf("Prefix %s: no prior observations", prefix)
+		primary = w90d
 	}
 
-	// 1. Low sample density (< 4): do not condemn whole /24.
-	// Even if 3 bad out of 3 samples, sample density is too low for hard subnet block.
-	if primary.SampleCount < 4 {
-		if primary.BadRatio >= 0.75 {
-			return false, 5, fmt.Sprintf("Prefix %s: %d/%d bad samples (sparse sample density, soft penalty: -5)",
+	if primary == nil || primary.SampleCount == 0 {
+		return false, 0, fmt.Sprintf("Prefix %s: no prior observations across 24h/7d/30d/90d", prefix)
+	}
+
+	// 1. Small sample protection (< 5 samples):
+	// Do NOT condemn an entire /24 subnet based on sparse observations (e.g. 2/2 or 3/3 bad).
+	// A small sample lacks statistical significance; apply a soft penalty without hard subnet rejection.
+	if primary.SampleCount < 5 {
+		if primary.BadRatio >= 0.50 {
+			return false, 5, fmt.Sprintf("Prefix %s: %d/%d bad samples (sparse sample density < 5, soft penalty: -5)",
 				prefix, primary.BadCount, primary.SampleCount)
 		}
 		return false, 0, fmt.Sprintf("Prefix %s: %d/%d bad samples (sparse / low density, allowed)",
 			prefix, primary.BadCount, primary.SampleCount)
 	}
 
-	// 2. High sample count with low bad ratio (e.g. 3 bad out of 1000 samples = 0.3%):
+	// 2. High sample count with low bad ratio (e.g. 3 bad out of 1000 samples = 0.3%, or 200 out of 20000 = 1.0%):
 	// Must be cleanly ALLOWED without penalty!
 	if primary.BadRatio < 0.10 && primary.HardRejectRatio < 0.05 {
 		return false, 0, fmt.Sprintf("Prefix %s: LOW risk (bad_ratio=%.2f%%, hard_reject_ratio=%.2f%%, %d/%d samples, ASN=%d, ISP=%d)",
 			prefix, primary.BadRatio*100.0, primary.HardRejectRatio*100.0, primary.BadCount, primary.SampleCount, primary.ASNDiversity, primary.ISPDiversity)
 	}
 
-	// 3. Check for immediate 24h outbreak / spike compared to 30d baseline
-	if w24h != nil && w24h.SampleCount >= 4 && w24h.HardRejectRatio >= 0.50 {
+	// 3. Check for immediate 24h outbreak / spike compared to 30d/90d baseline
+	if w24h != nil && w24h.SampleCount >= 5 && w24h.HardRejectRatio >= 0.50 {
 		penalty = 35
 		return true, penalty, fmt.Sprintf("Prefix %s: CRITICAL 24h spike (24h hard_reject_ratio=%.1f%% over %d samples)",
 			prefix, w24h.HardRejectRatio*100.0, w24h.SampleCount)
 	}
 
-	// 4. High risk in primary window: high hard reject ratio or dense bad ratio with multiple distinct IPs
+	// 4. Check for 90d persistent chronic abuse across prefix
+	if w90d != nil && w90d.SampleCount >= 10 && w90d.HardRejectRatio >= 0.40 {
+		penalty = 25
+		return true, penalty, fmt.Sprintf("Prefix %s: CHRONIC 90d abuse (90d hard_reject_ratio=%.1f%% over %d samples)",
+			prefix, w90d.HardRejectRatio*100.0, w90d.SampleCount)
+	}
+
+	// 5. High risk in primary window (7d/30d): high hard reject ratio or dense bad ratio with multiple distinct IPs
 	if primary.HardRejectRatio >= 0.30 || (primary.BadRatio >= 0.50 && primary.DistinctIPs >= 3) {
 		penalty = 30
 		return true, penalty, fmt.Sprintf("Prefix %s: HIGH risk (bad_ratio=%.1f%%, hard_reject_ratio=%.1f%%, distinct_ips=%d, samples=%d)",
 			prefix, primary.BadRatio*100.0, primary.HardRejectRatio*100.0, primary.DistinctIPs, primary.SampleCount)
 	}
 
-	// 5. Moderate risk: elevated bad ratio or high unknown ratio
+	// 6. Moderate risk: elevated bad ratio or high unknown ratio
 	if primary.BadRatio >= 0.25 {
 		penalty = 15
 		return false, penalty, fmt.Sprintf("Prefix %s: MODERATE risk (bad_ratio=%.1f%%, samples=%d, penalty: -15)",

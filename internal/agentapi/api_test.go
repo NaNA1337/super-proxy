@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/NaNA1337/super-proxy/internal/config"
+	"github.com/NaNA1337/super-proxy/internal/database"
+	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 )
@@ -39,6 +41,8 @@ func setupTestServer() http.Handler {
 
 	mux.Handle("/api/v1/status", secureChain(http.HandlerFunc(handleStatus)))
 	mux.Handle("/api/v1/slots/", secureChain(http.HandlerFunc(handleSlotAction)))
+	mux.Handle("/api/v1/nodes/", secureChain(http.HandlerFunc(handleNodeDetails)))
+	mux.Handle("/api/v1/pool/qualified", secureChain(http.HandlerFunc(handlePoolQualified)))
 	mux.Handle("/api/v1/panic", secureChain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("simulated critical crash")
 	})))
@@ -141,4 +145,51 @@ func TestAPI_PanicRecovery(t *testing.T) {
 		t.Errorf("Expected error message in response body, got: %s", rr.Body.String())
 	}
 }
+
+func TestAPI_SecretRedaction(t *testing.T) {
+	// Initialize in-memory test database
+	if err := database.InitDatabase(":memory:"); err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+
+	secretKey := "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQD...LEAK_TEST_KEY...\n-----END PRIVATE KEY-----"
+	testNode := models.Node{
+		ID:            "198.51.100.200",
+		IP:            "198.51.100.200",
+		Status:        models.StatusQualified,
+		OpenVPN:       "cmF3X2Jhc2U2NF9zZWNyZXRfY29uZmln", // base64
+		OpenVPNConfig: "client\ndev tun\n<key>\n" + secretKey + "\n</key>\n",
+	}
+	if err := database.DB.Create(&testNode).Error; err != nil {
+		t.Fatalf("failed to create test node: %v", err)
+	}
+
+	handler := setupTestServer()
+
+	// 1. Query Node Details endpoint
+	req, _ := http.NewRequest("GET", "/api/v1/nodes/198.51.100.200", nil)
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	bodyStr := rr.Body.String()
+
+	// Verify private key is strictly absent
+	if strings.Contains(bodyStr, "LEAK_TEST_KEY") {
+		t.Fatalf("CRITICAL SECURITY VIOLATION: Private key leaked in /api/v1/nodes/ response!")
+	}
+	// Verify raw base64 is strictly absent
+	if strings.Contains(bodyStr, "cmF3X2Jhc2U2NF9zZWNyZXRfY29uZmln") {
+		t.Fatalf("CRITICAL SECURITY VIOLATION: Raw OpenVPN Base64 leaked in /api/v1/nodes/ response!")
+	}
+	// Verify redacted placeholder is used instead
+	if !strings.Contains(bodyStr, "[PRIVATE KEY REDACTED]") {
+		t.Errorf("Expected [PRIVATE KEY REDACTED] placeholder in response, got: %s", bodyStr)
+	}
+}
+
 

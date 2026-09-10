@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"net"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -59,11 +62,12 @@ type ScoringConfig struct {
 }
 
 type SpeedTestConfig struct {
-	Enabled      bool   `mapstructure:"enabled"`
-	RTTTargetURL string `mapstructure:"rtt_target_url"`
-	DownloadURL  string `mapstructure:"download_url"`
-	UploadURL    string `mapstructure:"upload_url"`
-	TimeoutSec   int    `mapstructure:"timeout_sec"`
+	Enabled      bool     `mapstructure:"enabled"`
+	RTTTargetURL string   `mapstructure:"rtt_target_url"`
+	DownloadURL  string   `mapstructure:"download_url"`
+	UploadURL    string   `mapstructure:"upload_url"`
+	TimeoutSec   int      `mapstructure:"timeout_sec"`
+	PingTargets  []string `mapstructure:"ping_targets"` // configurable ICMP ping targets
 }
 
 // LoadConfig loads the configuration from file and environment variables
@@ -91,6 +95,7 @@ func LoadConfig(path string) (*Config, error) {
 	viper.SetDefault("speed_test.download_url", "https://speed.cloudflare.com/__down?bytes=5000000")
 	viper.SetDefault("speed_test.upload_url", "https://speed.cloudflare.com/__up")
 	viper.SetDefault("speed_test.timeout_sec", 15)
+	viper.SetDefault("speed_test.ping_targets", []string{"1.1.1.1", "8.8.8.8"})
 
 	viper.SetEnvPrefix("XRAY_MANAGER")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -105,5 +110,65 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	err := viper.Unmarshal(&cfg)
-	return &cfg, err
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate config fail-fast
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("config validation failed: %w", err)
+	}
+
+	return &cfg, nil
+}
+
+// Validate performs strict startup validation on the loaded configuration.
+// It fails fast if ports, URLs, timeouts, or routing parameters are invalid.
+func (c *Config) Validate() error {
+	// 1. API validation
+	if c.API.Port <= 0 || c.API.Port > 65535 {
+		return fmt.Errorf("invalid api.port: %d (must be 1-65535)", c.API.Port)
+	}
+	if strings.TrimSpace(c.API.Listen) == "" {
+		return fmt.Errorf("api.listen cannot be empty")
+	}
+	if net.ParseIP(strings.Trim(c.API.Listen, "[]")) == nil && c.API.Listen != "localhost" {
+		return fmt.Errorf("invalid api.listen address: %q", c.API.Listen)
+	}
+
+	// 2. Database path validation
+	if strings.TrimSpace(c.Database.Path) == "" {
+		return fmt.Errorf("database.path cannot be empty")
+	}
+
+	// 3. Discovery validation
+	if c.Discovery.Interval <= 0 {
+		return fmt.Errorf("invalid discovery.interval: %d (must be > 0)", c.Discovery.Interval)
+	}
+	if strings.TrimSpace(c.Discovery.URL) != "" {
+		u, err := url.Parse(c.Discovery.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("invalid discovery.url: %q (must be valid http or https URL)", c.Discovery.URL)
+		}
+	}
+
+	// 4. Reputation failure policy validation
+	if c.Reputation.FailurePolicy != "" && c.Reputation.FailurePolicy != "conservative" && c.Reputation.FailurePolicy != "lenient" {
+		return fmt.Errorf("invalid reputation.failure_policy: %q (must be 'conservative' or 'lenient')", c.Reputation.FailurePolicy)
+	}
+
+	// 5. Benchmark / SpeedTest validation
+	if c.SpeedTest.Enabled {
+		if c.SpeedTest.TimeoutSec <= 0 {
+			return fmt.Errorf("invalid speed_test.timeout_sec: %d (must be > 0)", c.SpeedTest.TimeoutSec)
+		}
+		for _, target := range c.SpeedTest.PingTargets {
+			target = strings.TrimSpace(target)
+			if strings.ContainsAny(target, " \t\n\r;|&`$><(){}[]\"'\\") {
+				return fmt.Errorf("invalid characters in speed_test.ping_targets: %q", target)
+			}
+		}
+	}
+
+	return nil
 }
