@@ -5,6 +5,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"gorm.io/gorm"
 )
@@ -125,6 +126,11 @@ func TransitionNode(db *gorm.DB, node *models.Node, targetStatus string) error {
 			targetStatus = models.StatusDead
 			updates["status"] = models.StatusDead
 		}
+	}
+
+	// Evict cached secrets immediately when node enters DEAD or FAILED state
+	if targetStatus == models.StatusFailed || targetStatus == models.StatusDead {
+		discovery.DeleteOVPNSecret(node.ID)
 	}
 
 	if db != nil {

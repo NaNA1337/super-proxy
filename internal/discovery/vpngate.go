@@ -15,41 +15,107 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/models"
 )
 
+// secretEntry holds the cached raw Base64 OVPN credentials with timestamp and TTL.
+type secretEntry struct {
+	secret    string
+	createdAt time.Time
+	expiresAt time.Time
+}
+
+// DefaultSecretTTL defines how long cached OVPN secrets remain valid without rediscovery.
+const DefaultSecretTTL = 2 * time.Hour
+
 // ovpnSecretCache stores raw Base64 OVPN configs in-memory ONLY.
-// These secrets NEVER touch the database. Keyed by node IP.
+// These secrets NEVER touch the database. Keyed by stable Node ID.
 var (
 	ovpnSecretCacheMu sync.RWMutex
-	ovpnSecretCache   = make(map[string]string)
+	ovpnSecretCache   = make(map[string]secretEntry)
 )
 
+// SetOVPNSecret stores a node's raw Base64 OVPN secret in memory with a TTL.
+// Keyed by stable Node ID.
+func SetOVPNSecret(nodeID string, secret string, ttl ...time.Duration) {
+	if nodeID == "" || secret == "" {
+		return
+	}
+	d := DefaultSecretTTL
+	if len(ttl) > 0 && ttl[0] > 0 {
+		d = ttl[0]
+	}
+	now := time.Now()
+	ovpnSecretCacheMu.Lock()
+	defer ovpnSecretCacheMu.Unlock()
+	ovpnSecretCache[nodeID] = secretEntry{
+		secret:    secret,
+		createdAt: now,
+		expiresAt: now.Add(d),
+	}
+}
+
 // GetOVPNSecret retrieves the raw Base64 OVPN config for a node from the in-memory cache.
-// Returns ("", false) if no config is cached (e.g., after daemon restart before first discovery).
-func GetOVPNSecret(nodeIP string) (string, bool) {
+// Keyed by stable Node ID. Returns ("", false) if not found or expired.
+func GetOVPNSecret(nodeID string) (string, bool) {
 	ovpnSecretCacheMu.RLock()
-	defer ovpnSecretCacheMu.RUnlock()
-	val, ok := ovpnSecretCache[nodeIP]
-	return val, ok
+	entry, ok := ovpnSecretCache[nodeID]
+	ovpnSecretCacheMu.RUnlock()
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(entry.expiresAt) {
+		// Lazy eviction of expired entry
+		ovpnSecretCacheMu.Lock()
+		if e, exists := ovpnSecretCache[nodeID]; exists && time.Now().After(e.expiresAt) {
+			delete(ovpnSecretCache, nodeID)
+		}
+		ovpnSecretCacheMu.Unlock()
+		return "", false
+	}
+	return entry.secret, true
 }
 
 // DeleteOVPNSecret removes a node's raw OVPN config from the in-memory cache.
-func DeleteOVPNSecret(nodeIP string) {
+// Used when a node transitions to DEAD/FAILED or is deleted from database.
+func DeleteOVPNSecret(nodeID string) {
 	ovpnSecretCacheMu.Lock()
 	defer ovpnSecretCacheMu.Unlock()
-	delete(ovpnSecretCache, nodeIP)
+	delete(ovpnSecretCache, nodeID)
+}
+
+// EvictExpiredSecrets scans the cache and purges all entries whose TTL has passed.
+// Returns the number of purged entries.
+func EvictExpiredSecrets() int {
+	now := time.Now()
+	ovpnSecretCacheMu.Lock()
+	defer ovpnSecretCacheMu.Unlock()
+	evicted := 0
+	for id, entry := range ovpnSecretCache {
+		if now.After(entry.expiresAt) {
+			delete(ovpnSecretCache, id)
+			evicted++
+		}
+	}
+	return evicted
 }
 
 // ClearOVPNSecretCache wipes all cached OVPN secrets from memory.
 func ClearOVPNSecretCache() {
 	ovpnSecretCacheMu.Lock()
 	defer ovpnSecretCacheMu.Unlock()
-	ovpnSecretCache = make(map[string]string)
+	ovpnSecretCache = make(map[string]secretEntry)
 }
 
-// OVPNSecretCacheSize returns the number of cached OVPN secrets (for testing/metrics).
+// OVPNSecretCacheSize returns the number of active, non-expired cached OVPN secrets.
 func OVPNSecretCacheSize() int {
+	now := time.Now()
 	ovpnSecretCacheMu.RLock()
 	defer ovpnSecretCacheMu.RUnlock()
-	return len(ovpnSecretCache)
+	count := 0
+	for _, entry := range ovpnSecretCache {
+		if now.Before(entry.expiresAt) {
+			count++
+		}
+	}
+	return count
 }
 
 // FetchAndParseNodes downloads the VPN Gate CSV and parses it into Node models
@@ -119,13 +185,11 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 
 		endpointsJSON, _ := json.Marshal(meta.Endpoints)
 
-		// Store raw Base64 OVPN config in runtime-only in-memory cache.
-		// This secret NEVER reaches the database.
-		ovpnSecretCacheMu.Lock()
-		ovpnSecretCache[ip] = b64Config
-		ovpnSecretCacheMu.Unlock()
-
 		id := ip
+
+		// Store raw Base64 OVPN config in runtime-only in-memory cache keyed by stable Node ID.
+		// This secret NEVER reaches the database.
+		SetOVPNSecret(id, b64Config)
 
 		node := models.Node{
 			ID:            id,

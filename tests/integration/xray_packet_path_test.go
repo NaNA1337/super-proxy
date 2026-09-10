@@ -583,14 +583,31 @@ func TestLinuxPacketPathE2E_DualExitMarkersAndDNSLeak(t *testing.T) {
 	}
 
 	// -------------------------------------------------------------
-	// PHASE D: Dead Slot / Fail-Closed Verification
+	// PHASE D: Slot 0 DEAD -> Surviving Slot 1 serves traffic, all-dead fails closed
 	// -------------------------------------------------------------
-	// Deactivate Slot 1 (no active slots remain)
+	// 1. Terminate Slot 0 (simulates OpenVPN tunnel process exiting / dead)
+	_ = ln0.Close()
+	_ = rawConn.Close()
+
+	// 2. New connections must still succeed and route to surviving Slot 1
+	respAfterSlot0Dead, err := httpClient.Get("http://test.internal/exit")
+	if err != nil {
+		t.Fatalf("request failed while Slot 1 was active after Slot 0 dead: %v", err)
+	}
+	bodyAfterDeadBytes, _ := io.ReadAll(respAfterSlot0Dead.Body)
+	respAfterSlot0Dead.Body.Close()
+	if respAfterSlot0Dead.Header.Get("X-Test-Exit") != "slot-1" {
+		t.Fatalf("CRITICAL ROUTING FAILURE: traffic routed to dead slot or wrong exit: %s", string(bodyAfterDeadBytes))
+	}
+	t.Logf("[Phase D1 Evidence] After Slot 0 DEAD, traffic cleanly routes to surviving Slot 1 (X-Test-Exit: %q)",
+		respAfterSlot0Dead.Header.Get("X-Test-Exit"))
+
+	// 3. Deactivate Slot 1 (now all slots are dead / no active slots remain)
 	if err := xsup.DrainingSlot(1); err != nil {
 		t.Fatalf("failed to drain slot 1: %v", err)
 	}
 
-	// Attempting a new connection now must FAIL CLOSED
+	// 4. Attempting a new connection now must FAIL CLOSED
 	failClient := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -604,7 +621,7 @@ func TestLinuxPacketPathE2E_DualExitMarkersAndDNSLeak(t *testing.T) {
 	if err == nil {
 		t.Fatalf("CRITICAL SECURITY VIOLATION: traffic succeeded when no active slots exist (did not fail closed)!")
 	}
-	t.Logf("[Phase D Evidence] Dead slot request failed closed as expected: %v", err)
+	t.Logf("[Phase D2 Evidence] All slots dead -> request failed closed as expected: %v", err)
 
 	// -------------------------------------------------------------
 	// PHASE E: IPv6 and DNS Fail-Closed Anti-Leak Verification

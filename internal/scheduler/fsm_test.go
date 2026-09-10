@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
 )
 
@@ -139,3 +140,43 @@ func TestFSM_ConcurrentTransitions(t *testing.T) {
 		t.Errorf("Unexpected final status under race: %s", node.Status)
 	}
 }
+
+func TestFSM_SecretEvictedOnFailedAndDead(t *testing.T) {
+	node := &models.Node{
+		ID:     "node-secret-evict-fsm",
+		IP:     "192.168.10.99",
+		Status: models.StatusDiscovered,
+	}
+
+	// Store secret in memory
+	discovery.SetOVPNSecret(node.ID, "raw-secret-123")
+	sec, ok := discovery.GetOVPNSecret(node.ID)
+	if !ok || sec != "raw-secret-123" {
+		t.Fatalf("expected secret to be present in cache")
+	}
+
+	// Transition to Failed -> secret MUST be evicted
+	if err := TransitionNodeDirect(node, models.StatusFailed); err != nil {
+		t.Fatalf("unexpected transition error: %v", err)
+	}
+	_, okAfterFail := discovery.GetOVPNSecret(node.ID)
+	if okAfterFail {
+		t.Fatalf("SECURITY VIOLATION: secret remained in cache after node transitioned to FAILED")
+	}
+
+	// Re-add secret and test Dead transition
+	discovery.SetOVPNSecret(node.ID, "raw-secret-456")
+	node.Status = models.StatusDraining
+	node.FailCount = 2
+	if err := TransitionNodeDirect(node, models.StatusFailed); err != nil {
+		t.Fatalf("unexpected transition error: %v", err)
+	}
+	if node.Status != models.StatusDead {
+		t.Fatalf("expected status Dead, got %s", node.Status)
+	}
+	_, okAfterDead := discovery.GetOVPNSecret(node.ID)
+	if okAfterDead {
+		t.Fatalf("SECURITY VIOLATION: secret remained in cache after node transitioned to DEAD")
+	}
+}
+

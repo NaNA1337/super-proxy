@@ -38,19 +38,18 @@ type Tunnel struct {
 
 // StartTunnel decodes config, injects route-nopull, and starts the OpenVPN process.
 // rawB64Config can be optionally supplied. If not provided, it retrieves the config from
-// the runtime in-memory secret cache (discovery.GetOVPNSecret), or fallback to node.OpenVPN.
+// the runtime in-memory secret cache (discovery.GetOVPNSecret keyed by node.ID).
+// Fallback to node.OpenVPN is strictly forbidden.
 func StartTunnel(ctx context.Context, slotIndex int, node *models.Node, rawB64Config ...string) (*Tunnel, error) {
 	var rawB64 string
 	if len(rawB64Config) > 0 && rawB64Config[0] != "" {
 		rawB64 = rawB64Config[0]
-	} else if secret, ok := discovery.GetOVPNSecret(node.IP); ok && secret != "" {
+	} else if secret, ok := discovery.GetOVPNSecret(node.ID); ok && secret != "" {
 		rawB64 = secret
-	} else if node.OpenVPN != "" {
-		rawB64 = node.OpenVPN
 	}
 
 	if rawB64 == "" {
-		return nil, fmt.Errorf("no openvpn credentials available in memory for node %s (credentials are not persisted to DB; awaiting rediscovery)", node.IP)
+		return nil, fmt.Errorf("no openvpn credentials available in memory for node %s (credentials are not persisted to DB; awaiting rediscovery)", node.ID)
 	}
 
 	// 1. Validate untrusted config and generate safe canonical local config

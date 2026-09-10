@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +257,7 @@ func TestLinuxRoutingPrimitives_A_through_G(t *testing.T) {
 	}
 
 	// -------------------------------------------------------------
+	// -------------------------------------------------------------
 	// Test E: routing rule deleted -> traffic must fail closed (cannot fallback)
 	// -------------------------------------------------------------
 	// Delete slot 1 rule
@@ -269,6 +271,41 @@ func TestLinuxRoutingPrimitives_A_through_G(t *testing.T) {
 	if !strings.Contains(routeE, "unreachable") && !strings.Contains(err.Error(), "exit status") {
 		t.Fatalf("Test E FAILED: expected unreachable error, got route: %s, err: %v", routeE, err)
 	}
+
+	// Real TCP socket attempt with mark 101: must fail closed with Network unreachable
+	tcpFailClosedOut, _ := runInNetNS(ns, "python3", "-c", `
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, 36, 101) # SO_MARK = 36
+s.settimeout(0.5)
+try:
+    s.connect(("8.8.8.8", 80))
+    sys.exit(0) # leaked!
+except OSError as e:
+    print("TCP_FAIL_CLOSED:", e)
+    sys.exit(1) # failed closed as expected
+`)
+	if !strings.Contains(tcpFailClosedOut, "TCP_FAIL_CLOSED:") {
+		t.Fatalf("Test E FAILED: TCP socket did not fail closed after routing rule deletion: %s", tcpFailClosedOut)
+	}
+	t.Logf("[Test E Evidence] Real TCP socket failed closed as expected: %s", strings.TrimSpace(tcpFailClosedOut))
+
+	// Real UDP socket attempt with mark 101: must fail closed with Network unreachable
+	udpFailClosedOut, _ := runInNetNS(ns, "python3", "-c", `
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, 36, 101) # SO_MARK = 36
+try:
+    s.sendto(b"PING", ("8.8.8.8", 53))
+    sys.exit(0)
+except OSError as e:
+    print("UDP_FAIL_CLOSED:", e)
+    sys.exit(1)
+`)
+	if !strings.Contains(udpFailClosedOut, "UDP_FAIL_CLOSED:") {
+		t.Fatalf("Test E FAILED: UDP socket did not fail closed after routing rule deletion: %s", udpFailClosedOut)
+	}
+	t.Logf("[Test E Evidence] Real UDP socket failed closed as expected: %s", strings.TrimSpace(udpFailClosedOut))
 
 	// -------------------------------------------------------------
 	// Test F: IPv4 underlay bypass route
@@ -314,65 +351,100 @@ func TestLinuxRoutingPrimitives_AntiLeak(t *testing.T) {
 	}()
 
 	_, _ = runInNetNS(ns, "ip", "link", "set", "lo", "up")
+	_, _ = runInNetNS(ns, "ip", "link", "add", "dummy0", "type", "dummy")
+	_, _ = runInNetNS(ns, "ip", "link", "set", "dummy0", "up")
+	// Add default route to dummy0 representing unmanaged WAN egress
+	_, _ = runInNetNS(ns, "ip", "route", "add", "default", "dev", "dummy0")
 
-	// 1. Add strict anti-leak firewall rules (drop all external egress when tunnel is down)
-	// Add DNS leak block rule in iptables
+	// 1. Add strict anti-leak firewall rules (drop all external DNS egress)
 	_, err := runInNetNS(ns, "iptables", "-A", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "DROP")
 	if err != nil {
 		t.Fatalf("Failed to add DNS leak block rule: %v", err)
 	}
-	// Add TCP leak block rule
-	_, err = runInNetNS(ns, "iptables", "-A", "OUTPUT", "-p", "tcp", "--dport", "80", "-j", "DROP")
+	_, err = runInNetNS(ns, "iptables", "-A", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "DROP")
 	if err != nil {
-		t.Fatalf("Failed to add TCP leak block rule: %v", err)
+		t.Fatalf("Failed to add TCP DNS leak block rule: %v", err)
 	}
 
-	// 2. Policy routing fail-closed unreachable rule
-	_, _ = runInNetNS(ns, "ip", "rule", "add", "unreachable", "priority", "30000")
-	_, _ = runInNetNS(ns, "ip", "-6", "rule", "add", "unreachable", "priority", "30000")
-
-	// 3. Verify IPv4 fail-closed: traffic to 1.1.1.1 is unreachable
-	routeV4, err := runInNetNS(ns, "ip", "route", "get", "1.1.1.1")
-	if err == nil && !strings.Contains(routeV4, "unreachable") {
-		t.Fatalf("Anti-leak FAILED: IPv4 traffic escaped when tunnel is down: %s", routeV4)
+	// Helper to inspect packet count on iptables DNS DROP rule
+	getDnsDropCount := func() int64 {
+		rulesOut, err := runInNetNS(ns, "iptables", "-L", "OUTPUT", "-v", "-n", "-x")
+		if err != nil {
+			return -1
+		}
+		var total int64
+		for _, line := range strings.Split(rulesOut, "\n") {
+			if strings.Contains(line, "DROP") && strings.Contains(line, "dpt:53") {
+				fields := strings.Fields(line)
+				if len(fields) > 0 {
+					pkts, err := strconv.ParseInt(fields[0], 10, 64)
+					if err == nil {
+						total += pkts
+					}
+				}
+			}
+		}
+		return total
 	}
 
-	// 4. Verify IPv6 fail-closed: traffic to 2606:4700:4700::1111 is unreachable
-	routeV6, err := runInNetNS(ns, "ip", "-6", "route", "get", "2606:4700:4700::1111")
-	if err == nil && !strings.Contains(routeV6, "unreachable") {
-		t.Fatalf("Anti-leak FAILED: IPv6 traffic escaped when tunnel is down: %s", routeV6)
-	}
+	// 2. Query DNS DROP rule packet counter BEFORE sending DNS queries
+	dnsPktsBefore := getDnsDropCount()
 
-	// 5. Send real UDP DNS packet and verify it is intercepted & counted by anti-leak firewall
+	// 3. Send real UDP DNS packet and verify it is intercepted & counted by anti-leak firewall
 	_, _ = runInNetNS(ns, "python3", "-c", `
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 try:
     s.sendto(b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04test\x00\x00\x01\x00\x01", ("1.1.1.1", 53))
-except Exception:
+except Exception as e:
     pass
 `)
 
-	// 6. Attempt real TCP DNS connection and verify it fails closed
+	// 4. Query DNS DROP rule packet counter AFTER UDP DNS query and assert increment
+	dnsPktsAfterUDP := getDnsDropCount()
+	if dnsPktsAfterUDP <= dnsPktsBefore {
+		t.Fatalf("Anti-leak FAILED: DNS UDP packet counter did not increment: before=%d, after=%d",
+			dnsPktsBefore, dnsPktsAfterUDP)
+	}
+	t.Logf("[Anti-Leak Evidence] DNS UDP leak blocked by iptables (counter %d -> %d)",
+		dnsPktsBefore, dnsPktsAfterUDP)
+
+	// 5. Attempt real TCP DNS connection and verify it fails closed
 	_, _ = runInNetNS(ns, "python3", "-c", `
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.settimeout(0.3)
 try:
     s.connect(("1.1.1.1", 53))
-except Exception:
+except Exception as e:
     pass
 `)
 
-	// 7. Verify DNS leak prevention rule matches and blocked DNS egress (tangible packet counter evidence)
-	rulesOut, err := runInNetNS(ns, "iptables", "-L", "OUTPUT", "-v", "-n", "-x")
-	if err != nil {
-		t.Fatalf("Failed to inspect iptables rules: %v", err)
+	// 6. Verify DNS leak prevention rule matches and blocked DNS egress (tangible packet counter evidence)
+	dnsPktsFinal := getDnsDropCount()
+	if dnsPktsFinal <= dnsPktsBefore {
+		t.Fatalf("Anti-leak FAILED: DNS final counter failed to record dropped packets: before=%d, final=%d",
+			dnsPktsBefore, dnsPktsFinal)
 	}
-	if !strings.Contains(rulesOut, "dpt:53") || !strings.Contains(rulesOut, "DROP") {
-		t.Fatalf("Anti-leak FAILED: DNS leak drop rule missing from iptables: %s", rulesOut)
+	t.Logf("[Anti-Leak Evidence] Total DNS packets dropped by firewall: %d (before: %d)", dnsPktsFinal, dnsPktsBefore)
+
+	// 7. Policy routing fail-closed unreachable rule
+	// Remove default route to dummy0
+	_, _ = runInNetNS(ns, "ip", "route", "del", "default", "dev", "dummy0")
+	_, _ = runInNetNS(ns, "ip", "rule", "add", "unreachable", "priority", "30000")
+	_, _ = runInNetNS(ns, "ip", "-6", "rule", "add", "unreachable", "priority", "30000")
+
+	// 8. Verify IPv4 fail-closed: traffic to 1.1.1.1 is unreachable
+	routeV4, err := runInNetNS(ns, "ip", "route", "get", "1.1.1.1")
+	if err == nil && !strings.Contains(routeV4, "unreachable") {
+		t.Fatalf("Anti-leak FAILED: IPv4 traffic escaped when tunnel is down: %s", routeV4)
 	}
-	t.Logf("[Anti-Leak Evidence] iptables blocked packets:\n%s", rulesOut)
+
+	// 9. Verify IPv6 fail-closed: traffic to 2606:4700:4700::1111 is unreachable
+	routeV6, err := runInNetNS(ns, "ip", "-6", "route", "get", "2606:4700:4700::1111")
+	if err == nil && !strings.Contains(routeV6, "unreachable") {
+		t.Fatalf("Anti-leak FAILED: IPv6 traffic escaped when tunnel is down: %s", routeV6)
+	}
 }
 
 func TestLinuxNetwork_100NewConnectionsAvoidDrainingSlot(t *testing.T) {

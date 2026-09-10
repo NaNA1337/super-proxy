@@ -106,10 +106,20 @@ MIIDXTCCAkWgAwIBAgIJAP
 	assert.Equal(t, 1194, queriedNode.EndpointPort)
 	assert.Equal(t, "udp", queriedNode.EndpointProto)
 
-	// Verify in-memory secret cache DOES have the secret for runtime connection
-	cachedSecret, ok := discovery.GetOVPNSecret("192.168.100.55")
+	// Verify in-memory secret cache DOES have the secret for runtime connection (keyed by node.ID)
+	cachedSecret, ok := discovery.GetOVPNSecret(queriedNode.ID)
 	assert.True(t, ok, "Expected in-memory OVPN secret to be present for runtime connection")
 	assert.Equal(t, b64Config, cachedSecret, "Expected cached secret to match discovery payload")
+
+	// Verify that transitioning node to StatusFailed or StatusDead evicts the secret immediately
+	testFailNode := queriedNode
+	testFailNode.Status = models.StatusDiscovered
+	discovery.SetOVPNSecret(testFailNode.ID, b64Config)
+	_ = scheduler.TransitionNodeDirect(&testFailNode, models.StatusFailed)
+	_, failEvicted := discovery.GetOVPNSecret(testFailNode.ID)
+	assert.False(t, failEvicted, "Expected secret to be evicted from in-memory cache when node transitions to StatusFailed")
+	// Re-cache for the remaining tests
+	discovery.SetOVPNSecret(queriedNode.ID, b64Config)
 
 	// -------------------------------------------------------------
 	// Test B: Raw SQLite Query Verification

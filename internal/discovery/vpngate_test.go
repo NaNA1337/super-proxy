@@ -3,6 +3,7 @@ package discovery
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseCSV(t *testing.T) {
@@ -65,13 +66,63 @@ func TestParseCSV(t *testing.T) {
 		t.Errorf("SECURITY LEAK: Node 2 has OpenVPN populated: %q", n2.OpenVPN)
 	}
 
-	// Verify that secrets ARE cached in-memory for runtime connection
-	c1, ok1 := GetOVPNSecret("192.168.1.1")
+	// Verify that secrets ARE cached in-memory for runtime connection using node.ID
+	c1, ok1 := GetOVPNSecret(n1.ID)
 	if !ok1 || c1 != b64_1 {
-		t.Errorf("Expected in-memory secret for 192.168.1.1 to match b64_1")
+		t.Errorf("Expected in-memory secret for node ID %s to match b64_1", n1.ID)
 	}
-	c2, ok2 := GetOVPNSecret("192.168.1.2")
+	c2, ok2 := GetOVPNSecret(n2.ID)
 	if !ok2 || c2 != b64_2 {
-		t.Errorf("Expected in-memory secret for 192.168.1.2 to match b64_2")
+		t.Errorf("Expected in-memory secret for node ID %s to match b64_2", n2.ID)
 	}
 }
+
+func TestSecretCache_TTLAndExplicitEviction(t *testing.T) {
+	ClearOVPNSecretCache()
+	defer ClearOVPNSecretCache()
+
+	nodeID := "node-test-ttl-1"
+	secret := "b64secret123"
+
+	// 1. Store with short TTL (50ms)
+	SetOVPNSecret(nodeID, secret, 50*time.Millisecond)
+
+	val, ok := GetOVPNSecret(nodeID)
+	if !ok || val != secret {
+		t.Fatalf("Expected secret to be present before expiration, got val=%q, ok=%v", val, ok)
+	}
+	if size := OVPNSecretCacheSize(); size != 1 {
+		t.Fatalf("Expected cache size 1, got %d", size)
+	}
+
+	// 2. Wait for expiration
+	time.Sleep(60 * time.Millisecond)
+
+	// 3. Lazy eviction via GetOVPNSecret
+	valExpired, okExpired := GetOVPNSecret(nodeID)
+	if okExpired || valExpired != "" {
+		t.Fatalf("Expected secret to be evicted after TTL expiry, got val=%q, ok=%v", valExpired, okExpired)
+	}
+	if size := OVPNSecretCacheSize(); size != 0 {
+		t.Fatalf("Expected cache size 0 after lazy eviction, got %d", size)
+	}
+
+	// 4. Test explicit EvictExpiredSecrets
+	nodeID2 := "node-test-ttl-2"
+	SetOVPNSecret(nodeID2, secret, 20*time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
+	evictedCount := EvictExpiredSecrets()
+	if evictedCount != 1 {
+		t.Fatalf("Expected 1 evicted secret, got %d", evictedCount)
+	}
+
+	// 5. Test explicit DeleteOVPNSecret
+	nodeID3 := "node-test-explicit"
+	SetOVPNSecret(nodeID3, secret, 1*time.Hour)
+	DeleteOVPNSecret(nodeID3)
+	valDeleted, okDeleted := GetOVPNSecret(nodeID3)
+	if okDeleted || valDeleted != "" {
+		t.Fatalf("Expected secret to be deleted by DeleteOVPNSecret")
+	}
+}
+
