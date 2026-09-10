@@ -9,10 +9,48 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
 )
+
+// ovpnSecretCache stores raw Base64 OVPN configs in-memory ONLY.
+// These secrets NEVER touch the database. Keyed by node IP.
+var (
+	ovpnSecretCacheMu sync.RWMutex
+	ovpnSecretCache   = make(map[string]string)
+)
+
+// GetOVPNSecret retrieves the raw Base64 OVPN config for a node from the in-memory cache.
+// Returns ("", false) if no config is cached (e.g., after daemon restart before first discovery).
+func GetOVPNSecret(nodeIP string) (string, bool) {
+	ovpnSecretCacheMu.RLock()
+	defer ovpnSecretCacheMu.RUnlock()
+	val, ok := ovpnSecretCache[nodeIP]
+	return val, ok
+}
+
+// DeleteOVPNSecret removes a node's raw OVPN config from the in-memory cache.
+func DeleteOVPNSecret(nodeIP string) {
+	ovpnSecretCacheMu.Lock()
+	defer ovpnSecretCacheMu.Unlock()
+	delete(ovpnSecretCache, nodeIP)
+}
+
+// ClearOVPNSecretCache wipes all cached OVPN secrets from memory.
+func ClearOVPNSecretCache() {
+	ovpnSecretCacheMu.Lock()
+	defer ovpnSecretCacheMu.Unlock()
+	ovpnSecretCache = make(map[string]string)
+}
+
+// OVPNSecretCacheSize returns the number of cached OVPN secrets (for testing/metrics).
+func OVPNSecretCacheSize() int {
+	ovpnSecretCacheMu.RLock()
+	defer ovpnSecretCacheMu.RUnlock()
+	return len(ovpnSecretCache)
+}
 
 // FetchAndParseNodes downloads the VPN Gate CSV and parses it into Node models
 func FetchAndParseNodes(url string) ([]models.Node, error) {
@@ -81,6 +119,12 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 
 		endpointsJSON, _ := json.Marshal(meta.Endpoints)
 
+		// Store raw Base64 OVPN config in runtime-only in-memory cache.
+		// This secret NEVER reaches the database.
+		ovpnSecretCacheMu.Lock()
+		ovpnSecretCache[ip] = b64Config
+		ovpnSecretCacheMu.Unlock()
+
 		id := ip
 
 		node := models.Node{
@@ -97,7 +141,7 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 			LogType:       logType,
 			Operator:      operator,
 			Message:       record[13],
-			OpenVPN:       b64Config,
+			OpenVPN:       "", // SECURITY: Never persist raw OVPN to DB. Secret lives only in ovpnSecretCache.
 			OpenVPNConfig: StripSecrets(rawConfig),
 			EndpointsJSON: string(endpointsJSON),
 			EndpointHost:  meta.PrimaryEndpoint.Host,

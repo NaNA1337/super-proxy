@@ -36,10 +36,25 @@ type Tunnel struct {
 	exitErr           error
 }
 
-// StartTunnel decodes config, injects route-nopull, and starts the OpenVPN process
-func StartTunnel(ctx context.Context, slotIndex int, node *models.Node) (*Tunnel, error) {
+// StartTunnel decodes config, injects route-nopull, and starts the OpenVPN process.
+// rawB64Config can be optionally supplied. If not provided, it retrieves the config from
+// the runtime in-memory secret cache (discovery.GetOVPNSecret), or fallback to node.OpenVPN.
+func StartTunnel(ctx context.Context, slotIndex int, node *models.Node, rawB64Config ...string) (*Tunnel, error) {
+	var rawB64 string
+	if len(rawB64Config) > 0 && rawB64Config[0] != "" {
+		rawB64 = rawB64Config[0]
+	} else if secret, ok := discovery.GetOVPNSecret(node.IP); ok && secret != "" {
+		rawB64 = secret
+	} else if node.OpenVPN != "" {
+		rawB64 = node.OpenVPN
+	}
+
+	if rawB64 == "" {
+		return nil, fmt.Errorf("no openvpn credentials available in memory for node %s (credentials are not persisted to DB; awaiting rediscovery)", node.IP)
+	}
+
 	// 1. Validate untrusted config and generate safe canonical local config
-	safeConfigStr, _, err := discovery.ParseOpenVPNConfig(node.OpenVPN)
+	safeConfigStr, _, err := discovery.ParseOpenVPNConfig(rawB64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to validate untrusted openvpn config: %w", err)
 	}

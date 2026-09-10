@@ -157,3 +157,47 @@ func TestMigrateNodeIdentities_PreservesHistory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "2001:db8::1:1194", ambRecord.ID)
 }
+
+func TestMigrateStripRawOVPN(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "strip_ovpn_test.db")
+	db, err := gorm.Open(sqlite.Open(tempDB), &gorm.Config{})
+	require.NoError(t, err)
+
+	err = db.AutoMigrate(&models.Node{})
+	require.NoError(t, err)
+
+	// Direct raw SQL insert to simulate legacy DB containing raw OVPN with private key
+	rawKey := "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDTestKey\n-----END PRIVATE KEY-----"
+	err = db.Exec("INSERT INTO nodes (id, ip, country, score, openvpn_config_base64, openvpn_config) VALUES (?, ?, ?, ?, ?, ?)",
+		"192.0.2.1", "192.0.2.1", "US", 100, "b64_raw_secret_data_with_"+rawKey, "client\ndev tun").Error
+	require.NoError(t, err)
+
+	// Verify the raw secret exists before migration
+	var beforeRaw string
+	err = db.Raw("SELECT openvpn_config_base64 FROM nodes WHERE id = ?", "192.0.2.1").Scan(&beforeRaw).Error
+	require.NoError(t, err)
+	assert.Contains(t, beforeRaw, "b64_raw_secret_data")
+
+	// Run migration
+	err = MigrateStripRawOVPN(db)
+	require.NoError(t, err)
+
+	// Verify openvpn_config_base64 is now empty
+	var afterRaw string
+	err = db.Raw("SELECT openvpn_config_base64 FROM nodes WHERE id = ?", "192.0.2.1").Scan(&afterRaw).Error
+	require.NoError(t, err)
+	assert.Empty(t, afterRaw, "Expected openvpn_config_base64 column to be wiped clean")
+
+	// Verify other metadata is preserved
+	var n models.Node
+	err = db.Where("id = ?", "192.0.2.1").First(&n).Error
+	require.NoError(t, err)
+	assert.Equal(t, "192.0.2.1", n.ID)
+	assert.Equal(t, "US", n.Country)
+	assert.Equal(t, 100, n.Score)
+	assert.Equal(t, "client\ndev tun", n.OpenVPNConfig)
+
+	// Re-running migration is idempotent
+	err = MigrateStripRawOVPN(db)
+	require.NoError(t, err)
+}

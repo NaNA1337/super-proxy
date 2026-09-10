@@ -18,6 +18,7 @@ type ConfigOptions struct {
 	SocksPort   int
 	SocksUser   string
 	SocksPass   string
+	Redirects   map[int]string // Optional: per-slot destination redirects (used for integration testing exit markers)
 }
 
 // GenerateConfig generates a static Xray configuration with the specified number of slots
@@ -60,10 +61,15 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 		tag := fmt.Sprintf("exit-%d", i)
 		mark := routing.BaseTableID + i
 
+		settings := map[string]interface{}{}
+		if opts.Redirects != nil && opts.Redirects[i] != "" {
+			settings["redirect"] = opts.Redirects[i]
+		}
+
 		outbound := map[string]interface{}{
 			"tag":      tag,
 			"protocol": "freedom",
-			"settings": map[string]interface{}{},
+			"settings": settings,
 			"streamSettings": map[string]interface{}{
 				"sockopt": map[string]interface{}{
 					"mark": mark, // Binds outbound traffic to Linux policy routing table (BaseTableID + i)

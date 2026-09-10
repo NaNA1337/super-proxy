@@ -40,6 +40,11 @@ func InitDatabase(dbPath string) error {
 		log.Printf("[Database] Warning: failed to complete node identity migration: %v", err)
 	}
 
+	// Strip any legacy raw OpenVPN secrets from database
+	if err := MigrateStripRawOVPN(DB); err != nil {
+		log.Printf("[Database] Warning: failed to strip legacy raw OpenVPN secrets: %v", err)
+	}
+
 	log.Printf("Database initialized successfully at %s", dbPath)
 	return nil
 }
@@ -137,4 +142,25 @@ func MigrateNodeIdentities(db *gorm.DB) error {
 
 	log.Printf("[Database] Node identity stabilization migration complete.")
 	return nil
+}
+
+// MigrateStripRawOVPN scans for any legacy Node records where openvpn_config_base64 is populated
+// and strips the raw secrets, setting openvpn_config_base64 to an empty string.
+// This migration is idempotent, transactional, crash-safe, and preserves all node identities,
+// historical metrics, and reputations.
+func MigrateStripRawOVPN(db *gorm.DB) error {
+	if db == nil {
+		return nil
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Exec("UPDATE nodes SET openvpn_config_base64 = '' WHERE openvpn_config_base64 IS NOT NULL AND openvpn_config_base64 != ''")
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected > 0 {
+			log.Printf("[Database] Stripped raw OpenVPN secrets from %d legacy Node record(s).", res.RowsAffected)
+		}
+		return nil
+	})
 }

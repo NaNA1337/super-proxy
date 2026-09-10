@@ -538,9 +538,9 @@ func validatePEMLine(line string) error {
 	if strings.HasPrefix(trimmed, "-----BEGIN ") || strings.HasPrefix(trimmed, "-----END ") {
 		return nil
 	}
-	// Check base64 chars
+	// Check base64 / base64url chars
 	for _, r := range trimmed {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '+' && r != '/' && r != '=' {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '+' && r != '/' && r != '=' && r != '-' && r != '_' {
 			return fmt.Errorf("illegal character in certificate block: %q", r)
 		}
 	}

@@ -56,4 +56,22 @@ func TestParseCSV(t *testing.T) {
 	if n2.EndpointProto != "tcp" {
 		t.Errorf("Expected EndpointProto tcp, got %s", n2.EndpointProto)
 	}
+
+	// Verify that raw OpenVPN is NOT populated on the Node struct (DB protection)
+	if n1.OpenVPN != "" {
+		t.Errorf("SECURITY LEAK: Node 1 has OpenVPN populated: %q", n1.OpenVPN)
+	}
+	if n2.OpenVPN != "" {
+		t.Errorf("SECURITY LEAK: Node 2 has OpenVPN populated: %q", n2.OpenVPN)
+	}
+
+	// Verify that secrets ARE cached in-memory for runtime connection
+	c1, ok1 := GetOVPNSecret("192.168.1.1")
+	if !ok1 || c1 != b64_1 {
+		t.Errorf("Expected in-memory secret for 192.168.1.1 to match b64_1")
+	}
+	c2, ok2 := GetOVPNSecret("192.168.1.2")
+	if !ok2 || c2 != b64_2 {
+		t.Errorf("Expected in-memory secret for 192.168.1.2 to match b64_2")
+	}
 }

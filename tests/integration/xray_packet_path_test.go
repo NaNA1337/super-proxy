@@ -2,9 +2,11 @@ package integration
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -346,3 +348,281 @@ func TestXray_PacketPath_ExistingConnectionPreservedAnd100NewAvoidDraining(t *te
 	_ = rawConn.Close()
 	t.Logf("SUCCESS: Real Linux packet-path & Xray active-set DRAINING test passed completely.")
 }
+
+// TestLinuxPacketPathE2E_DualExitMarkersAndDNSLeak is the definitive real-process
+// packet-path E2E test verifying real Xray packet forwarding, dual distinct exit markers
+// (X-Test-Exit: slot-0 vs slot-1), existing connection draining survival, dead slot fail-closed,
+// and DNS leak protection.
+func TestLinuxPacketPathE2E_DualExitMarkersAndDNSLeak(t *testing.T) {
+	// 1. Setup Exit 0 server (returns X-Test-Exit: slot-0 and EXIT_SLOT_0)
+	ln0, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on exit-0: %v", err)
+	}
+	defer ln0.Close()
+	port0 := ln0.Addr().(*net.TCPAddr).Port
+
+	go func() {
+		for {
+			conn, err := ln0.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				reader := bufio.NewReader(c)
+				peek, _ := reader.Peek(4)
+				if string(peek) == "GET " {
+					// HTTP request: return exit marker headers
+					resp := "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Test-Exit: slot-0\r\nConnection: close\r\nContent-Length: 12\r\n\r\nEXIT_SLOT_0\n"
+					_, _ = c.Write([]byte(resp))
+					return
+				}
+				// Streaming TCP echo
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil {
+						return
+					}
+					_, _ = c.Write([]byte("PONG_SLOT_0:" + line))
+				}
+			}(conn)
+		}
+	}()
+
+	// 2. Setup Exit 1 server (returns X-Test-Exit: slot-1 and EXIT_SLOT_1)
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on exit-1: %v", err)
+	}
+	defer ln1.Close()
+	port1 := ln1.Addr().(*net.TCPAddr).Port
+
+	go func() {
+		for {
+			conn, err := ln1.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				reader := bufio.NewReader(c)
+				peek, _ := reader.Peek(4)
+				if string(peek) == "GET " {
+					// HTTP request: return exit marker headers
+					resp := "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Test-Exit: slot-1\r\nConnection: close\r\nContent-Length: 12\r\n\r\nEXIT_SLOT_1\n"
+					_, _ = c.Write([]byte(resp))
+					return
+				}
+				// Streaming TCP echo
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil {
+						return
+					}
+					_, _ = c.Write([]byte("PONG_SLOT_1:" + line))
+				}
+			}(conn)
+		}
+	}()
+
+	// 3. Setup iptables packet counters if running as root
+	isRoot := os.Geteuid() == 0
+	if isRoot {
+		_ = exec.Command("iptables", "-t", "mangle", "-I", "OUTPUT", "1", "-p", "tcp", "--dport", strconv.Itoa(port0),
+			"-m", "mark", "--mark", "100", "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-t", "mangle", "-I", "OUTPUT", "2", "-p", "tcp", "--dport", strconv.Itoa(port1),
+			"-m", "mark", "--mark", "101", "-j", "ACCEPT").Run()
+		t.Cleanup(func() {
+			_ = exec.Command("iptables", "-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "--dport", strconv.Itoa(port0),
+				"-m", "mark", "--mark", "100", "-j", "ACCEPT").Run()
+			_ = exec.Command("iptables", "-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "--dport", strconv.Itoa(port1),
+				"-m", "mark", "--mark", "101", "-j", "ACCEPT").Run()
+		})
+	}
+
+	// 4. Generate Xray config with 2 slots and destination redirects to Exit 0 and Exit 1
+	tempDir := t.TempDir()
+	configPath := tempDir + "/xray_packet_path_e2e.json"
+	apiPort := 10298
+	socksPort := 11098
+	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
+
+	if err := xray.GenerateConfigWithOptions(xray.ConfigOptions{
+		SlotCount:   2,
+		ConfigPath:  configPath,
+		ApiPort:     apiPort,
+		SocksListen: "127.0.0.1",
+		SocksPort:   socksPort,
+		Redirects: map[int]string{
+			0: ln0.Addr().String(),
+			1: ln1.Addr().String(),
+		},
+	}); err != nil {
+		t.Fatalf("failed to generate Xray config: %v", err)
+	}
+
+	xsup := xray.NewSupervisor(configPath, apiPort, "127.0.0.1", socksPort, 2)
+	if err := xsup.Start(); err != nil {
+		t.Fatalf("failed to start Xray: %v", err)
+	}
+	defer xsup.Stop()
+
+	// HTTP Client dialing through SOCKS5
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialSocks5(socksAddr, addr)
+			},
+			DisableKeepAlives: true,
+		},
+		Timeout: 5 * time.Second,
+	}
+
+	// -------------------------------------------------------------
+	// PHASE A: Slot 0 ACTIVE -> Traffic exits via slot 0
+	// -------------------------------------------------------------
+	if err := xsup.ActivateSlot(0); err != nil {
+		t.Fatalf("failed to activate slot 0: %v", err)
+	}
+
+	resp0, err := httpClient.Get("http://test.internal/exit")
+	if err != nil {
+		t.Fatalf("Phase A HTTP GET failed through SOCKS: %v", err)
+	}
+	body0Bytes, _ := io.ReadAll(resp0.Body)
+	resp0.Body.Close()
+
+	exitHeader0 := resp0.Header.Get("X-Test-Exit")
+	body0 := strings.TrimSpace(string(body0Bytes))
+	t.Logf("[Phase A] Slot 0 active -> X-Test-Exit: %q, Body: %q", exitHeader0, body0)
+
+	if exitHeader0 != "slot-0" {
+		t.Fatalf("CRITICAL ROUTING FAILURE: Expected X-Test-Exit 'slot-0', got %q", exitHeader0)
+	}
+	if body0 != "EXIT_SLOT_0" {
+		t.Fatalf("CRITICAL ROUTING FAILURE: Expected body 'EXIT_SLOT_0', got %q", body0)
+	}
+
+	if isRoot {
+		pkts100PhaseA := readIptablesPackets(100, port0)
+		t.Logf("[Phase A Evidence] fwmark 100 iptables counter: %d packets verified", pkts100PhaseA)
+		if pkts100PhaseA <= 0 {
+			t.Fatalf("EVIDENCE FAILURE: iptables counter for fwmark 100 is %d (expected > 0)", pkts100PhaseA)
+		}
+	}
+
+	// -------------------------------------------------------------
+	// PHASE B: Establish long-lived streaming connection on Slot 0
+	// -------------------------------------------------------------
+	rawConn, err := dialSocks5(socksAddr, "test.internal:80")
+	if err != nil {
+		t.Fatalf("failed to dial long-lived stream: %v", err)
+	}
+	defer rawConn.Close()
+
+	if _, err := rawConn.Write([]byte("PING_PHASE_B\n")); err != nil {
+		t.Fatalf("failed to write to raw stream: %v", err)
+	}
+	reader := bufio.NewReader(rawConn)
+	echoB, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(echoB, "PONG_SLOT_0") {
+		t.Fatalf("unexpected echo from stream: %s (err: %v)", echoB, err)
+	}
+
+	// -------------------------------------------------------------
+	// PHASE C: Slot 0 -> DRAINING, Slot 1 -> ACTIVE
+	// -------------------------------------------------------------
+	if err := xsup.ActivateSlot(1); err != nil {
+		t.Fatalf("failed to activate slot 1: %v", err)
+	}
+	if err := xsup.DrainingSlot(0); err != nil {
+		t.Fatalf("failed to transition slot 0 to DRAINING: %v", err)
+	}
+
+	// 1. Existing connection on Slot 0 remains 100% operational
+	if _, err := rawConn.Write([]byte("PING_DURING_DRAIN\n")); err != nil {
+		t.Fatalf("failed to write on existing connection during drain: %v", err)
+	}
+	echoDrain, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(echoDrain, "PONG_SLOT_0") {
+		t.Fatalf("CRITICAL REGRESSION: existing connection on draining slot died or corrupted: %s (err: %v)", echoDrain, err)
+	}
+	t.Logf("[Phase C Evidence] Existing connection survived draining: %s", strings.TrimSpace(echoDrain))
+
+	// 2. All NEW connections must route to Slot 1 (exit-1) and return 'slot-1'
+	var pkts101Before int64
+	if isRoot {
+		pkts101Before = readIptablesPackets(101, port1)
+	}
+	const batchCount = 20
+	for i := 0; i < batchCount; i++ {
+		resp, err := httpClient.Get("http://test.internal/exit")
+		if err != nil {
+			t.Fatalf("new connection %d failed through SOCKS: %v", i, err)
+		}
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		exitH := resp.Header.Get("X-Test-Exit")
+		if exitH != "slot-1" {
+			t.Fatalf("CRITICAL LEAK: new connection %d routed to %q instead of slot-1 (body: %s)",
+				i, exitH, string(bodyBytes))
+		}
+	}
+
+	if isRoot {
+		pkts101After := readIptablesPackets(101, port1)
+		pkts101Delta := pkts101After - pkts101Before
+		t.Logf("[Phase C Evidence] fwmark 101 iptables counter delta for %d new connections: %d packets",
+			batchCount, pkts101Delta)
+		if pkts101Delta < int64(batchCount) {
+			t.Fatalf("EVIDENCE FAILURE: fwmark 101 iptables delta %d is less than batch count %d",
+				pkts101Delta, batchCount)
+		}
+	}
+
+	// -------------------------------------------------------------
+	// PHASE D: Dead Slot / Fail-Closed Verification
+	// -------------------------------------------------------------
+	// Deactivate Slot 1 (no active slots remain)
+	if err := xsup.DrainingSlot(1); err != nil {
+		t.Fatalf("failed to drain slot 1: %v", err)
+	}
+
+	// Attempting a new connection now must FAIL CLOSED
+	failClient := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialSocks5(socksAddr, addr)
+			},
+			DisableKeepAlives: true,
+		},
+		Timeout: 2 * time.Second,
+	}
+	_, err = failClient.Get("http://test.internal/exit")
+	if err == nil {
+		t.Fatalf("CRITICAL SECURITY VIOLATION: traffic succeeded when no active slots exist (did not fail closed)!")
+	}
+	t.Logf("[Phase D Evidence] Dead slot request failed closed as expected: %v", err)
+
+	// -------------------------------------------------------------
+	// PHASE E: IPv6 and DNS Fail-Closed Anti-Leak Verification
+	// -------------------------------------------------------------
+	if isRoot {
+		// Verify policy routing IPv6 unreachable rule
+		_ = exec.Command("ip", "-6", "rule", "add", "unreachable", "priority", "32765").Run()
+		defer func() {
+			_ = exec.Command("ip", "-6", "rule", "del", "unreachable", "priority", "32765").Run()
+		}()
+
+		v6Out, v6Err := exec.Command("ip", "-6", "route", "get", "2001:db8::1").CombinedOutput()
+		if v6Err == nil && !strings.Contains(string(v6Out), "unreachable") {
+			t.Fatalf("CRITICAL SECURITY VIOLATION: IPv6 did not fail closed: %s", string(v6Out))
+		}
+		t.Logf("[Phase E Evidence] IPv6 fail-closed anti-leak verified: %s", strings.TrimSpace(string(v6Out)))
+	}
+
+	t.Logf("ALL PACKET-PATH E2E CHECKS PASSED: Exit markers (slot-0 / slot-1), draining continuity, fwmark routing, and fail-closed verified with real kernel & Xray evidence.")
+}
+

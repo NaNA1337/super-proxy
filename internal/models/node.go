@@ -43,6 +43,7 @@ type OpenVPNConfigMeta struct {
 }
 
 // NodeUpsertColumns defines the single source of truth for fields refreshed during discovery.
+// Note: openvpn_config_base64 is intentionally excluded as raw secrets are never persisted.
 var NodeUpsertColumns = []string{
 	"score",
 	"country",
@@ -52,7 +53,6 @@ var NodeUpsertColumns = []string{
 	"uptime",
 	"users",
 	"message",
-	"openvpn_config_base64",
 	"openvpn_config",
 	"endpoints_json",
 	"endpoint_host",
@@ -76,7 +76,9 @@ type Node struct {
 	Uptime    int64  `gorm:"column:uptime" json:"uptime"` // in milliseconds
 	Users     int    `gorm:"column:users" json:"users"`
 	Message   string `gorm:"column:message" json:"message"`
-	OpenVPN   string `gorm:"column:openvpn_config_base64" json:"-"` // Never exposed in JSON API responses
+	// OpenVPN holds raw base64 credentials in-memory ONLY during discovery.
+	// It is NEVER persisted to DB (column is kept empty) and NEVER exposed in JSON.
+	OpenVPN   string `gorm:"column:openvpn_config_base64" json:"-"`
 	SecretRef string `gorm:"column:secret_ref" json:"secret_ref,omitempty"`
 
 	// VPN Gate Discovery metadata
