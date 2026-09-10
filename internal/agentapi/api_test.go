@@ -2,6 +2,7 @@ package agentapi
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -47,6 +48,10 @@ func setupTestServer() http.Handler {
         mux.Handle("/api/v1/nodes", secureChain(http.HandlerFunc(handleNodesList)))
         mux.Handle("/api/v1/routing", secureChain(http.HandlerFunc(handleRoutingOverview)))
         mux.Handle("/api/v1/client-config", secureChain(http.HandlerFunc(handleClientConfig)))
+	mux.Handle("/api/v1/export/clash", secureChain(http.HandlerFunc(handleExportClash)))
+	mux.Handle("/api/v1/export/singbox", secureChain(http.HandlerFunc(handleExportSingbox)))
+	mux.Handle("/api/v1/export/xray", secureChain(http.HandlerFunc(handleExportXray)))
+	mux.Handle("/api/v1/export/sub", secureChain(http.HandlerFunc(handleExportSub)))
 	mux.Handle("/api/v1/panic", secureChain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("simulated critical crash")
 	})))
@@ -251,5 +256,93 @@ func TestAPI_WebManagerSupplementaryEndpoints(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "vless://") {
 		t.Errorf("expected vless share link in client config: %s", bodyStr)
+	}
+}
+
+func TestAPI_ClientExportEndpoints(t *testing.T) {
+	_ = database.InitDatabase(":memory:")
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:     true,
+		Port:        443,
+		UUID:        "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:        "xtls-rprx-vision",
+		Dest:        "www.microsoft.com:443",
+		ServerNames: []string{"www.microsoft.com"},
+		Fingerprint: "chrome",
+		PublicKey:   "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:    []string{"0123456789abcdef"},
+		OnlyPort443: true,
+	})
+
+	// 1. Test /api/v1/export/clash (YAML output)
+	req, _ := http.NewRequest("GET", "/api/v1/export/clash", nil)
+	req.RemoteAddr = "192.0.2.10:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/v1/export/clash, got %d: %s", rr.Code, rr.Body.String())
+	}
+	clashYaml := rr.Body.String()
+	if !strings.Contains(clashYaml, "type: vless") || !strings.Contains(clashYaml, "reality-opts") {
+		t.Errorf("clash yaml missing vless reality fields: %s", clashYaml)
+	}
+	if !strings.Contains(clashYaml, "flow: xtls-rprx-vision") || !strings.Contains(clashYaml, "client-fingerprint: chrome") {
+		t.Errorf("clash yaml missing flow or fingerprint: %s", clashYaml)
+	}
+	if !strings.Contains(clashYaml, "servername: www.microsoft.com") {
+		t.Errorf("clash yaml missing SNI www.microsoft.com: %s", clashYaml)
+	}
+
+	// 2. Test /api/v1/export/singbox (JSON output)
+	req, _ = http.NewRequest("GET", "/api/v1/export/singbox", nil)
+	req.RemoteAddr = "192.0.2.10:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/v1/export/singbox, got %d: %s", rr.Code, rr.Body.String())
+	}
+	singboxJson := rr.Body.String()
+	if !strings.Contains(singboxJson, "\"type\":\"vless\"") && !strings.Contains(singboxJson, "\"type\": \"vless\"") {
+		t.Errorf("singbox json missing vless: %s", singboxJson)
+	}
+	if !strings.Contains(singboxJson, "reality") || !strings.Contains(singboxJson, "chrome") || !strings.Contains(singboxJson, "www.microsoft.com") {
+		t.Errorf("singbox json missing reality/fingerprint/SNI: %s", singboxJson)
+	}
+
+	// 3. Test /api/v1/export/xray (JSON output)
+	req, _ = http.NewRequest("GET", "/api/v1/export/xray", nil)
+	req.RemoteAddr = "192.0.2.10:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/v1/export/xray, got %d: %s", rr.Code, rr.Body.String())
+	}
+	xrayJson := rr.Body.String()
+	if (!strings.Contains(xrayJson, "\"protocol\":\"vless\"") && !strings.Contains(xrayJson, "\"protocol\": \"vless\"")) ||
+		(!strings.Contains(xrayJson, "\"security\":\"reality\"") && !strings.Contains(xrayJson, "\"security\": \"reality\"")) {
+		t.Errorf("xray json missing vless reality: %s", xrayJson)
+	}
+
+	// 4. Test /api/v1/export/sub with ?token= query auth (standard subscription URL import)
+	req, _ = http.NewRequest("GET", "/api/v1/export/sub?token=test-secret-api-key-12345", nil)
+	req.RemoteAddr = "192.0.2.10:12345"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/v1/export/sub?token=..., got %d: %s", rr.Code, rr.Body.String())
+	}
+	subBase64 := strings.TrimSpace(rr.Body.String())
+	decoded, err := base64.StdEncoding.DecodeString(subBase64)
+	if err != nil {
+		t.Fatalf("failed to decode base64 subscription: %v", err)
+	}
+	if !strings.HasPrefix(string(decoded), "vless://") {
+		t.Errorf("expected subscription to decode to vless:// link, got: %s", string(decoded))
 	}
 }

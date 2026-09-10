@@ -327,81 +327,39 @@ func handleClientConfig(w http.ResponseWriter, r *http.Request) {
 
 	protocols := []string{"socks5"}
 
-	cfg := GetActiveVlessConfig()
-	vlessEnabled := (cfg != nil && cfg.Enabled) || os.Getenv("XRAY_VLESS_ENABLED") == "true"
+	params, vlessEnabled := GetVlessClientParams(r)
 	var vlessConfig map[string]interface{}
 	if vlessEnabled {
 		protocols = append(protocols, "vless")
-		vPort := 443
-		if cfg != nil && cfg.Port > 0 {
-			vPort = cfg.Port
-		} else if p, err := strconv.Atoi(os.Getenv("XRAY_VLESS_PORT")); err == nil && p > 0 {
-			vPort = p
-		}
-
-		vUUID := ""
-		if cfg != nil && cfg.UUID != "" {
-			vUUID = cfg.UUID
-		} else {
-			vUUID = os.Getenv("XRAY_VLESS_UUID")
-		}
-
-		vFlow := "xtls-rprx-vision"
-		if cfg != nil && cfg.Flow != "" {
-			vFlow = cfg.Flow
-		} else if f := os.Getenv("XRAY_VLESS_FLOW"); f != "" {
-			vFlow = f
-		}
-
-		vSNI := "www.microsoft.com"
-		if cfg != nil && len(cfg.ServerNames) > 0 {
-			vSNI = cfg.ServerNames[0]
-		} else if s := os.Getenv("XRAY_VLESS_SNI"); s != "" {
-			vSNI = s
-		}
-
-		vFingerprint := "chrome"
-		if cfg != nil && cfg.Fingerprint != "" {
-			vFingerprint = cfg.Fingerprint
-		} else if fp := os.Getenv("XRAY_VLESS_FINGERPRINT"); fp != "" {
-			vFingerprint = fp
-		}
-
-		vPubKey := ""
-		if cfg != nil && cfg.PublicKey != "" {
-			vPubKey = cfg.PublicKey
-		} else {
-			vPubKey = os.Getenv("XRAY_VLESS_PUBLIC_KEY")
-		}
-
-		vShortID := ""
-		if cfg != nil && len(cfg.ShortIds) > 0 {
-			vShortID = cfg.ShortIds[0]
-		} else {
-			vShortID = os.Getenv("XRAY_VLESS_SHORT_ID")
-		}
-
-		vAddr := os.Getenv("XRAY_VLESS_ADDRESS")
-		if vAddr == "" {
-			vAddr = "127.0.0.1"
-		}
-
-		shareLink := fmt.Sprintf("vless://%s@%s:%d?encryption=none&flow=%s&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp#Super-Proxy-VLESS",
-			vUUID, vAddr, vPort, vFlow, vSNI, vFingerprint, vPubKey, vShortID)
+		shareLink := BuildVlessShareLink(params)
+		clashProxy := BuildClashMetaProxyItem(params)
+		singboxOutbound := BuildSingboxOutboundItem(params)
+		xrayConfig := BuildXrayClientConfig(params)
+		rawSub := BuildSubscription(params)
 
 		vlessConfig = map[string]interface{}{
-			"address":       vAddr,
-			"port":          vPort,
-			"uuid":          vUUID,
-			"security":      "reality",
-			"server_name":   vSNI,
-			"fingerprint":   vFingerprint,
-			"public_key":    vPubKey,
-			"short_id":      vShortID,
-			"flow":          vFlow,
-			"type":          "tcp",
-			"only_port_443": true,
-			"share_link":    shareLink,
+			"address":            params.Address,
+			"port":               params.Port,
+			"uuid":               params.UUID,
+			"security":           "reality",
+			"server_name":        params.SNI,
+			"fingerprint":        params.Fingerprint,
+			"public_key":         params.PublicKey,
+			"short_id":           params.ShortID,
+			"flow":               params.Flow,
+			"type":               "tcp",
+			"only_port_443":      params.OnlyPort443,
+			"share_link":         shareLink,
+			"raw_subscription":   rawSub,
+			"clash_meta_proxy":   clashProxy,
+			"sing_box_outbound":  singboxOutbound,
+			"xray_client_config": xrayConfig,
+			"export_endpoints": map[string]string{
+				"clash":   "/api/v1/export/clash",
+				"singbox": "/api/v1/export/singbox",
+				"xray":    "/api/v1/export/xray",
+				"sub":     "/api/v1/export/sub",
+			},
 		}
 	}
 

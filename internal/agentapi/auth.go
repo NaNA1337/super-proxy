@@ -32,22 +32,32 @@ func SetMasterAPIKey(key string) {
 
 func authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var token string
 		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
+		if authHeader != "" {
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+				token = parts[1]
+			} else {
+				log.Printf("[AgentAPI] 401 Unauthorized (Malformed Header) - IP: %s, URI: %s", r.RemoteAddr, r.RequestURI)
+				http.Error(w, "Unauthorized - Malformed Bearer Token", http.StatusUnauthorized)
+				return
+			}
+		} else {
+			// Allow query parameter token for subscription export URLs (Clash/Sing-box/v2rayN)
+			if qToken := r.URL.Query().Get("token"); qToken != "" {
+				token = qToken
+			} else if qKey := r.URL.Query().Get("key"); qKey != "" {
+				token = qKey
+			}
+		}
+
+		if token == "" {
 			log.Printf("[AgentAPI] 401 Unauthorized (Missing Header) - IP: %s, URI: %s", r.RemoteAddr, r.RequestURI)
 			http.Error(w, "Unauthorized - Missing Bearer Token", http.StatusUnauthorized)
 			return
 		}
 
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			log.Printf("[AgentAPI] 401 Unauthorized (Malformed Header) - IP: %s, URI: %s", r.RemoteAddr, r.RequestURI)
-			http.Error(w, "Unauthorized - Malformed Bearer Token", http.StatusUnauthorized)
-			return
-		}
-
-		token := parts[1]
-		
 		// Constant time comparison to prevent timing attacks
 		if masterAPIKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(masterAPIKey)) != 1 {
 			log.Printf("[AgentAPI] 403 Forbidden (Invalid Token) - IP: %s, URI: %s", r.RemoteAddr, r.RequestURI)

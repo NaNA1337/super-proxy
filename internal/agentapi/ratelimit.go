@@ -35,17 +35,32 @@ func init() {
 	go cleanupVisitors()
 }
 
-// isTokenValid performs a quick check if the provided token matches the master key.
+// isRequestAuthenticated performs a check if the request provides a valid master API key.
 // Used by the rate limiter (which runs before auth middleware) to determine the rate bucket.
-func isTokenValid(authHeader string) bool {
-	if masterAPIKey == "" || authHeader == "" {
+func isRequestAuthenticated(r *http.Request) bool {
+	if masterAPIKey == "" || r == nil {
 		return false
 	}
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-		return false
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+			if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(masterAPIKey)) == 1 {
+				return true
+			}
+		}
 	}
-	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(masterAPIKey)) == 1
+	if qToken := r.URL.Query().Get("token"); qToken != "" {
+		if subtle.ConstantTimeCompare([]byte(qToken), []byte(masterAPIKey)) == 1 {
+			return true
+		}
+	}
+	if qKey := r.URL.Query().Get("key"); qKey != "" {
+		if subtle.ConstantTimeCompare([]byte(qKey), []byte(masterAPIKey)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func getVisitorLimiter(ip string, isAuthenticated bool) *rate.Limiter {
@@ -99,8 +114,7 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 
 		// Actually validate the token to determine the correct rate bucket
 		// (not just check for header presence, which can be spoofed)
-		authHeader := r.Header.Get("Authorization")
-		isAuthenticated := isTokenValid(authHeader)
+		isAuthenticated := isRequestAuthenticated(r)
 
 		limiter := getVisitorLimiter(ip, isAuthenticated)
 		if !limiter.Allow() {

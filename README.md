@@ -192,6 +192,11 @@ Authorization: Bearer <your-configured-api-key>
 | `GET` | `/api/v1/pool/qualified` | 查询当前通过质量与信誉检测的合格备用节点池 |
 | `POST` | `/api/v1/slots/{slot_id}/switch` | 触发指定槽位的手动故障切换与排空迁移 |
 | `GET` | `/api/v1/operations/{op_id}` | 查询异步状态机任务进展与执行结果 |
+| `GET` | `/api/v1/client-config` | 查询客户端聚合配置（含分享链接、Clash/Sing-box/Xray 配置结构体） |
+| `GET` | `/api/v1/export/clash` | 导出 Clash Meta (Mihomo) 配置文件（YAML 格式） |
+| `GET` | `/api/v1/export/singbox` | 导出 Sing-box 客户端完整配置（JSON 格式） |
+| `GET` | `/api/v1/export/xray` | 导出 Xray-core 客户端独立配置（JSON 格式） |
+| `GET` | `/api/v1/export/sub` | 导出标准 Base64 订阅（支持 `?token=<API_KEY>` 参数直连订阅） |
 
 ### 调用示例
 
@@ -253,6 +258,92 @@ curl -k -H "Authorization: Bearer <API_KEY>" \
 ```
 
 当 `status` 变为 `COMPLETED` 时，说明旧槽位已完成排空且新节点已成功挂载接管。
+
+---
+
+## 客户端配置接入与导出
+
+Super-Proxy 提供标准 VLESS + Reality 代理入站，支持流控 `xtls-rprx-vision`、uTLS 指纹模拟 `chrome`、SNI 伪装目标 `www.microsoft.com:443` 与出站仅放行 443 端口限制。
+
+系统内置多客户端兼容导出层，覆盖主流代理客户端与配置格式：
+
+### 1. 通用订阅与分享链接 (v2rayN / v2rayNG / Shadowrocket / NekoBox / Karing)
+
+- **标准分享链接**：通过 `/api/v1/client-config` 中的 `share_link` 获取 `vless://` 链接，直接复制导入。
+- **Base64 订阅导入**：
+  在客户端订阅管理器中添加以下订阅 URL（支持 URL Query 参数认证）：
+  ```text
+  https://<SERVER_IP>:60000/api/v1/export/sub?token=<API_KEY>
+  ```
+
+### 2. Clash Meta / Mihomo
+
+可直接将订阅地址填入 Clash Meta 订阅列表，或导出单文件配置文件：
+```bash
+# 导出完整 Clash Meta profile (YAML)
+curl -k "https://<SERVER_IP>:60000/api/v1/export/clash?token=<API_KEY>" -o config.yaml
+```
+
+单节点配置格式参考：
+```yaml
+proxies:
+  - name: Super-Proxy-VLESS
+    type: vless
+    server: <SERVER_IP>
+    port: 443
+    uuid: <UUID>
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: www.microsoft.com
+    reality-opts:
+      public-key: <PUBLIC_KEY>
+      short-id: <SHORT_ID>
+    client-fingerprint: chrome
+```
+
+### 3. Sing-box
+
+导出开箱即用的 Sing-box 客户端完整 JSON 配置：
+```bash
+curl -k "https://<SERVER_IP>:60000/api/v1/export/singbox?token=<API_KEY>" -o config.json
+```
+
+出站节点格式参考：
+```json
+{
+  "type": "vless",
+  "tag": "proxy",
+  "server": "<SERVER_IP>",
+  "server_port": 443,
+  "uuid": "<UUID>",
+  "flow": "xtls-rprx-vision",
+  "network": "tcp",
+  "tls": {
+    "enabled": true,
+    "server_name": "www.microsoft.com",
+    "utls": {
+      "enabled": true,
+      "fingerprint": "chrome"
+    },
+    "reality": {
+      "enabled": true,
+      "public_key": "<PUBLIC_KEY>",
+      "short_id": "<SHORT_ID>"
+    }
+  },
+  "packet_encoding": "xudp"
+}
+```
+
+### 4. 原生 Xray-core Client
+
+导出原生 Xray-core 独立运行配置文件（包含本地 socks 10808 和 http 10809 入站）：
+```bash
+curl -k "https://<SERVER_IP>:60000/api/v1/export/xray?token=<API_KEY>" -o config.json
+xray run -c config.json
+```
 
 ---
 
