@@ -17,10 +17,10 @@ reputation:
 xray:
   vless:
     enabled: false
-    port: 443
+    port: 60001
     flow: "xtls-rprx-vision"
     dest: "www.microsoft.com:443"
     server_names:
       - "www.microsoft.com"
     fingerprint: "chrome"
-    only_port_443: true
+    outbound_only_443: true

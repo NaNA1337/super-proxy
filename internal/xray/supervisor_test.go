@@ -292,8 +292,8 @@ func TestXray_VlessRealityConfigValidation(t *testing.T) {
 	}
 
 	// Verify default parameters
-	if vlessCfg.Port != 443 {
-		t.Errorf("expected port 443, got %d", vlessCfg.Port)
+	if vlessCfg.Port != DefaultVlessPublicPort {
+		t.Errorf("expected port %d, got %d", DefaultVlessPublicPort, vlessCfg.Port)
 	}
 	if vlessCfg.Flow != "xtls-rprx-vision" {
 		t.Errorf("expected flow xtls-rprx-vision, got %s", vlessCfg.Flow)
@@ -312,6 +312,12 @@ func TestXray_VlessRealityConfigValidation(t *testing.T) {
 	}
 	if vlessCfg.PrivateKey == "" || vlessCfg.PublicKey == "" {
 		t.Errorf("expected generated x25519 keys, got empty")
+	}
+
+	// Verify that setting public port 443 fails validation
+	badPortCfg := VlessConfig{Enabled: true, Port: 443}
+	if err := NormalizeVlessConfig(&badPortCfg); err == nil {
+		t.Errorf("expected NormalizeVlessConfig with public port 443 to fail")
 	}
 
 	// Generate full Xray config
@@ -355,8 +361,8 @@ func TestXray_VlessRealityConfigValidation(t *testing.T) {
 		t.Fatalf("vless-in inbound not found in generated config")
 	}
 
-	if int(vlessInbound["port"].(float64)) != 443 {
-		t.Errorf("expected vless-in port 443, got %v", vlessInbound["port"])
+	if int(vlessInbound["port"].(float64)) != DefaultVlessPublicPort {
+		t.Errorf("expected vless-in port %d, got %v", DefaultVlessPublicPort, vlessInbound["port"])
 	}
 
 	streamSettings := vlessInbound["streamSettings"].(map[string]interface{})

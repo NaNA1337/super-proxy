@@ -159,8 +159,8 @@ func main() {
 			log.Fatalf("Failed to normalize VLESS config: %v", err)
 		}
 		agentapi.SetActiveVlessConfig(&vlessCfg)
-		log.Printf("VLESS Reality enabled: port=%d, dest=%s, SNI=%v, flow=%s, fingerprint=%s, only_port_443=%v",
-			vlessCfg.Port, vlessCfg.Dest, vlessCfg.ServerNames, vlessCfg.Flow, vlessCfg.Fingerprint, vlessCfg.OnlyPort443)
+		log.Printf("VLESS Reality enabled: port=%d, dest=%s, SNI=%v, flow=%s, fingerprint=%s, outbound_only_443=%v",
+			vlessCfg.Port, vlessCfg.Dest, vlessCfg.ServerNames, vlessCfg.Flow, vlessCfg.Fingerprint, vlessCfg.OutboundOnlyPort443)
 	}
 
 	if err := xray.GenerateConfigWithOptions(xray.ConfigOptions{

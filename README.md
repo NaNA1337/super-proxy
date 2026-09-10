@@ -263,13 +263,17 @@ curl -k -H "Authorization: Bearer <API_KEY>" \
 
 ## 客户端配置接入与导出
 
-Super-Proxy 提供标准 VLESS + Reality 代理入站，支持流控 `xtls-rprx-vision`、uTLS 指纹模拟 `chrome`、SNI 伪装目标 `www.microsoft.com:443` 与出站仅放行 443 端口限制。
+Super-Proxy 提供标准 VLESS + Reality 代理入站，支持流控 `xtls-rprx-vision`、uTLS 指纹模拟 `chrome`、SNI 伪装目标 `www.microsoft.com:443`（伪装探测端口固定为 443）与出站仅放行 443 端口限制。
+
+### 公网入口端口策略
+
+生产环境公网客户端连接入口严格限制于 `60000-61000`（默认 `60001`），禁止使用 443、80 等特权端口作为客户端公网入口。所有客户端配置的入口端口直接来源于实际运行中的 Xray Inbound 运行时端点。
 
 系统内置多客户端兼容导出层，覆盖主流代理客户端与配置格式：
 
 ### 1. 通用订阅与分享链接 (v2rayN / v2rayNG / Shadowrocket / NekoBox / Karing)
 
-- **标准分享链接**：通过 `/api/v1/client-config` 中的 `share_link` 获取 `vless://` 链接，直接复制导入。
+- **标准分享链接**：通过 `/api/v1/client-config` 中的 `share_link` 获取标准 `vless://` 链接，直接复制导入。
 - **Base64 订阅导入**：
   在客户端订阅管理器中添加以下订阅 URL（支持 URL Query 参数认证）：
   ```text
@@ -290,7 +294,7 @@ proxies:
   - name: Super-Proxy-VLESS
     type: vless
     server: <SERVER_IP>
-    port: 443
+    port: 60001
     uuid: <UUID>
     network: tcp
     tls: true
@@ -316,7 +320,7 @@ curl -k "https://<SERVER_IP>:60000/api/v1/export/singbox?token=<API_KEY>" -o con
   "type": "vless",
   "tag": "proxy",
   "server": "<SERVER_IP>",
-  "server_port": 443,
+  "server_port": 60001,
   "uuid": "<UUID>",
   "flow": "xtls-rprx-vision",
   "network": "tcp",

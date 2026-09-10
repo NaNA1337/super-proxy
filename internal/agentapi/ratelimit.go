@@ -1,7 +1,6 @@
 package agentapi
 
 import (
-	"crypto/subtle"
 	"log"
 	"net"
 	"net/http"
@@ -35,28 +34,28 @@ func init() {
 	go cleanupVisitors()
 }
 
-// isRequestAuthenticated performs a check if the request provides a valid master API key.
+// isRequestAuthenticated performs a check if the request provides a valid master API key or subscription token.
 // Used by the rate limiter (which runs before auth middleware) to determine the rate bucket.
 func isRequestAuthenticated(r *http.Request) bool {
-	if masterAPIKey == "" || r == nil {
+	if r == nil {
 		return false
 	}
 	authHeader := r.Header.Get("Authorization")
 	if authHeader != "" {
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(masterAPIKey)) == 1 {
+			if ValidateToken(parts[1]) {
 				return true
 			}
 		}
 	}
 	if qToken := r.URL.Query().Get("token"); qToken != "" {
-		if subtle.ConstantTimeCompare([]byte(qToken), []byte(masterAPIKey)) == 1 {
+		if ValidateToken(qToken) {
 			return true
 		}
 	}
 	if qKey := r.URL.Query().Get("key"); qKey != "" {
-		if subtle.ConstantTimeCompare([]byte(qKey), []byte(masterAPIKey)) == 1 {
+		if ValidateToken(qKey) {
 			return true
 		}
 	}

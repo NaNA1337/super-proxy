@@ -16,18 +16,19 @@ import (
 
 // VlessConfig holds options for configuring a VLESS Reality ingress.
 type VlessConfig struct {
-	Enabled     bool     `json:"enabled" mapstructure:"enabled"`
-	Listen      string   `json:"listen" mapstructure:"listen"`             // default "0.0.0.0"
-	Port        int      `json:"port" mapstructure:"port"`                 // default 443
-	UUID        string   `json:"uuid" mapstructure:"uuid"`
-	Flow        string   `json:"flow" mapstructure:"flow"`                 // default "xtls-rprx-vision"
-	Dest        string   `json:"dest" mapstructure:"dest"`                 // default "www.microsoft.com:443"
-	ServerNames []string `json:"server_names" mapstructure:"server_names"` // default ["www.microsoft.com"]
-	PrivateKey  string   `json:"private_key" mapstructure:"private_key"`
-	PublicKey   string   `json:"public_key" mapstructure:"public_key"`
-	ShortIds    []string `json:"short_ids" mapstructure:"short_ids"`
-	Fingerprint string   `json:"fingerprint" mapstructure:"fingerprint"`   // default "chrome" (uTLS)
-	OnlyPort443 bool     `json:"only_port_443" mapstructure:"only_port_443"`// default true (outbound restricted to 443)
+	Enabled             bool     `json:"enabled" mapstructure:"enabled"`
+	Listen              string   `json:"listen" mapstructure:"listen"`                         // default "0.0.0.0"
+	Port                int      `json:"port" mapstructure:"port"`                             // default 60001 (must be in 60000-61000)
+	UUID                string   `json:"uuid" mapstructure:"uuid"`
+	Flow                string   `json:"flow" mapstructure:"flow"`                             // default "xtls-rprx-vision"
+	Dest                string   `json:"dest" mapstructure:"dest"`                             // default "www.microsoft.com:443"
+	ServerNames         []string `json:"server_names" mapstructure:"server_names"`             // default ["www.microsoft.com"]
+	PrivateKey          string   `json:"private_key" mapstructure:"private_key"`
+	PublicKey           string   `json:"public_key" mapstructure:"public_key"`
+	ShortIds            []string `json:"short_ids" mapstructure:"short_ids"`
+	Fingerprint         string   `json:"fingerprint" mapstructure:"fingerprint"`               // default "chrome" (uTLS)
+	OutboundOnlyPort443 bool     `json:"outbound_only_443" mapstructure:"outbound_only_443"`  // default true (outbound restricted to 443)
+	OnlyPort443         bool     `json:"only_port_443,omitempty" mapstructure:"only_port_443"`// backward-compatible alias
 }
 
 // ConfigOptions holds options for generating an Xray configuration.
@@ -68,27 +69,42 @@ func NormalizeVlessConfig(cfg *VlessConfig) error {
 		return nil
 	}
 	if cfg.Port <= 0 {
-		cfg.Port = 443
+		cfg.Port = DefaultVlessPublicPort
+	}
+	if err := ValidatePublicPort(cfg.Port); err != nil {
+		return fmt.Errorf("invalid vless inbound port: %w", err)
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = "0.0.0.0"
 	}
 	if cfg.UUID == "" {
 		cfg.UUID = uuid.New().String()
+	} else if _, err := uuid.Parse(cfg.UUID); err != nil {
+		return fmt.Errorf("invalid vless UUID %q: %w", cfg.UUID, err)
 	}
 	if cfg.Flow == "" {
-		cfg.Flow = "xtls-rprx-vision"
+		cfg.Flow = DefaultFlow
+	} else if cfg.Flow != DefaultFlow {
+		return fmt.Errorf("invalid flow %q: must be %q", cfg.Flow, DefaultFlow)
+	}
+	if len(cfg.ServerNames) == 0 || cfg.ServerNames[0] == "" {
+		cfg.ServerNames = []string{DefaultRealitySNI}
+	}
+	if err := ValidateRealitySNI(cfg.ServerNames[0]); err != nil {
+		return fmt.Errorf("invalid vless SNI: %w", err)
 	}
 	if cfg.Dest == "" {
-		cfg.Dest = "www.microsoft.com:443"
+		cfg.Dest = DefaultRealityTarget
 	}
-	if len(cfg.ServerNames) == 0 {
-		cfg.ServerNames = []string{"www.microsoft.com"}
+	if _, _, err := ValidateRealityDestination(cfg.Dest, cfg.ServerNames[0]); err != nil {
+		return fmt.Errorf("invalid vless reality destination: %w", err)
 	}
 	if cfg.Fingerprint == "" {
-		cfg.Fingerprint = "chrome"
+		cfg.Fingerprint = DefaultRealityFP
+	} else if cfg.Fingerprint != DefaultRealityFP {
+		return fmt.Errorf("invalid fingerprint %q: must be %q", cfg.Fingerprint, DefaultRealityFP)
 	}
-	if len(cfg.ShortIds) == 0 {
+	if len(cfg.ShortIds) == 0 || cfg.ShortIds[0] == "" {
 		cfg.ShortIds = []string{GenerateShortID()}
 	}
 	if cfg.PrivateKey == "" || cfg.PublicKey == "" {
@@ -103,7 +119,14 @@ func NormalizeVlessConfig(cfg *VlessConfig) error {
 			cfg.PublicKey = pub
 		}
 	}
-	cfg.OnlyPort443 = true
+	if !cfg.OutboundOnlyPort443 && !cfg.OnlyPort443 {
+		cfg.OutboundOnlyPort443 = true
+		cfg.OnlyPort443 = true
+	} else if cfg.OutboundOnlyPort443 {
+		cfg.OnlyPort443 = true
+	} else if cfg.OnlyPort443 {
+		cfg.OutboundOnlyPort443 = true
+	}
 	return nil
 }
 
@@ -288,7 +311,7 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 	}
 
 	if opts.Vless.Enabled {
-		if opts.Vless.OnlyPort443 {
+		if opts.Vless.OutboundOnlyPort443 || opts.Vless.OnlyPort443 {
 			// VLESS: port 443 permitted through active proxy exits
 			rules = append(rules, map[string]interface{}{
 				"type":        "field",

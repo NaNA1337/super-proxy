@@ -103,11 +103,12 @@ func LoadConfig(path string) (*Config, error) {
 	viper.SetDefault("speed_test.timeout_sec", 15)
 	viper.SetDefault("speed_test.ping_targets", []string{"1.1.1.1", "8.8.8.8"})
 	viper.SetDefault("xray.vless.enabled", false)
-	viper.SetDefault("xray.vless.port", 443)
-	viper.SetDefault("xray.vless.flow", "xtls-rprx-vision")
-	viper.SetDefault("xray.vless.dest", "www.microsoft.com:443")
-	viper.SetDefault("xray.vless.server_names", []string{"www.microsoft.com"})
-	viper.SetDefault("xray.vless.fingerprint", "chrome")
+	viper.SetDefault("xray.vless.port", xray.DefaultVlessPublicPort)
+	viper.SetDefault("xray.vless.flow", xray.DefaultFlow)
+	viper.SetDefault("xray.vless.dest", xray.DefaultRealityTarget)
+	viper.SetDefault("xray.vless.server_names", []string{xray.DefaultRealitySNI})
+	viper.SetDefault("xray.vless.fingerprint", xray.DefaultRealityFP)
+	viper.SetDefault("xray.vless.outbound_only_443", true)
 	viper.SetDefault("xray.vless.only_port_443", true)
 
 	viper.SetEnvPrefix("XRAY_MANAGER")
@@ -179,6 +180,27 @@ func (c *Config) Validate() error {
 			target = strings.TrimSpace(target)
 			if strings.ContainsAny(target, " \t\n\r;|&`$><(){}[]\"'\\") {
 				return fmt.Errorf("invalid characters in speed_test.ping_targets: %q", target)
+			}
+		}
+	}
+
+	// 6. VLESS Reality validation
+	if c.Xray.Vless.Enabled {
+		if err := xray.ValidatePublicPort(c.Xray.Vless.Port); err != nil {
+			return fmt.Errorf("invalid xray.vless.port: %w", err)
+		}
+		if len(c.Xray.Vless.ServerNames) > 0 {
+			if err := xray.ValidateRealitySNI(c.Xray.Vless.ServerNames[0]); err != nil {
+				return fmt.Errorf("invalid xray.vless.server_names: %w", err)
+			}
+		}
+		if c.Xray.Vless.Dest != "" {
+			expectedSNI := ""
+			if len(c.Xray.Vless.ServerNames) > 0 {
+				expectedSNI = c.Xray.Vless.ServerNames[0]
+			}
+			if _, _, err := xray.ValidateRealityDestination(c.Xray.Vless.Dest, expectedSNI); err != nil {
+				return fmt.Errorf("invalid xray.vless.dest: %w", err)
 			}
 		}
 	}

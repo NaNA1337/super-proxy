@@ -327,28 +327,30 @@ func handleClientConfig(w http.ResponseWriter, r *http.Request) {
 
 	protocols := []string{"socks5"}
 
-	params, vlessEnabled := GetVlessClientParams(r)
+	profile, err := BuildRealityClientProfile(r)
 	var vlessConfig map[string]interface{}
-	if vlessEnabled {
+	if err == nil && profile != nil {
 		protocols = append(protocols, "vless")
-		shareLink := BuildVlessShareLink(params)
-		clashProxy := BuildClashMetaProxyItem(params)
-		singboxOutbound := BuildSingboxOutboundItem(params)
-		xrayConfig := BuildXrayClientConfig(params)
-		rawSub := BuildSubscription(params)
+		shareLink, _ := BuildVlessShareLink(profile)
+		clashProxy, _ := BuildClashMetaProxyItem(profile)
+		singboxOutbound, _ := BuildSingboxOutboundItem(profile)
+		xrayConfig, _ := BuildXrayClientConfig(profile)
+		rawSub, _ := BuildSubscription(profile)
 
 		vlessConfig = map[string]interface{}{
-			"address":            params.Address,
-			"port":               params.Port,
-			"uuid":               params.UUID,
-			"security":           "reality",
-			"server_name":        params.SNI,
-			"fingerprint":        params.Fingerprint,
-			"public_key":         params.PublicKey,
-			"short_id":           params.ShortID,
-			"flow":               params.Flow,
+			"address":            profile.Address,
+			"port":               profile.Port,
+			"uuid":               profile.UUID,
+			"security":           profile.Security,
+			"server_name":        profile.SNI,
+			"fingerprint":        profile.Fingerprint,
+			"public_key":         profile.PublicKey,
+			"short_id":           profile.ShortID,
+			"flow":               profile.Flow,
+			"reality_target":     profile.RealityTarget,
 			"type":               "tcp",
-			"only_port_443":      params.OnlyPort443,
+			"outbound_only_443":  profile.OutboundOnly443,
+			"only_port_443":      profile.OutboundOnly443,
 			"share_link":         shareLink,
 			"raw_subscription":   rawSub,
 			"clash_meta_proxy":   clashProxy,

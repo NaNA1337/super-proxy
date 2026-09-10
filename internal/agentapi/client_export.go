@@ -10,117 +10,152 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/NaNA1337/super-proxy/internal/xray"
 	"gopkg.in/yaml.v3"
 )
 
-// VlessClientParams holds the resolved parameters for generating client configurations.
-type VlessClientParams struct {
-	Address     string `json:"address"`
-	Port        int    `json:"port"`
-	UUID        string `json:"uuid"`
-	Flow        string `json:"flow"`
-	SNI         string `json:"sni"`
-	Fingerprint string `json:"fingerprint"`
-	PublicKey   string `json:"public_key"`
-	ShortID     string `json:"short_id"`
-	Tag         string `json:"tag"`
-	OnlyPort443 bool   `json:"only_port_443"`
-}
-
-// GetVlessClientParams resolves client configuration parameters from active config, env vars, and request context.
-func GetVlessClientParams(r *http.Request) (VlessClientParams, bool) {
+// BuildRealityClientProfile resolves and verifies all parameters needed for client export.
+// The public port and address are sourced strictly from the active Xray runtime or verified config.
+// It enforces that 60000 <= port <= 61000 and NEVER falls back to 443.
+func BuildRealityClientProfile(r *http.Request) (*xray.RealityClientProfile, error) {
 	cfg := GetActiveVlessConfig()
 	enabled := (cfg != nil && cfg.Enabled) || os.Getenv("XRAY_VLESS_ENABLED") == "true"
 	if !enabled {
-		return VlessClientParams{}, false
+		return nil, fmt.Errorf("VLESS Reality is not enabled on this server")
 	}
 
-	params := VlessClientParams{
-		Port:        443,
-		Flow:        "xtls-rprx-vision",
-		SNI:         "www.microsoft.com",
-		Fingerprint: "chrome",
-		Tag:         "Super-Proxy-VLESS",
-		OnlyPort443: true,
+	profile := &xray.RealityClientProfile{
+		Flow:          xray.DefaultFlow,
+		Security:      xray.DefaultSecurity,
+		Fingerprint:   xray.DefaultRealityFP,
+		SNI:           xray.DefaultRealitySNI,
+		RealityTarget: xray.DefaultRealityTarget,
+		Tag:           "Super-Proxy-VLESS",
 	}
 
-	if cfg != nil {
-		if cfg.Port > 0 {
-			params.Port = cfg.Port
-		}
-		if cfg.UUID != "" {
-			params.UUID = cfg.UUID
-		}
-		if cfg.Flow != "" {
-			params.Flow = cfg.Flow
-		}
-		if len(cfg.ServerNames) > 0 && cfg.ServerNames[0] != "" {
-			params.SNI = cfg.ServerNames[0]
-		}
-		if cfg.Fingerprint != "" {
-			params.Fingerprint = cfg.Fingerprint
-		}
-		if cfg.PublicKey != "" {
-			params.PublicKey = cfg.PublicKey
-		}
-		if len(cfg.ShortIds) > 0 && cfg.ShortIds[0] != "" {
-			params.ShortID = cfg.ShortIds[0]
+	// 1. Sourced from Runtime Endpoint or verified active configuration
+	var resolvedPort int
+	var resolvedAddr string
+
+	rtEndpoint, err := xray.GetRuntimeVlessEndpoint()
+	if err == nil && rtEndpoint != nil {
+		resolvedPort = rtEndpoint.Port
+		if rtEndpoint.Address != "" && rtEndpoint.Address != "0.0.0.0" {
+			resolvedAddr = rtEndpoint.Address
 		}
 	}
 
-	// Environment overrides
-	if p, err := strconv.Atoi(os.Getenv("XRAY_VLESS_PORT")); err == nil && p > 0 {
-		params.Port = p
-	}
-	if u := os.Getenv("XRAY_VLESS_UUID"); u != "" {
-		params.UUID = u
-	}
-	if f := os.Getenv("XRAY_VLESS_FLOW"); f != "" {
-		params.Flow = f
-	}
-	if s := os.Getenv("XRAY_VLESS_SNI"); s != "" {
-		params.SNI = s
-	}
-	if fp := os.Getenv("XRAY_VLESS_FINGERPRINT"); fp != "" {
-		params.Fingerprint = fp
-	}
-	if pbk := os.Getenv("XRAY_VLESS_PUBLIC_KEY"); pbk != "" {
-		params.PublicKey = pbk
-	}
-	if sid := os.Getenv("XRAY_VLESS_SHORT_ID"); sid != "" {
-		params.ShortID = sid
+	// If runtime endpoint port not yet set, inspect active config
+	if resolvedPort <= 0 && cfg != nil && cfg.Port > 0 {
+		resolvedPort = cfg.Port
 	}
 
-	// Address resolution: env > query param > request Host > fallback 127.0.0.1
-	if addr := os.Getenv("XRAY_VLESS_ADDRESS"); addr != "" {
-		params.Address = addr
+	// Allow environment override if valid
+	if envPortStr := os.Getenv("XRAY_VLESS_PORT"); envPortStr != "" {
+		if p, parseErr := strconv.Atoi(envPortStr); parseErr == nil && p > 0 {
+			resolvedPort = p
+		}
+	}
+
+	// Strictly validate the public port - NEVER fallback to 443
+	if err := xray.ValidatePublicPort(resolvedPort); err != nil {
+		return nil, fmt.Errorf("runtime public port validation failed: %w", err)
+	}
+	profile.Port = resolvedPort
+
+	// 2. Resolve public address: env > query param > request Host > runtime address > 127.0.0.1
+	if envAddr := os.Getenv("XRAY_VLESS_ADDRESS"); envAddr != "" {
+		resolvedAddr = envAddr
 	} else if r != nil && r.URL.Query().Get("address") != "" {
-		params.Address = r.URL.Query().Get("address")
+		resolvedAddr = r.URL.Query().Get("address")
 	} else if r != nil && r.Host != "" {
 		host, _, err := net.SplitHostPort(r.Host)
 		if err != nil {
 			host = r.Host
 		}
 		if host != "" && host != "127.0.0.1" && host != "localhost" && host != "::1" {
-			params.Address = host
-		} else {
-			params.Address = "127.0.0.1"
+			resolvedAddr = host
 		}
-	} else {
-		params.Address = "127.0.0.1"
+	}
+	if resolvedAddr == "" {
+		resolvedAddr = "127.0.0.1"
+	}
+	profile.Address = resolvedAddr
+
+	// 3. Resolve cryptographic credentials & identifiers
+	if cfg != nil {
+		profile.UUID = cfg.UUID
+		profile.PublicKey = cfg.PublicKey
+		if len(cfg.ShortIds) > 0 {
+			profile.ShortID = cfg.ShortIds[0]
+		}
+		if len(cfg.ServerNames) > 0 && cfg.ServerNames[0] != "" {
+			profile.SNI = cfg.ServerNames[0]
+		}
+		if cfg.Dest != "" {
+			profile.RealityTarget = cfg.Dest
+		}
+		profile.OutboundOnly443 = cfg.OutboundOnlyPort443 || cfg.OnlyPort443
 	}
 
-	return params, true
+	// Environment overrides
+	if u := os.Getenv("XRAY_VLESS_UUID"); u != "" {
+		profile.UUID = u
+	}
+	if pbk := os.Getenv("XRAY_VLESS_PUBLIC_KEY"); pbk != "" {
+		profile.PublicKey = pbk
+	}
+	if sid := os.Getenv("XRAY_VLESS_SHORT_ID"); sid != "" {
+		profile.ShortID = sid
+	}
+	if s := os.Getenv("XRAY_VLESS_SNI"); s != "" {
+		profile.SNI = s
+		// Keep RealityTarget in sync with SNI hostname
+		profile.RealityTarget = net.JoinHostPort(s, "443")
+	}
+
+	// 4. Perform strict validation on the completed profile
+	if err := profile.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid reality profile: %w", err)
+	}
+
+	return profile, nil
 }
 
-// BuildVlessShareLink generates a standard vless:// URI compatible with v2rayN, v2rayNG, Shadowrocket, NekoBox, Karing.
-func BuildVlessShareLink(p VlessClientParams) string {
-	return fmt.Sprintf("vless://%s@%s:%d?encryption=none&flow=%s&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp#%s",
-		p.UUID, p.Address, p.Port, p.Flow, p.SNI, p.Fingerprint, p.PublicKey, p.ShortID, url.QueryEscape(p.Tag))
+// BuildVlessShareLink generates a standard vless:// URI compatible with all compliant clients.
+// Uses net.JoinHostPort and url.URL to guarantee standard-compliant escaping.
+func BuildVlessShareLink(p *xray.RealityClientProfile) (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
+
+	q := url.Values{}
+	q.Set("encryption", "none")
+	q.Set("flow", p.Flow)
+	q.Set("security", p.Security)
+	q.Set("sni", p.SNI)
+	q.Set("fp", p.Fingerprint)
+	q.Set("pbk", p.PublicKey)
+	q.Set("sid", p.ShortID)
+	q.Set("type", "tcp")
+
+	u := &url.URL{
+		Scheme:   "vless",
+		User:     url.User(p.UUID),
+		Host:     net.JoinHostPort(p.Address, strconv.Itoa(p.Port)),
+		RawQuery: q.Encode(),
+		Fragment: p.Tag,
+	}
+
+	return u.String(), nil
 }
 
 // BuildClashMetaProxyItem generates the proxy node structure for Clash Meta / Mihomo.
-func BuildClashMetaProxyItem(p VlessClientParams) map[string]interface{} {
+func BuildClashMetaProxyItem(p *xray.RealityClientProfile) (map[string]interface{}, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
 		"name":               p.Tag,
 		"type":               "vless",
@@ -137,12 +172,15 @@ func BuildClashMetaProxyItem(p VlessClientParams) map[string]interface{} {
 			"short-id":   p.ShortID,
 		},
 		"client-fingerprint": p.Fingerprint,
-	}
+	}, nil
 }
 
 // BuildClashMetaProfileYAML generates a complete ready-to-use profile for Clash Meta / Mihomo.
-func BuildClashMetaProfileYAML(p VlessClientParams) ([]byte, error) {
-	proxy := BuildClashMetaProxyItem(p)
+func BuildClashMetaProfileYAML(p *xray.RealityClientProfile) ([]byte, error) {
+	proxy, err := BuildClashMetaProxyItem(p)
+	if err != nil {
+		return nil, err
+	}
 
 	profile := map[string]interface{}{
 		"port":       7890,
@@ -184,7 +222,11 @@ func BuildClashMetaProfileYAML(p VlessClientParams) ([]byte, error) {
 }
 
 // BuildSingboxOutboundItem generates the outbound structure for Sing-box.
-func BuildSingboxOutboundItem(p VlessClientParams) map[string]interface{} {
+func BuildSingboxOutboundItem(p *xray.RealityClientProfile) (map[string]interface{}, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
 		"type":        "vless",
 		"tag":         "proxy",
@@ -207,11 +249,16 @@ func BuildSingboxOutboundItem(p VlessClientParams) map[string]interface{} {
 			},
 		},
 		"packet_encoding": "xudp",
-	}
+	}, nil
 }
 
 // BuildSingboxProfileJSON generates a complete ready-to-use configuration for Sing-box.
-func BuildSingboxProfileJSON(p VlessClientParams) map[string]interface{} {
+func BuildSingboxProfileJSON(p *xray.RealityClientProfile) (map[string]interface{}, error) {
+	outbound, err := BuildSingboxOutboundItem(p)
+	if err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
 		"log": map[string]interface{}{
 			"level":     "info",
@@ -240,7 +287,7 @@ func BuildSingboxProfileJSON(p VlessClientParams) map[string]interface{} {
 			},
 		},
 		"outbounds": []interface{}{
-			BuildSingboxOutboundItem(p),
+			outbound,
 			map[string]interface{}{
 				"type": "direct",
 				"tag":  "direct",
@@ -254,11 +301,15 @@ func BuildSingboxProfileJSON(p VlessClientParams) map[string]interface{} {
 			"auto_detect_interface": true,
 			"final":                 "proxy",
 		},
-	}
+	}, nil
 }
 
 // BuildXrayClientConfig generates a complete native Xray-core client configuration.
-func BuildXrayClientConfig(p VlessClientParams) map[string]interface{} {
+func BuildXrayClientConfig(p *xray.RealityClientProfile) (map[string]interface{}, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+
 	return map[string]interface{}{
 		"log": map[string]interface{}{
 			"loglevel": "warning",
@@ -328,13 +379,16 @@ func BuildXrayClientConfig(p VlessClientParams) map[string]interface{} {
 				},
 			},
 		},
-	}
+	}, nil
 }
 
-// BuildSubscription generates a base64 encoded subscription format.
-func BuildSubscription(p VlessClientParams) string {
-	link := BuildVlessShareLink(p)
-	return base64.StdEncoding.EncodeToString([]byte(link + "\n"))
+// BuildSubscription generates a standard base64 encoded subscription format.
+func BuildSubscription(p *xray.RealityClientProfile) (string, error) {
+	link, err := BuildVlessShareLink(p)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString([]byte(link + "\n")), nil
 }
 
 // HTTP Handler: /api/v1/export/clash
@@ -343,12 +397,12 @@ func handleExportClash(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	params, ok := GetVlessClientParams(r)
-	if !ok {
-		http.Error(w, "VLESS is not enabled", http.StatusNotFound)
+	profile, err := BuildRealityClientProfile(r)
+	if err != nil {
+		http.Error(w, "Client export unavailable: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	data, err := BuildClashMetaProfileYAML(params)
+	data, err := BuildClashMetaProfileYAML(profile)
 	if err != nil {
 		http.Error(w, "Failed to generate Clash config: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -365,16 +419,20 @@ func handleExportSingbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	params, ok := GetVlessClientParams(r)
-	if !ok {
-		http.Error(w, "VLESS is not enabled", http.StatusNotFound)
+	profile, err := BuildRealityClientProfile(r)
+	if err != nil {
+		http.Error(w, "Client export unavailable: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	profile := BuildSingboxProfileJSON(params)
+	sbConfig, err := BuildSingboxProfileJSON(profile)
+	if err != nil {
+		http.Error(w, "Failed to generate Singbox config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=\"super-proxy-singbox.json\"")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(profile)
+	_ = json.NewEncoder(w).Encode(sbConfig)
 }
 
 // HTTP Handler: /api/v1/export/xray
@@ -383,16 +441,20 @@ func handleExportXray(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	params, ok := GetVlessClientParams(r)
-	if !ok {
-		http.Error(w, "VLESS is not enabled", http.StatusNotFound)
+	profile, err := BuildRealityClientProfile(r)
+	if err != nil {
+		http.Error(w, "Client export unavailable: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	profile := BuildXrayClientConfig(params)
+	xrayConfig, err := BuildXrayClientConfig(profile)
+	if err != nil {
+		http.Error(w, "Failed to generate Xray config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=\"super-proxy-xray.json\"")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(profile)
+	_ = json.NewEncoder(w).Encode(xrayConfig)
 }
 
 // HTTP Handler: /api/v1/export/sub
@@ -401,12 +463,16 @@ func handleExportSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	params, ok := GetVlessClientParams(r)
-	if !ok {
-		http.Error(w, "VLESS is not enabled", http.StatusNotFound)
+	profile, err := BuildRealityClientProfile(r)
+	if err != nil {
+		http.Error(w, "Subscription unavailable: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	sub := BuildSubscription(params)
+	sub, err := BuildSubscription(profile)
+	if err != nil {
+		http.Error(w, "Failed to build subscription: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(sub))

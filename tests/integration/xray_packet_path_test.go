@@ -276,6 +276,7 @@ func StartPacketCapture(t *testing.T, iface, filter string) (*PacketCapture, err
 		}
 		for scanner.Scan() {
 		}
+		_ = scanner.Err()
 	}()
 
 	select {

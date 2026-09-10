@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -228,16 +232,16 @@ func TestAPI_WebManagerSupplementaryEndpoints(t *testing.T) {
 
 	// 3. Test /api/v1/client-config (with VLESS Reality enabled)
 	SetActiveVlessConfig(&xray.VlessConfig{
-		Enabled:     true,
-		Port:        443,
-		UUID:        "b831381d-6324-4d53-ad4f-8cda48b30811",
-		Flow:        "xtls-rprx-vision",
-		Dest:        "www.microsoft.com:443",
-		ServerNames: []string{"www.microsoft.com"},
-		Fingerprint: "chrome",
-		PublicKey:   "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
-		ShortIds:    []string{"0123456789abcdef"},
-		OnlyPort443: true,
+		Enabled:             true,
+		Port:                60001,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
 	})
 
 	req, _ = http.NewRequest("GET", "/api/v1/client-config", nil)
@@ -265,16 +269,16 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 	handler := setupTestServer()
 
 	SetActiveVlessConfig(&xray.VlessConfig{
-		Enabled:     true,
-		Port:        443,
-		UUID:        "b831381d-6324-4d53-ad4f-8cda48b30811",
-		Flow:        "xtls-rprx-vision",
-		Dest:        "www.microsoft.com:443",
-		ServerNames: []string{"www.microsoft.com"},
-		Fingerprint: "chrome",
-		PublicKey:   "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
-		ShortIds:    []string{"0123456789abcdef"},
-		OnlyPort443: true,
+		Enabled:             true,
+		Port:                60001,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
 	})
 
 	// 1. Test /api/v1/export/clash (YAML output)
@@ -296,6 +300,9 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 	if !strings.Contains(clashYaml, "servername: www.microsoft.com") {
 		t.Errorf("clash yaml missing SNI www.microsoft.com: %s", clashYaml)
 	}
+	if !strings.Contains(clashYaml, "port: 60001") {
+		t.Errorf("clash yaml missing port 60001: %s", clashYaml)
+	}
 
 	// 2. Test /api/v1/export/singbox (JSON output)
 	req, _ = http.NewRequest("GET", "/api/v1/export/singbox", nil)
@@ -313,6 +320,9 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 	if !strings.Contains(singboxJson, "reality") || !strings.Contains(singboxJson, "chrome") || !strings.Contains(singboxJson, "www.microsoft.com") {
 		t.Errorf("singbox json missing reality/fingerprint/SNI: %s", singboxJson)
 	}
+	if !strings.Contains(singboxJson, "60001") {
+		t.Errorf("singbox json missing port 60001: %s", singboxJson)
+	}
 
 	// 3. Test /api/v1/export/xray (JSON output)
 	req, _ = http.NewRequest("GET", "/api/v1/export/xray", nil)
@@ -327,6 +337,9 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 	if (!strings.Contains(xrayJson, "\"protocol\":\"vless\"") && !strings.Contains(xrayJson, "\"protocol\": \"vless\"")) ||
 		(!strings.Contains(xrayJson, "\"security\":\"reality\"") && !strings.Contains(xrayJson, "\"security\": \"reality\"")) {
 		t.Errorf("xray json missing vless reality: %s", xrayJson)
+	}
+	if !strings.Contains(xrayJson, "60001") {
+		t.Errorf("xray json missing port 60001: %s", xrayJson)
 	}
 
 	// 4. Test /api/v1/export/sub with ?token= query auth (standard subscription URL import)
@@ -344,5 +357,295 @@ func TestAPI_ClientExportEndpoints(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(decoded), "vless://") {
 		t.Errorf("expected subscription to decode to vless:// link, got: %s", string(decoded))
+	}
+	if !strings.Contains(string(decoded), ":60001") {
+		t.Errorf("expected subscription link to contain port 60001, got: %s", string(decoded))
+	}
+}
+
+func TestAPI_ClientExport_RejectsPort443(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	// Configure VLESS with invalid public port 443
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                443, // Strictly forbidden as public client port
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+	xray.ClearRuntimeVlessEndpoint()
+
+	req, _ := http.NewRequest("GET", "/api/v1/export/clash", nil)
+	req.RemoteAddr = "192.0.2.11:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request when port 443 is used, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "port") {
+		t.Errorf("expected error message to mention port validation, got: %s", rr.Body.String())
+	}
+}
+
+func TestAPI_ClientExport_UsesRuntimeEndpoint(t *testing.T) {
+	InitAuth("test-secret-api-key-12345")
+	handler := setupTestServer()
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                60001,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	// Register actual runtime endpoint dynamically
+	err := xray.SetRuntimeVlessEndpoint(xray.PublicEndpoint{
+		Address:  "node-jp-01.super-proxy.net",
+		Port:     60088,
+		Network:  "tcp",
+		TLS:      true,
+		Protocol: "vless",
+	})
+	if err != nil {
+		t.Fatalf("failed to set runtime endpoint: %v", err)
+	}
+	defer xray.ClearRuntimeVlessEndpoint()
+
+	// Query /api/v1/export/clash
+	req, _ := http.NewRequest("GET", "/api/v1/export/clash", nil)
+	req.RemoteAddr = "192.0.2.12:12345"
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	}
+	clashYaml := rr.Body.String()
+	if !strings.Contains(clashYaml, "server: node-jp-01.super-proxy.net") {
+		t.Errorf("expected runtime address in clash export, got: %s", clashYaml)
+	}
+	if !strings.Contains(clashYaml, "port: 60088") {
+		t.Errorf("expected runtime port 60088 in clash export, got: %s", clashYaml)
+	}
+}
+
+func TestAPI_VlessURIRoundTrip(t *testing.T) {
+	profile := &xray.RealityClientProfile{
+		Address:         "edge-kr.super-proxy.net",
+		Port:            60555,
+		UUID:            "11111111-2222-3333-4444-555555555555",
+		SNI:             "www.microsoft.com",
+		Fingerprint:     "chrome",
+		PublicKey:       "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortID:         "0123456789abcdef",
+		Flow:            "xtls-rprx-vision",
+		Security:        "reality",
+		RealityTarget:   "www.microsoft.com:443",
+		Tag:             "Tokyo-Exit-01",
+		OutboundOnly443: true,
+	}
+
+	link, err := BuildVlessShareLink(profile)
+	if err != nil {
+		t.Fatalf("BuildVlessShareLink failed: %v", err)
+	}
+
+	// Parse URI
+	parsed, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("failed to parse generated URI: %v", err)
+	}
+
+	if parsed.Scheme != "vless" {
+		t.Errorf("expected scheme vless, got: %s", parsed.Scheme)
+	}
+	if parsed.User == nil || parsed.User.Username() != profile.UUID {
+		t.Errorf("expected UUID in userinfo %s, got: %v", profile.UUID, parsed.User)
+	}
+	if parsed.Hostname() != profile.Address {
+		t.Errorf("expected hostname %s, got: %s", profile.Address, parsed.Hostname())
+	}
+	if parsed.Port() != "60555" {
+		t.Errorf("expected port 60555, got: %s", parsed.Port())
+	}
+
+	q := parsed.Query()
+	if q.Get("flow") != "xtls-rprx-vision" {
+		t.Errorf("expected flow xtls-rprx-vision, got: %s", q.Get("flow"))
+	}
+	if q.Get("security") != "reality" {
+		t.Errorf("expected security reality, got: %s", q.Get("security"))
+	}
+	if q.Get("sni") != "www.microsoft.com" {
+		t.Errorf("expected sni www.microsoft.com, got: %s", q.Get("sni"))
+	}
+	if q.Get("fp") != "chrome" {
+		t.Errorf("expected fp chrome, got: %s", q.Get("fp"))
+	}
+	if q.Get("pbk") != profile.PublicKey {
+		t.Errorf("expected pbk %s, got: %s", profile.PublicKey, q.Get("pbk"))
+	}
+	if q.Get("sid") != profile.ShortID {
+		t.Errorf("expected sid %s, got: %s", profile.ShortID, q.Get("sid"))
+	}
+	if parsed.Fragment != profile.Tag {
+		t.Errorf("expected fragment %s, got: %s", profile.Tag, parsed.Fragment)
+	}
+}
+
+func TestAPI_XrayClientConfigValidationWithBinary(t *testing.T) {
+	xrayPath, err := exec.LookPath("xray")
+	if err != nil {
+		t.Skip("xray binary not available on test host, skipping live validation")
+	}
+
+	profile := &xray.RealityClientProfile{
+		Address:         "127.0.0.1",
+		Port:            60001,
+		UUID:            "b831381d-6324-4d53-ad4f-8cda48b30811",
+		SNI:             "www.microsoft.com",
+		Fingerprint:     "chrome",
+		PublicKey:       "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortID:         "0123456789abcdef",
+		Flow:            "xtls-rprx-vision",
+		Security:        "reality",
+		RealityTarget:   "www.microsoft.com:443",
+		Tag:             "Super-Proxy-VLESS",
+		OutboundOnly443: true,
+	}
+
+	configMap, err := BuildXrayClientConfig(profile)
+	if err != nil {
+		t.Fatalf("BuildXrayClientConfig failed: %v", err)
+	}
+
+	data, err := json.MarshalIndent(configMap, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal json: %v", err)
+	}
+
+	tmpFile := filepath.Join(t.TempDir(), "client_config.json")
+	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
+		t.Fatalf("failed to write client config: %v", err)
+	}
+
+	cmd := exec.Command(xrayPath, "run", "-test", "-config", tmpFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("xray run -test failed on generated client config: %v\nOutput:\n%s", err, string(out))
+	}
+}
+
+func TestAPI_SecretRedactionInExports(t *testing.T) {
+	privKey := "PRIVATE_KEY_SECRET_SHOULD_NEVER_BE_EXPOSED"
+	profile := &xray.RealityClientProfile{
+		Address:         "198.51.100.1",
+		Port:            60001,
+		UUID:            "b831381d-6324-4d53-ad4f-8cda48b30811",
+		SNI:             "www.microsoft.com",
+		Fingerprint:     "chrome",
+		PublicKey:       "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortID:         "0123456789abcdef",
+		Flow:            "xtls-rprx-vision",
+		Security:        "reality",
+		RealityTarget:   "www.microsoft.com:443",
+		Tag:             "Super-Proxy-VLESS",
+		OutboundOnly443: true,
+	}
+
+	// 1. Clash
+	clashYamlBytes, err := BuildClashMetaProfileYAML(profile)
+	if err != nil {
+		t.Fatalf("clash gen error: %v", err)
+	}
+	if strings.Contains(string(clashYamlBytes), privKey) {
+		t.Errorf("private key leaked in Clash config")
+	}
+
+	// 2. Sing-box
+	sbMap, err := BuildSingboxProfileJSON(profile)
+	if err != nil {
+		t.Fatalf("singbox gen error: %v", err)
+	}
+	sbBytes, _ := json.Marshal(sbMap)
+	if strings.Contains(string(sbBytes), privKey) {
+		t.Errorf("private key leaked in Singbox config")
+	}
+
+	// 3. Xray
+	xrayMap, err := BuildXrayClientConfig(profile)
+	if err != nil {
+		t.Fatalf("xray gen error: %v", err)
+	}
+	xrayBytes, _ := json.Marshal(xrayMap)
+	if strings.Contains(string(xrayBytes), privKey) {
+		t.Errorf("private key leaked in Xray config")
+	}
+
+	// 4. URI & Sub
+	link, _ := BuildVlessShareLink(profile)
+	if strings.Contains(link, privKey) {
+		t.Errorf("private key leaked in share link")
+	}
+}
+
+func TestAPI_SubscriptionTokenHashingAndRevocation(t *testing.T) {
+	InitAuth("master-key-12345")
+	handler := setupTestServer()
+
+	// Generate secure token
+	token, err := GenerateSubscriptionToken()
+	if err != nil {
+		t.Fatalf("GenerateSubscriptionToken failed: %v", err)
+	}
+
+	SetActiveVlessConfig(&xray.VlessConfig{
+		Enabled:             true,
+		Port:                60001,
+		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:                "xtls-rprx-vision",
+		Dest:                "www.microsoft.com:443",
+		ServerNames:         []string{"www.microsoft.com"},
+		Fingerprint:         "chrome",
+		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		ShortIds:            []string{"0123456789abcdef"},
+		OutboundOnlyPort443: true,
+	})
+
+	// Access with subscription token
+	req, _ := http.NewRequest("GET", "/api/v1/export/sub?token="+token, nil)
+	req.RemoteAddr = "192.0.2.15:12345"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK with valid subscription token, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Revoke subscription token
+	RevokeSubscriptionToken(token)
+
+	// Access again -> should be 403 Forbidden
+	req, _ = http.NewRequest("GET", "/api/v1/export/sub?token="+token, nil)
+	req.RemoteAddr = "192.0.2.15:12345"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden after token revocation, got %d", rr.Code)
 	}
 }

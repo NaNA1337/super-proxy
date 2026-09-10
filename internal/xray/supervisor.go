@@ -54,20 +54,27 @@ type Supervisor struct {
 
 	vlessEnabled       bool
 	vlessOnly443       bool
+	vlessEndpoint      *PublicEndpoint
 
 	// Callbacks for metrics and observability
 	OnCrash   func(err error)
 	OnRestart func(attempt int)
 }
 
-func inspectConfigForVless(configPath string) (enabled bool, only443 bool) {
+func inspectConfigForVless(configPath string) (enabled bool, only443 bool, endpoint *PublicEndpoint) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return false, false
+		return false, false, nil
 	}
 	var raw struct {
 		Inbounds []struct {
-			Tag string `json:"tag"`
+			Tag            string `json:"tag"`
+			Port           int    `json:"port"`
+			Listen         string `json:"listen"`
+			Protocol       string `json:"protocol"`
+			StreamSettings struct {
+				Security string `json:"security"`
+			} `json:"streamSettings"`
 		} `json:"inbounds"`
 		Routing struct {
 			Rules []struct {
@@ -76,11 +83,20 @@ func inspectConfigForVless(configPath string) (enabled bool, only443 bool) {
 		} `json:"routing"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return false, false
+		return false, false, nil
 	}
 	for _, in := range raw.Inbounds {
 		if in.Tag == "vless-in" {
 			enabled = true
+			if in.Port > 0 {
+				endpoint = &PublicEndpoint{
+					Address:  in.Listen,
+					Port:     in.Port,
+					Network:  "tcp",
+					TLS:      in.StreamSettings.Security == "reality" || in.StreamSettings.Security == "tls",
+					Protocol: in.Protocol,
+				}
+			}
 			break
 		}
 	}
@@ -90,7 +106,7 @@ func inspectConfigForVless(configPath string) (enabled bool, only443 bool) {
 			break
 		}
 	}
-	return enabled, only443
+	return enabled, only443, endpoint
 }
 
 // NewSupervisor creates an instance of Supervisor.
@@ -123,7 +139,7 @@ func NewSupervisor(configPath string, apiPort int, socksListen string, socksPort
 		marksMap[tag] = 100 + i // base table
 	}
 
-	vlessEnabled, vlessOnly443 := inspectConfigForVless(configPath)
+	vlessEnabled, vlessOnly443, vlessEndpoint := inspectConfigForVless(configPath)
 
 	return &Supervisor{
 		configPath:      configPath,
@@ -136,6 +152,7 @@ func NewSupervisor(configPath string, apiPort int, socksListen string, socksPort
 		outboundMarks:   marksMap,
 		vlessEnabled:    vlessEnabled,
 		vlessOnly443:    vlessOnly443,
+		vlessEndpoint:   vlessEndpoint,
 		ctx:             ctx,
 		cancel:          cancel,
 	}
@@ -162,8 +179,8 @@ func (s *Supervisor) Start() error {
 	}
 	s.state = StateStarting
 	s.stopped = false
-	if !s.vlessEnabled {
-		s.vlessEnabled, s.vlessOnly443 = inspectConfigForVless(s.configPath)
+	if !s.vlessEnabled || s.vlessEndpoint == nil {
+		s.vlessEnabled, s.vlessOnly443, s.vlessEndpoint = inspectConfigForVless(s.configPath)
 	}
 	s.mu.Unlock()
 
@@ -191,6 +208,9 @@ func (s *Supervisor) Start() error {
 
 	s.mu.Lock()
 	s.state = StateRunning
+	if s.vlessEnabled && s.vlessEndpoint != nil {
+		_ = SetRuntimeVlessEndpoint(*s.vlessEndpoint)
+	}
 	s.mu.Unlock()
 
 	log.Printf("[XraySupervisor] Xray is READY and listening on SOCKS %s, API %s", s.socksAddr, s.apiAddr)
@@ -904,6 +924,7 @@ func (s *Supervisor) Stop() error {
 	}
 	s.stopped = true
 	s.state = StateStopped
+	ClearRuntimeVlessEndpoint()
 	s.cancel()
 	cmd := s.cmd
 	done := s.processDone
@@ -938,3 +959,17 @@ func (s *Supervisor) killCurrentProcess() error {
 	}
 	return nil
 }
+
+// GetPublicEndpoint returns the running VLESS public endpoint if active.
+func (s *Supervisor) GetPublicEndpoint() (*PublicEndpoint, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.vlessEnabled || s.vlessEndpoint == nil {
+		return nil, fmt.Errorf("vless ingress is not enabled or configured")
+	}
+	if s.state != StateRunning {
+		return nil, fmt.Errorf("xray process is not running (state: %s)", s.state)
+	}
+	return s.vlessEndpoint, nil
+}
+
