@@ -168,8 +168,8 @@ mkdir -p /etc/super-proxy /var/lib/super-proxy
 /usr/bin/super-proxy-init-config -management-only -output /etc/super-proxy/config.yaml
 chmod 600 /etc/super-proxy/config.yaml
 
-API_KEY=$(grep "key:" /etc/super-proxy/config.yaml | awk '{print $2}' | tr -d '"')
-log_info "Generated API Key: [REDACTED ${#API_KEY} chars]"
+API_KEY=$(awk '/^[[:space:]]*key:/ {print $2}' /etc/super-proxy/config.yaml | tr -d '"')
+log_info "Generated API Key length: ${#API_KEY}"
 
 systemctl daemon-reload
 systemctl reset-failed super-proxy.service || true
@@ -202,13 +202,21 @@ fi
 
 # Query authenticated status endpoint
 STATUS_JSON=$(curl -s -k -H "Authorization: Bearer ${API_KEY}" https://127.0.0.1:60000/api/v1/status || true)
-echo "${STATUS_JSON}" | head -c 200
-echo ""
+echo "Status response preview: $(echo "${STATUS_JSON}" | head -c 200)"
 if echo "${STATUS_JSON}" | grep -q "status"; then
     log_info "PASS: Agent API authenticated response validated."
 else
+    echo "Full response: ${STATUS_JSON}"
     log_fail "Agent API response malformed or missing status."
 fi
+
+# Query authenticated client-config/all endpoint (in management-only mode, it should report 503 or json)
+CLIENT_CONFIG_CODE=$(curl -s -k -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${API_KEY}" https://127.0.0.1:60000/api/v1/client-config/all || true)
+log_info "Client config endpoint HTTP status: ${CLIENT_CONFIG_CODE} (expected 503 if VLESS disabled or 200 if active)"
+if [ "${CLIENT_CONFIG_CODE}" != "503" ] && [ "${CLIENT_CONFIG_CODE}" != "200" ]; then
+    log_fail "Client config probe failed with unexpected status ${CLIENT_CONFIG_CODE}"
+fi
+log_info "PASS: Client-config endpoint returned expected fail-closed/status code."
 
 # 8. Test CLI Diagnostics on Installed Binary
 log_step "9. Testing CLI Diagnostics on Installed Release Binary"
