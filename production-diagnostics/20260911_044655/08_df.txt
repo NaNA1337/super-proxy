@@ -1,0 +1,13 @@
+Filesystem     Type      Size  Used Avail Use% Mounted on
+tmpfs          tmpfs     679M  1.4M  678M   1% /run
+/dev/vda2      ext4       47G   20G   25G  45% /
+tmpfs          tmpfs     1.7G     0  1.7G   0% /dev/shm
+efivarfs       efivarfs  256K   19K  233K   8% /sys/firmware/efi/efivars
+tmpfs          tmpfs     1.7G   58M  1.7G   4% /tmp
+/dev/vda1      vfat      511M  6.4M  505M   2% /boot/efi
+none           tmpfs     1.0M     0  1.0M   0% /run/credentials/getty@tty1.service
+none           tmpfs     1.0M     0  1.0M   0% /run/credentials/serial-getty@ttyS1.service
+tmpfs          tmpfs     340M  8.0K  340M   1% /run/user/0
+none           tmpfs     1.0M     0  1.0M   0% /run/credentials/systemd-journald.service
+none           tmpfs     1.0M     0  1.0M   0% /run/credentials/systemd-resolved.service
+none           tmpfs     1.0M     0  1.0M   0% /run/credentials/systemd-networkd.service

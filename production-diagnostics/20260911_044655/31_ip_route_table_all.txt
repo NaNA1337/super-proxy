@@ -1,0 +1,28 @@
+default dev lo table 100 scope link 
+default dev lo table 200 scope link 
+default via 202.182.110.1 dev enp1s0 proto dhcp src 202.182.111.219 metric 100 
+10.239.79.42 dev tun2 proto kernel scope link src 10.239.79.41 
+10.245.47.34 dev tun1 proto kernel scope link src 10.245.47.33 
+108.61.10.10 via 202.182.110.1 dev enp1s0 proto dhcp src 202.182.111.219 metric 100 
+169.254.169.254 via 202.182.110.1 dev enp1s0 proto dhcp src 202.182.111.219 metric 100 
+202.182.110.0/23 dev enp1s0 proto kernel scope link src 202.182.111.219 metric 100 
+202.182.110.1 dev enp1s0 proto dhcp scope link src 202.182.111.219 metric 100 
+local 10.239.79.41 dev tun2 table local proto kernel scope host src 10.239.79.41 
+local 10.245.47.33 dev tun1 table local proto kernel scope host src 10.245.47.33 
+local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1 
+local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1 
+broadcast 127.255.255.255 dev lo table local proto kernel scope link src 127.0.0.1 
+local 202.182.111.219 dev enp1s0 table local proto kernel scope host src 202.182.111.219 
+broadcast 202.182.111.255 dev enp1s0 table local proto kernel scope link src 202.182.111.219 
+blackhole default dev lo table 100 metric 1024 pref medium
+blackhole default dev lo table 200 metric 1024 pref medium
+fe80::/64 dev enp1s0 proto kernel metric 256 pref medium
+fe80::/64 dev tun1 proto kernel metric 256 pref medium
+fe80::/64 dev tun2 proto kernel metric 256 pref medium
+local ::1 dev lo table local proto kernel metric 0 pref medium
+local fe80::2a12:f74a:faa4:7023 dev tun1 table local proto kernel metric 0 pref medium
+local fe80::5400:6ff:fea8:28eb dev enp1s0 table local proto kernel metric 0 pref medium
+local fe80::801c:27c7:7e8a:9632 dev tun2 table local proto kernel metric 0 pref medium
+multicast ff00::/8 dev enp1s0 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev tun1 table local proto kernel metric 256 pref medium
+multicast ff00::/8 dev tun2 table local proto kernel metric 256 pref medium

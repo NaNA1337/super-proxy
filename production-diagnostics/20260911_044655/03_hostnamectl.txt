@@ -1,0 +1,14 @@
+ Static hostname: vultr
+       Icon name: computer-vm
+         Chassis: vm 🖴
+      Machine ID: e14084bb2ba64b9181097eb4134b7de9
+         Boot ID: e55802d3954a4103be41df59325fd8ee
+    Product UUID: 05002a4d-4ade-4be6-bf38-63cb760b1fee
+  Virtualization: microsoft
+Operating System: Ubuntu 26.04.1 LTS
+          Kernel: Linux 7.0.0-30-generic
+    Architecture: x86-64
+ Hardware Vendor: Vultr
+  Hardware Model: VOC
+ Hardware Serial: 107088714
+Hardware Version: pc-q35-8.2

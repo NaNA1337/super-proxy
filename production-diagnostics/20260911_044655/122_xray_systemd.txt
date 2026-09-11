@@ -1,0 +1,17 @@
+○ xray.service - Xray Service
+     Loaded: loaded (/etc/systemd/system/xray.service; disabled; preset: enabled)
+    Drop-In: /etc/systemd/system/xray.service.d
+             └─10-donot_touch_single_conf.conf
+     Active: inactive (dead)
+       Docs: https://github.com/xtls
+
+Sep 09 03:01:32 vultr xray[209921]: 2026/09/09 03:01:32.796902 [Info] infra/conf/serial: Reading config: &{Name:/usr/local/etc/xray/config.json Format:json}
+Sep 09 03:01:32 vultr xray[209921]: 2026/09/09 03:01:32.798185 [Warning] core: Xray 26.3.27 started
+Sep 09 03:01:32 vultr systemd[1]: /etc/systemd/system/xray.service:7: Special user nobody configured, this is not safe!
+Sep 09 03:01:37 vultr systemd[1]: Stopping xray.service - Xray Service...
+Sep 09 03:01:37 vultr systemd[1]: xray.service: Deactivated successfully.
+Sep 09 03:01:37 vultr systemd[1]: Stopped xray.service - Xray Service.
+Sep 09 03:01:38 vultr systemd[1]: /etc/systemd/system/xray.service:7: Special user nobody configured, this is not safe!
+Sep 09 03:01:38 vultr systemd[1]: /etc/systemd/system/xray.service:7: Special user nobody configured, this is not safe!
+Sep 09 03:01:38 vultr systemd[1]: /etc/systemd/system/xray.service:7: Special user nobody configured, this is not safe!
+Sep 11 04:48:28 vultr systemd[1]: /etc/systemd/system/xray.service:7: Special user nobody configured, this is not safe!

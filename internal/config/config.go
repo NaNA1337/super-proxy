@@ -23,7 +23,8 @@ type Config struct {
 }
 
 type XrayAppConfig struct {
-	Vless xray.VlessConfig `mapstructure:"vless"`
+	ConfigPath string           `mapstructure:"config_path"`
+	Vless      xray.VlessConfig `mapstructure:"vless"`
 }
 
 type APIConfig struct {

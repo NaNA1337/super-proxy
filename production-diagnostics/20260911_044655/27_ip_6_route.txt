@@ -1,0 +1,3 @@
+fe80::/64 dev enp1s0 proto kernel metric 256 pref medium
+fe80::/64 dev tun1 proto kernel metric 256 pref medium
+fe80::/64 dev tun2 proto kernel metric 256 pref medium

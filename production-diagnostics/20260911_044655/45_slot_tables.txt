@@ -1,0 +1,24 @@
+=== Table 100 ===
+default dev lo scope link 
+=== IPv6 Table 100 ===
+blackhole default dev lo metric 1024 pref medium
+=== Table 101 ===
+=== IPv6 Table 101 ===
+Error: ipv6: FIB table does not exist.
+Dump terminated
+=== Table 102 ===
+=== IPv6 Table 102 ===
+Error: ipv6: FIB table does not exist.
+Dump terminated
+=== Table 103 ===
+Error: ipv4: FIB table does not exist.
+Dump terminated
+=== IPv6 Table 103 ===
+Error: ipv6: FIB table does not exist.
+Dump terminated
+=== Table 104 ===
+Error: ipv4: FIB table does not exist.
+Dump terminated
+=== IPv6 Table 104 ===
+Error: ipv6: FIB table does not exist.
+Dump terminated

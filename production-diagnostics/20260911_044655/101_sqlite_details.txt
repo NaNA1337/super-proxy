@@ -1,0 +1,3 @@
+=== DB: /root/super-proxy/xray_manager.db ===
+-rw-r--r-- 1 root root 692K Sep 11 04:27 /root/super-proxy/xray_manager.db
+/root/super-proxy/xray_manager.db: SQLite 3.x database, last written using SQLite version 3045001, file counter 23, database pages 173, 1st free page 153, free pages 3, cookie 0x4, schema 4, UTF-8, version-valid-for 23

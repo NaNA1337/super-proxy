@@ -1,0 +1,3 @@
+root       16577  0.0  0.1  15960  6720 ?        S    Sep08   0:14 openvpn --config /tmp/ovpn_slot1_3323722275.conf --dev tun1 --auth-nocache --script-security 2
+root       16608  0.0  0.1  15964  4992 ?        S    Sep08   0:15 openvpn --config /tmp/ovpn_slot2_3033392296.conf --dev tun2 --auth-nocache --script-security 2
+root      993244  0.0  0.0   6716  2740 pts/4    S+   04:48   0:00 grep --color=auto -i openvpn

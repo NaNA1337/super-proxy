@@ -1,0 +1,7 @@
+default via 202.182.110.1 dev enp1s0 proto dhcp src 202.182.111.219 metric 100 
+10.239.79.42 dev tun2 proto kernel scope link src 10.239.79.41 
+10.245.47.34 dev tun1 proto kernel scope link src 10.245.47.33 
+108.61.10.10 via 202.182.110.1 dev enp1s0 proto dhcp src 202.182.111.219 metric 100 
+169.254.169.254 via 202.182.110.1 dev enp1s0 proto dhcp src 202.182.111.219 metric 100 
+202.182.110.0/23 dev enp1s0 proto kernel scope link src 202.182.111.219 metric 100 
+202.182.110.1 dev enp1s0 proto dhcp scope link src 202.182.111.219 metric 100 

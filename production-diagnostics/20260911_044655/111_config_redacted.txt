@@ -1,0 +1,33 @@
+=== Content (REDACTED) ===
+# Source: configs/config.example.yaml
+region:
+  primary: JP
+  fallback:
+    - KR
+    - SG
+
+database:
+  path: xray_manager.db
+
+discovery:
+  url: "http://www.vpngate.net/api/iphone/"
+  interval: 15
+
+reputation:
+  enabled: false
+
+api:
+  listen: "127.0.0.1"
+  port: 60000
+
+xray:
+  vless:
+    enabled: false
+    port: 443
+    flow: "xtls-rprx-vision"
+    dest: "www.microsoft.com:443"
+    server_names:
+      - "www.microsoft.com"
+    fingerprint: "chrome"
+    outbound_only_443: true
+

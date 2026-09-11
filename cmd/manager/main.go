@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -67,7 +68,16 @@ func main() {
 	}
 
 	// 3. Initialize Database
-	err = database.InitDatabase(cfg.Database.Path)
+	dbPath := cfg.Database.Path
+	if dbPath == "" {
+		dbPath = "xray_manager.db"
+	}
+	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			log.Printf("Warning: failed to create directory for database %s: %v", dir, err)
+		}
+	}
+	err = database.InitDatabase(dbPath)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -149,7 +159,14 @@ func main() {
 	}
 
 	// 6. Initialize Xray Supervisor (Config generation, validation, execution, and health monitoring)
-	xrayConfigPath := "configs/xray_config.json"
+	xrayConfigPath := cfg.Xray.ConfigPath
+	if xrayConfigPath == "" {
+		if cfgDir := filepath.Dir(cfgPath); cfgDir != "" && cfgDir != "." {
+			xrayConfigPath = filepath.Join(cfgDir, "xray_config.json")
+		} else {
+			xrayConfigPath = "configs/xray_config.json"
+		}
+	}
 	vlessCfg := cfg.Xray.Vless
 	if os.Getenv("XRAY_VLESS_ENABLED") == "true" {
 		vlessCfg.Enabled = true
@@ -248,7 +265,10 @@ func main() {
 		xsup.Stop()
 	}
 
-	// e. Teardown global firewall rules and leak protection
+	// e. Teardown slot policy routing, global firewall rules and leak protection
+	for i := 0; i < 5; i++ {
+		routing.TeardownSlotRouting(i)
+	}
 	routing.ClearGlobalIptables()
 	routing.DisableDNSLeakProtection()
 	routing.DisableIPv6LeakProtection()

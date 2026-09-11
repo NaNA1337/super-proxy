@@ -1,0 +1,6 @@
+net.ipv4.ip_forward = 0
+net.ipv6.conf.all.forwarding = 0
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+net.ipv6.conf.all.disable_ipv6 = 0
+fs.file-max = 9223372036854775807

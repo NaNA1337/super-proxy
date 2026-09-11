@@ -1,0 +1,208 @@
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.2  25448 10036 ?        Ss   Sep08   0:27 /usr/lib/systemd/systemd --system --deserialize=86 vultr
+root           2  0.0  0.0      0     0 ?        S    Sep08   0:00 [kthreadd]
+root           3  0.0  0.0      0     0 ?        S    Sep08   0:00 [pool_workqueue_release]
+root           4  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-rcu_gp]
+root           5  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-sync_wq]
+root           6  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-kvfree_rcu_reclaim]
+root           7  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-slub_flushwq]
+root           8  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-netns]
+root          10  0.0  0.0      0     0 ?        I<   Sep08   0:02 [kworker/0:0H-kblockd]
+root          13  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-mm_percpu_wq]
+root          14  0.0  0.0      0     0 ?        S    Sep08   0:05 [ksoftirqd/0]
+root          15  0.0  0.0      0     0 ?        I    Sep08   0:38 [rcu_preempt]
+root          16  0.0  0.0      0     0 ?        S    Sep08   0:00 [rcu_exp_par_gp_kthread_worker/0]
+root          17  0.0  0.0      0     0 ?        S    Sep08   0:00 [rcu_exp_gp_kthread_worker]
+root          18  0.0  0.0      0     0 ?        S    Sep08   0:01 [migration/0]
+root          19  0.0  0.0      0     0 ?        S    Sep08   0:00 [kprobe-optimizer]
+root          20  0.0  0.0      0     0 ?        S    Sep08   0:00 [idle_inject/0]
+root          21  0.0  0.0      0     0 ?        S    Sep08   0:00 [cpuhp/0]
+root          22  0.0  0.0      0     0 ?        S    Sep08   0:00 [cpuhp/1]
+root          23  0.0  0.0      0     0 ?        S    Sep08   0:00 [idle_inject/1]
+root          24  0.0  0.0      0     0 ?        S    Sep08   0:01 [migration/1]
+root          25  0.0  0.0      0     0 ?        S    Sep08   0:05 [ksoftirqd/1]
+root          27  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/1:0H-kblockd]
+root          28  0.0  0.0      0     0 ?        S    Sep08   0:00 [kdevtmpfs]
+root          29  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-inet_frag_wq]
+root          30  0.0  0.0      0     0 ?        I    Sep08   0:00 [rcu_tasks_kthread]
+root          31  0.0  0.0      0     0 ?        I    Sep08   0:00 [rcu_tasks_rude_kthread]
+root          32  0.0  0.0      0     0 ?        S    Sep08   0:00 [kauditd]
+root          33  0.0  0.0      0     0 ?        S    Sep08   0:00 [khungtaskd]
+root          34  0.0  0.0      0     0 ?        S    Sep08   0:00 [oom_reaper]
+root          36  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-writeback]
+root          37  0.0  0.0      0     0 ?        S    Sep08   0:26 [kcompactd0]
+root          39  0.0  0.0      0     0 ?        SN   Sep08   0:00 [ksmd]
+root          40  0.0  0.0      0     0 ?        SN   Sep08   0:00 [khugepaged]
+root          41  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-kblockd]
+root          42  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-blkcg_punt_bio]
+root          43  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-kintegrityd]
+root          45  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/9-acpi]
+root          46  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-tpm_dev_wq]
+root          47  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-ata_sff]
+root          48  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-md_bitmap]
+root          49  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-md_llbitmap_io]
+root          50  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-md_llbitmap_unplug]
+root          51  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-edac-poller]
+root          52  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-devfreq_wq]
+root          53  0.0  0.0      0     0 ?        S    Sep08   0:00 [watchdogd]
+root          54  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-quota_events_unbound]
+root          55  0.0  0.0      0     0 ?        S    Sep08   0:52 [kswapd0]
+root          56  0.0  0.0      0     0 ?        S    Sep08   0:00 [ecryptfs-kthread]
+root          57  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-kthrotld]
+root          58  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/24-aerdrv]
+root          59  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/25-aerdrv]
+root          60  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/26-aerdrv]
+root          61  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/27-aerdrv]
+root          62  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/28-aerdrv]
+root          63  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/29-aerdrv]
+root          64  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/30-aerdrv]
+root          65  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/31-aerdrv]
+root          66  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/32-aerdrv]
+root          67  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/33-aerdrv]
+root          68  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/34-aerdrv]
+root          69  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/35-aerdrv]
+root          70  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/36-aerdrv]
+root          71  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/37-aerdrv]
+root          72  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/38-aerdrv]
+root          73  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/39-aerdrv]
+root          74  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/40-aerdrv]
+root          75  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/41-aerdrv]
+root          76  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/42-aerdrv]
+root          77  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/43-aerdrv]
+root          78  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/44-aerdrv]
+root          79  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/45-aerdrv]
+root          80  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/46-aerdrv]
+root          81  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/47-aerdrv]
+root          82  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/48-aerdrv]
+root          83  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/49-aerdrv]
+root          84  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/50-aerdrv]
+root          85  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/51-aerdrv]
+root          86  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/52-aerdrv]
+root          87  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/53-aerdrv]
+root          88  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/54-aerdrv]
+root          89  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/55-aerdrv]
+root          90  0.0  0.0      0     0 ?        S    Sep08   0:00 [irq/56-aerdrv]
+root          91  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-acpi_thermal_pm]
+root          92  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-mld]
+root          93  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-ipv6_addrconf]
+root          94  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-kstrp]
+root          96  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/u9:0]
+root         108  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-charger_manager]
+root         110  0.0  0.0      0     0 ?        S    Sep08   0:00 [hwrng]
+root         164  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-tls-strp]
+root         214  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-ixgbe]
+root         318  0.0  0.0      0     0 ?        S    Sep08   0:00 [scsi_eh_0]
+root         319  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-scsi_tmf_0]
+root         320  0.0  0.0      0     0 ?        S    Sep08   0:00 [scsi_eh_1]
+root         321  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-scsi_tmf_1]
+root         322  0.0  0.0      0     0 ?        S    Sep08   0:00 [scsi_eh_2]
+root         323  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-scsi_tmf_2]
+root         324  0.0  0.0      0     0 ?        S    Sep08   0:00 [scsi_eh_3]
+root         325  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-scsi_tmf_3]
+root         326  0.0  0.0      0     0 ?        S    Sep08   0:00 [scsi_eh_4]
+root         327  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-scsi_tmf_4]
+root         328  0.0  0.0      0     0 ?        S    Sep08   0:00 [scsi_eh_5]
+root         329  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-scsi_tmf_5]
+root         337  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/0:1H]
+root         338  0.0  0.0      0     0 ?        I<   Sep08   0:03 [kworker/1:1H-kblockd]
+root         378  0.0  0.0      0     0 ?        S    Sep08   0:06 [jbd2/vda2-8]
+root         379  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-ext4-rsv-conversion]
+root         504  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-kmpathd]
+root         505  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-kmpath_handlerd]
+root         815  0.0  0.0      0     0 ?        S    Sep08   0:00 [card0-crtc0]
+root        1095  0.0  0.0      0     0 ?        I<   Sep08   0:00 [kworker/R-cfg80211]
+message+    1193  0.0  0.0   9300  3176 ?        Ss   Sep08   0:02 @dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+root        1214  0.0  0.0  19876  2756 ?        Ss   Sep08   0:00 /usr/lib/systemd/systemd-logind
+root        1257  0.0  0.0   8096  1100 ttyS1    Ss+  Sep08   0:00 /usr/sbin/agetty --noreset --noclear --issue-file=/etc/issue:/etc/issue.d:/run/issue.d:/usr/lib/issue.d --keep-baud 115200,57600,38400,9600 - vt220
+root        1287  0.0  0.0   8488  1048 tty1     Ss+  Sep08   0:00 /usr/sbin/agetty --noreset --noclear --issue-file=/etc/issue:/etc/issue.d:/run/issue.d:/usr/lib/issue.d - linux
+root        1309  0.0  0.0 126100  2224 ?        Ssl  Sep08   0:00 /usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal
+root        1523  0.0  0.1  22260  6124 ?        Ss   Sep08   0:01 /usr/lib/systemd/systemd --user --deserialize=12
+root        1525  0.0  0.0  23024   980 ?        S    Sep08   0:00 (sd-pam)
+root       16577  0.0  0.1  15960  6720 ?        S    Sep08   0:14 openvpn --config /tmp/ovpn_slot1_3323722275.conf --dev tun1 --auth-nocache --script-security 2
+root       16608  0.0  0.1  15964  4992 ?        S    Sep08   0:15 openvpn --config /tmp/ovpn_slot2_3033392296.conf --dev tun2 --auth-nocache --script-security 2
+root      157364  0.0  0.0   7668  1736 ?        Ss   Sep08   0:10 bash -s
+root      157391  0.0  0.0   2888   960 ?        S    Sep08   0:00 sh /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/bin/antigravity-ide-server --start-server --host=127.0.0.1 --port=0 --connection-token-file /root/.antigravity-ide-server/.ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8.token --telemetry-level off --enable-remote-auto-shutdown --accept-server-license-terms
+root      157402  0.0  3.2 11965884 112592 ?     Sl   Sep08   2:51 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/server-main.js --start-server --host=127.0.0.1 --port=0 --connection-token-file /root/.antigravity-ide-server/.ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8.token --telemetry-level off --enable-remote-auto-shutdown --accept-server-license-terms
+root      157483  0.1  0.9 1432456 34364 ?       Sl   Sep08   4:46 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/bootstrap-fork --type=ptyHost --logsPath /root/.antigravity-ide-server/data/logs/20260908T234007
+root      157599  0.0  0.0   7668  1724 ?        Ss   Sep08   0:10 bash -s
+root      157789  0.0  0.0   7668  1728 ?        Ss   Sep08   0:10 bash -s
+root      184401  0.0  0.0   7932  1884 pts/3    Ss+  Sep09   0:00 /bin/bash --init-file /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh
+root      236407  0.0  0.0   8128  1884 pts/5    Ss+  Sep09   0:00 /bin/bash --init-file /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh
+root      238638  0.0  0.0  41608  3468 ?        Ssl  Sep09   0:13 /root/.vscode-server/code-110a328ea54b42367b803ec53ee0bf52ef26b419 --cli-data-dir /root/.vscode-server/cli agent host
+root      248951  0.0  0.0   8136  1884 pts/6    Ss+  Sep09   0:00 /bin/bash --init-file /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh
+root      253572  0.0  0.0   8004  1872 pts/7    Ss+  Sep09   0:00 /bin/bash --init-file /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh
+root      274671  0.0  0.0      0     0 ?        S    Sep09   0:00 [psimon]
+root      274712  0.0  0.0   6216    40 tty4     Ss+  Sep09   0:00 /usr/bin/less /var/log/cloud-init.log
+root      274713  0.0  0.0   7060  1292 ?        Ss   Sep09   0:00 /usr/sbin/cron -f -P
+root      274722  0.0  0.1 279584  6676 ?        SLsl Sep09   0:13 /usr/sbin/multipathd -d -s
+systemd+  274739  0.0  0.0  90272  2104 ?        Ssl  Sep09   0:00 /usr/lib/systemd/systemd-timesyncd
+root      274745  0.0  0.8 148736 28840 ?        S<s  Sep09   0:53 /usr/lib/systemd/systemd-journald
+root      274755  0.0  0.1 318556  4068 ?        Ssl  Sep09   0:00 /usr/libexec/upowerd
+root      274756  0.0  0.1 543344  5796 ?        Ssl  Sep09   0:03 /usr/libexec/udisks2/udisksd
+root      274760  0.0  0.0  10744  3280 ?        Ss   Sep09   0:57 sshd: /usr/sbin/sshd -D [listener] 1 of 10-100 startups
+systemd+  274763  0.0  0.1  22424  4032 ?        Ss   Sep09   0:00 /usr/lib/systemd/systemd-resolved
+polkitd   274794  0.0  0.1 382004  3628 ?        Ssl  Sep09   0:03 /usr/lib/polkit-1/polkitd --no-debug --log-level=notice
+root      274797  0.0  0.1  38104  4504 ?        Ss   Sep09   0:00 /usr/lib/systemd/systemd-udevd
+syslog    274808  0.0  0.0 220548  1956 ?        Ssl  Sep09   0:11 /usr/sbin/rsyslogd -n -iNONE
+root      274826  0.0  0.1 391608  4012 ?        Ssl  Sep09   0:00 /usr/sbin/ModemManager
+root      274832  0.0  0.0      0     0 ?        S    Sep09   0:00 [psimon]
+systemd+  274833  0.0  0.1  24300  5020 ?        Ss   Sep09   0:00 /usr/lib/systemd/systemd-networkd
+root      274857  0.0  0.3 1952000 13216 ?       Ssl  Sep09   0:04 /usr/lib/snapd/snapd
+root      430193  0.0  0.1  18620  3656 ?        Ss   Sep10   0:00 sshd-session: root [priv]
+root      430397  0.0  0.0  20656  3232 ?        S    Sep10   1:03 sshd-session: root@notty
+root      430400  0.0  0.0   7668  2328 ?        Ss   Sep10   0:06 bash -s
+root      430433  8.6  7.6 33635688 267276 ?     Sl   Sep10 147:31 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node --dns-result-order=ipv4first /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/bootstrap-fork --type=extensionHost --transformURIs --useHostProxy=false
+root      430445  0.0  0.5 1340640 18376 ?       Sl   Sep10   0:15 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/bootstrap-fork --type=fileWatcher
+root      430486  0.1  7.4 3454976 260460 ?      Sl   Sep10   1:50 /root/go/bin/gopls
+root      430494  0.0  0.2 1792528 10016 ?       Ssl  Sep10   0:01 /root/go/bin/gopls ** telemetry **
+root      430612  0.0  0.0   8528  3428 pts/4    Ss   Sep10   0:02 /bin/bash --init-file /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh
+root      430645  0.5 10.6 2433068 369172 ?      Sl   Sep10   9:20 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/antigravity/bin/language_server_linux_x64 --enable_lsp --csrf_token 8242abc8-a819-4184-a80b-5db94f79ae00 --extension_server_port 38623 --extension_server_csrf_token cfdaa6be-3867-4783-adec-845ebf4cf23d --workspace_id file_root_super_proxy --cloud_code_endpoint https://daily-cloudcode-pa.googleapis.com --subclient_type ide --app_data_dir antigravity-ide --parent_pipe_path /tmp/server_431aabea828b5691
+root      434580  0.0  0.5 1021324 18412 ?       Sl   Sep10   0:03 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/markdown-language-features/dist/serverWorkerMain --node-ipc --clientProcessId=430433
+root      456111  0.0  0.1   8120  3560 pts/8    Ss+  Sep10   0:00 /bin/bash --init-file /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh
+root      504910  0.0  0.0      0     0 ?        I<   Sep10   0:00 [kworker/R-ib-comp-wq]
+root      504911  0.0  0.0      0     0 ?        I<   Sep10   0:00 [kworker/R-ib-comp-unb-wq]
+root      504912  0.0  0.0      0     0 ?        I<   Sep10   0:00 [kworker/R-ib_mcast]
+root      504913  0.0  0.0      0     0 ?        I<   Sep10   0:00 [kworker/R-ib_nl_sa_wq]
+root      534159  0.0  0.0   7668  2928 ?        Ss   Sep10   0:05 bash -s
+root      534605  0.0  0.0   7668  2940 ?        Ss   Sep10   0:05 bash -s
+root      535091  0.0  0.1  18620  6452 ?        Ss   Sep10   0:00 sshd-session: root [priv]
+root      535167  0.0  0.1  19052  4272 ?        S    Sep10   0:37 sshd-session: root@notty
+root      535171  0.0  0.0   7668  2940 ?        Ss   Sep10   0:05 bash -s
+root      535206  8.6  7.9 33673140 274492 ?     Sl   Sep10 122:36 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node --dns-result-order=ipv4first /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/bootstrap-fork --type=extensionHost --transformURIs --useHostProxy=false
+root      535213  0.0  0.5 1410212 19904 ?       Sl   Sep10   0:16 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/bootstrap-fork --type=fileWatcher
+root      535254  0.0  0.0   8136  3088 pts/9    Ss+  Sep10   0:00 /bin/bash --init-file /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh
+root      535287  0.3  4.3 2357552 149832 ?      Sl   Sep10   4:33 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/antigravity/bin/language_server_linux_x64 --enable_lsp --csrf_token 7ea72177-7c73-42ec-b70a-c5e0845600af --extension_server_port 36229 --extension_server_csrf_token 061f62c1-106e-4103-b0a8-6ed990f456d5 --workspace_id file_root_super_proxy_manager --cloud_code_endpoint https://daily-cloudcode-pa.googleapis.com --subclient_type ide --app_data_dir antigravity-ide --parent_pipe_path /tmp/server_c312a8fe81bc72c4
+root      539717  0.0  0.4 1021012 14000 ?       Sl   Sep10   0:02 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/markdown-language-features/dist/serverWorkerMain --node-ipc --clientProcessId=535206
+root      541346  0.0  3.6 3614900 126952 ?      Sl   Sep10   1:02 /root/go/bin/gopls
+root      541355  0.0  0.2 1857880 10308 ?       Ssl  Sep10   0:01 /root/go/bin/gopls ** telemetry **
+root      542666  0.0  0.0   8004  2932 pts/11   Ss+  Sep10   0:00 /bin/bash --init-file /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh
+root      545594  0.0  0.0      0     0 ?        S    Sep10   0:00 [psimon]
+root      548921  0.0  0.4 1088616 14504 ?       Sl   Sep10   0:04 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/json-language-features/server/dist/node/jsonServerMain --node-ipc --clientProcessId=535206
+root      548940  0.0  0.0 249372    12 ?        Sl   Sep10   0:00 /root/.antigravity-ide-server/extensions/meta.pyrefly-1.2.0-linux-x64/bin/pyrefly lsp
+root      548964  0.0  0.0   8020  2948 pts/10   Ss+  Sep10   0:00 /bin/bash --init-file /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh
+root      549216  0.0  0.4 1095168 14980 ?       Sl   Sep10   0:04 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node --max-old-space-size=3072 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/node_modules/typescript/lib/tsserver.js --serverMode partialSemantic --useInferredProjectPerProjectRoot --disableAutomaticTypingAcquisition --cancellationPipeName /tmp/vscode-typescript0/e307f5928823577877e3/tscancellation-d4b5824bf6c64bdd21e2.tmp* --locale en --noGetErrOnBackgroundUpdate --canUseWatchEvents --validateDefaultNpmLocation --useNodeIpc
+root      549217  0.0  0.4 1451528 16956 ?       Sl   Sep10   0:56 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node --max-old-space-size=3072 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/node_modules/typescript/lib/tsserver.js --useInferredProjectPerProjectRoot --enableTelemetry --cancellationPipeName /tmp/vscode-typescript0/e307f5928823577877e3/tscancellation-4c3d36116d239cffc620.tmp* --locale en --noGetErrOnBackgroundUpdate --canUseWatchEvents --validateDefaultNpmLocation --useNodeIpc
+root      549233  0.0  0.3 1055636 13264 ?       Sl   Sep10   0:00 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/node_modules/typescript/lib/typingsInstaller.js --globalTypingsCacheLocation /root/.cache/typescript/5.9 --enableTelemetry --typesMapLocation /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/node_modules/typescript/lib/typesMap.json --validateDefaultNpmLocation
+root      551768  0.0  0.4 1061000 13948 ?       Sl   Sep10   0:03 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/html-language-features/server/dist/node/htmlServerMain --node-ipc --clientProcessId=535206
+root      552001  0.0  0.4 1028224 13956 ?       Sl   Sep10   0:02 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/css-language-features/server/dist/node/cssServerMain --node-ipc --clientProcessId=535206
+root      573580  0.0  0.4 1018388 16932 ?       Sl   Sep10   0:02 /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/node /root/.antigravity-ide-server/bin/2.5.5-ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8/extensions/json-language-features/server/dist/node/jsonServerMain --node-ipc --clientProcessId=430433
+root      883542  0.0  0.1   8556  4140 ?        Ss   Sep10   0:00 /usr/bin/dbus-daemon --session --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+root      941479  0.0  0.0      0     0 ?        I    01:59   0:00 [kworker/u8:3-events_power_efficient]
+root      978090  0.0  0.0      0     0 ?        I    04:16   0:00 [kworker/0:2-mm_percpu_wq]
+root      980496  0.0  0.0      0     0 ?        I    04:22   0:00 [kworker/u8:4-events_unbound]
+root      987951  0.0  0.0      0     0 ?        I    04:33   0:00 [kworker/1:1-events]
+root      988756  0.0  0.0      0     0 ?        I    04:36   0:00 [kworker/0:1-events]
+root      989567  0.0  0.0      0     0 ?        I    04:38   0:00 [kworker/1:0-events]
+root      990087  0.0  0.0      0     0 ?        I    04:40   0:00 [kworker/u8:1-events_unbound]
+root      990088  0.0  0.0      0     0 ?        I    04:40   0:00 [kworker/u8:5-events_unbound]
+root      991103  0.0  0.0      0     0 ?        I    04:44   0:00 [kworker/1:2-mm_percpu_wq]
+root      991774  0.0  0.2  14104  9160 ?        Ss   04:46   0:00 sshd-session: [accepted]
+root      991911  0.0  0.0      0     0 ?        I    04:46   0:00 [kworker/0:0-events]
+root      992577  0.0  0.2  16112  7704 ?        S    04:47   0:00 sleep 10
+root      992580  0.0  0.2  16112  7820 ?        S    04:47   0:00 sleep 10
+root      992581  0.0  0.2  16112  7740 ?        S    04:47   0:00 sleep 10
+root      992602  0.0  0.2  16112  7676 ?        S    04:47   0:00 sleep 10
+root      992611  0.0  0.2  16112  7664 ?        S    04:47   0:00 sleep 10
+root      992628  0.0  0.2  16112  7696 ?        S    04:47   0:00 sleep 10
+root      992633  0.0  0.2  16112  7832 ?        S    04:47   0:00 sleep 10
+root      992647  0.0  0.1   9904  4840 pts/4    R+   04:47   0:00 ps auxww

@@ -1,0 +1,23 @@
+Global
+         Protocols: -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+  resolv.conf mode: foreign
+Current DNS Server: 108.61.10.10
+       DNS Servers: 108.61.10.10 108.61.115.10 2001:19f0:300:1704::6
+                    2001:19f0:6000:9f22::6
+
+Link 2 (enp1s0)
+    Current Scopes: DNS
+         Protocols: +DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+Current DNS Server: 108.61.10.10
+       DNS Servers: 108.61.10.10
+     Default Route: yes
+
+Link 20 (tun1)
+    Current Scopes: none
+         Protocols: -DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+     Default Route: no
+
+Link 71 (tun2)
+    Current Scopes: none
+         Protocols: -DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+     Default Route: no

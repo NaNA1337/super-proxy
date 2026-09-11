@@ -1,0 +1,20 @@
+1.1.1.1 via 202.182.110.1 dev enp1s0 src 202.182.111.219 uid 0 
+    cache 
+8.8.8.8 via 202.182.110.1 dev enp1s0 src 202.182.111.219 uid 0 
+    cache 
+=== mark 0x64 ===
+1.1.1.1 dev lo table 100 src 202.182.111.219 mark 0x64 uid 0 
+    cache <local> 
+=== mark 0x65 ===
+1.1.1.1 via 202.182.110.1 dev enp1s0 src 202.182.111.219 mark 0x65 uid 0 
+    cache 
+=== mark 0x66 ===
+1.1.1.1 via 202.182.110.1 dev enp1s0 src 202.182.111.219 mark 0x66 uid 0 
+    cache 
+=== mark 0x67 ===
+1.1.1.1 via 202.182.110.1 dev enp1s0 src 202.182.111.219 mark 0x67 uid 0 
+    cache 
+=== mark 0x68 ===
+1.1.1.1 via 202.182.110.1 dev enp1s0 src 202.182.111.219 mark 0x68 uid 0 
+    cache 
+RTNETLINK answers: Network is unreachable

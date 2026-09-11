@@ -1,0 +1,2 @@
+20: tun1: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc fq state UNKNOWN mode DEFAULT group default qlen 500
+71: tun2: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc fq state UNKNOWN mode DEFAULT group default qlen 500

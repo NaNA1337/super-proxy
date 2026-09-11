@@ -1,0 +1,4 @@
+f: /etc/super-proxy/config.yaml
+drwxr-xr-x root root /
+drwxr-xr-x root root etc
+                      super-proxy - No such file or directory

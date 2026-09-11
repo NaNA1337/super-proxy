@@ -14,15 +14,19 @@ func EnableDNSLeakProtection() error {
 	}
 
 	// 1. Allow root management daemon to resolve discovery and reputation APIs
-	_ = runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "udp", "--dport", "53", "-j", "ACCEPT")
-	_ = runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "53", "-j", "ACCEPT")
+	if runCmd("iptables", "-C", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "udp", "--dport", "53", "-j", "ACCEPT") != nil {
+		_ = runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "udp", "--dport", "53", "-j", "ACCEPT")
+	}
+	if runCmd("iptables", "-C", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "53", "-j", "ACCEPT") != nil {
+		_ = runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "53", "-j", "ACCEPT")
+	}
 
 	// 2. Block all other DNS on physical interface (strictly enforced for proxy clients / non-root)
-	if err := runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP"); err != nil {
-		log.Printf("[LeakGuard] Warning: failed to add DNS UDP leak rule: %v", err)
+	if runCmd("iptables", "-C", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP") != nil {
+		_ = runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP")
 	}
-	if err := runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-p", "tcp", "--dport", "53", "-j", "DROP"); err != nil {
-		log.Printf("[LeakGuard] Warning: failed to add DNS TCP leak rule: %v", err)
+	if runCmd("iptables", "-C", "OUTPUT", "-o", physIface, "-p", "tcp", "--dport", "53", "-j", "DROP") != nil {
+		_ = runCmd("iptables", "-A", "OUTPUT", "-o", physIface, "-p", "tcp", "--dport", "53", "-j", "DROP")
 	}
 
 	log.Printf("[LeakGuard] DNS leak protection enabled on interface %s (daemon exempted, proxy blocked)", physIface)
@@ -37,10 +41,14 @@ func DisableDNSLeakProtection() {
 		return
 	}
 
-	_ = runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "udp", "--dport", "53", "-j", "ACCEPT")
-	_ = runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "53", "-j", "ACCEPT")
-	_ = runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP")
-	_ = runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "tcp", "--dport", "53", "-j", "DROP")
+	for runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "udp", "--dport", "53", "-j", "ACCEPT") == nil {
+	}
+	for runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "53", "-j", "ACCEPT") == nil {
+	}
+	for runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP") == nil {
+	}
+	for runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "tcp", "--dport", "53", "-j", "DROP") == nil {
+	}
 	log.Println("[LeakGuard] DNS leak protection disabled")
 }
 
@@ -52,13 +60,11 @@ func EnableIPv6LeakProtection() error {
 		return err
 	}
 
-	// Block all outgoing IPv6 on physical interface
-	if err := runCmd("ip6tables", "-A", "OUTPUT", "-o", physIface, "-j", "DROP"); err != nil {
-		log.Printf("[LeakGuard] Warning: failed to add IPv6 leak rule: %v", err)
+	if runCmd("ip6tables", "-C", "OUTPUT", "-o", physIface, "-j", "DROP") != nil {
+		_ = runCmd("ip6tables", "-A", "OUTPUT", "-o", physIface, "-j", "DROP")
 	}
-	// Block all incoming IPv6 on physical interface
-	if err := runCmd("ip6tables", "-A", "INPUT", "-i", physIface, "-j", "DROP"); err != nil {
-		log.Printf("[LeakGuard] Warning: failed to add IPv6 input leak rule: %v", err)
+	if runCmd("ip6tables", "-C", "INPUT", "-i", physIface, "-j", "DROP") != nil {
+		_ = runCmd("ip6tables", "-A", "INPUT", "-i", physIface, "-j", "DROP")
 	}
 
 	log.Printf("[LeakGuard] IPv6 leak protection enabled on interface %s", physIface)
@@ -73,7 +79,9 @@ func DisableIPv6LeakProtection() {
 		return
 	}
 
-	runCmd("ip6tables", "-D", "OUTPUT", "-o", physIface, "-j", "DROP")
-	runCmd("ip6tables", "-D", "INPUT", "-i", physIface, "-j", "DROP")
+	for runCmd("ip6tables", "-D", "OUTPUT", "-o", physIface, "-j", "DROP") == nil {
+	}
+	for runCmd("ip6tables", "-D", "INPUT", "-i", physIface, "-j", "DROP") == nil {
+	}
 	log.Println("[LeakGuard] IPv6 leak protection disabled")
 }

@@ -3,3 +3,9 @@ gosec.json
 govulncheck.txt
 release/
 dist/
+*.pem
+configs/*.pem
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

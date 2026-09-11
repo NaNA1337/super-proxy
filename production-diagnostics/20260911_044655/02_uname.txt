@@ -1,0 +1,3 @@
+Linux vultr 7.0.0-30-generic #30-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 31 18:22:54 UTC 2026 x86_64 GNU/Linux
+7.0.0-30-generic
+x86_64

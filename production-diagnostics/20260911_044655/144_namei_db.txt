@@ -1,0 +1,5 @@
+f: /root/super-proxy/xray_manager.db
+drwxr-xr-x root root /
+drwx------ root root root
+drwxr-xr-x root root super-proxy
+-rw-r--r-- root root xray_manager.db

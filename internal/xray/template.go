@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/NaNA1337/super-proxy/internal/routing"
@@ -380,6 +381,12 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 	data, err := json.MarshalIndent(xrayConfig, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal xray config: %w", err)
+	}
+
+	if dir := filepath.Dir(opts.ConfigPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return fmt.Errorf("failed to create directory for xray config: %w", err)
+		}
 	}
 
 	if err := os.WriteFile(opts.ConfigPath, data, 0600); err != nil {

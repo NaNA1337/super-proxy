@@ -1,0 +1,8 @@
+NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS
+loop0    7:0    0  1.5M  1 loop /snap/hwctl/123
+loop1    7:1    0 66.8M  1 loop /snap/core24/1643
+loop2    7:2    0 50.1M  1 loop /snap/snapd/27710
+sr0     11:0    1 1024M  1 rom  
+vda    253:0    0   50G  0 disk 
+├─vda1 253:1    0  512M  0 part /boot/efi
+└─vda2 253:2    0 49.5G  0 part /

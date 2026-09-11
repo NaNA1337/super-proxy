@@ -11,6 +11,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -63,6 +64,13 @@ func LoadOrGenerateCert(certPath, keyPath string) (*tls.Certificate, error) {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b})
 
 	// Save to disk
+	if dir := filepath.Dir(certPath); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0750)
+	}
+	if dir := filepath.Dir(keyPath); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0700)
+	}
+
 	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
 		log.Printf("[AgentAPI] Warning: Failed to save cert.pem: %v", err)
 	}

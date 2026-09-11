@@ -1,0 +1,5 @@
+f: /usr/bin/super-proxy
+drwxr-xr-x root root /
+drwxr-xr-x root root usr
+drwxr-xr-x root root bin
+                      super-proxy - No such file or directory

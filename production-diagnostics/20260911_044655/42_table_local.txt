@@ -1,0 +1,7 @@
+local 10.239.79.41 dev tun2 proto kernel scope host src 10.239.79.41 
+local 10.245.47.33 dev tun1 proto kernel scope host src 10.245.47.33 
+local 127.0.0.0/8 dev lo proto kernel scope host src 127.0.0.1 
+local 127.0.0.1 dev lo proto kernel scope host src 127.0.0.1 
+broadcast 127.255.255.255 dev lo proto kernel scope link src 127.0.0.1 
+local 202.182.111.219 dev enp1s0 proto kernel scope host src 202.182.111.219 
+broadcast 202.182.111.255 dev enp1s0 proto kernel scope link src 202.182.111.219 
