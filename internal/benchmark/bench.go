@@ -28,6 +28,7 @@ const (
 
 // BenchmarkConfig defines endpoints and limits for node performance qualification.
 type BenchmarkConfig struct {
+	RoutingMark   int // Linux policy-routing mark; zero uses normal routing.
 	RTTTargetURL  string
 	ICMPTarget    string   // Host or IP to ping for true ICMP packet loss (e.g. "1.1.1.1" or "127.0.0.1")
 	ICMPTargets   []string // Configurable ICMP targets (e.g. ["1.1.1.1", "8.8.8.8"]) for median aggregation
@@ -150,6 +151,9 @@ func BenchmarkInterfaceWithConfig(ctx context.Context, interfaceName string, cfg
 			var err error
 			controlErr := c.Control(func(fd uintptr) {
 				err = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, interfaceName)
+				if err == nil && cfg.RoutingMark != 0 {
+					err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, cfg.RoutingMark)
+				}
 			})
 			if controlErr != nil {
 				return controlErr

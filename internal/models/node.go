@@ -66,16 +66,17 @@ var NodeUpsertColumns = []string{
 
 // Node represents a VPN Gate node with stable identity.
 type Node struct {
-	ID        string `gorm:"primaryKey;column:id" json:"id"` // Stable node identity (IP)
-	HostName  string `gorm:"column:host_name" json:"hostname"`
-	IP        string `gorm:"index;column:ip" json:"ip"`
-	Score     int    `gorm:"column:score" json:"score"` // Original VPN Gate score
-	Country   string `gorm:"index;column:country" json:"country"`
-	CountryL  string `gorm:"column:country_long" json:"country_long"`
-	Sessions  int    `gorm:"column:sessions" json:"sessions"`
-	Uptime    int64  `gorm:"column:uptime" json:"uptime"` // in milliseconds
-	Users     int    `gorm:"column:users" json:"users"`
-	Message   string `gorm:"column:message" json:"message"`
+	ObservedExitIP string `gorm:"column:observed_exit_ip" json:"observed_exit_ip,omitempty"` // Measured NAT egress; not the VPN server endpoint.
+	ID             string `gorm:"primaryKey;column:id" json:"id"`                            // Stable node identity (IP)
+	HostName       string `gorm:"column:host_name" json:"hostname"`
+	IP             string `gorm:"index;column:ip" json:"ip"`
+	Score          int    `gorm:"column:score" json:"score"` // Original VPN Gate score
+	Country        string `gorm:"index;column:country" json:"country"`
+	CountryL       string `gorm:"column:country_long" json:"country_long"`
+	Sessions       int    `gorm:"column:sessions" json:"sessions"`
+	Uptime         int64  `gorm:"column:uptime" json:"uptime"` // in milliseconds
+	Users          int    `gorm:"column:users" json:"users"`
+	Message        string `gorm:"column:message" json:"message"`
 	// OpenVPN holds raw base64 credentials in-memory ONLY during discovery.
 	// It is NEVER persisted to DB (column is kept empty) and NEVER exposed in JSON.
 	OpenVPN   string `gorm:"column:openvpn_config_base64" json:"-"`
@@ -132,14 +133,14 @@ const (
 )
 
 type PerformanceMetrics struct {
-	RTT              int       `json:"rtt_ms"`              // Round-trip time in milliseconds (-1 if unmeasured)
-	Throughput       int64     `json:"throughput_bps"`      // Aggregate throughput in bps
-	DownloadSpeed    int64     `json:"download_bps"`        // Download throughput
-	UploadSpeed      int64     `json:"upload_bps"`          // Upload throughput
-	UploadStatus     string    `json:"upload_status"`       // AVAILABLE, UNAVAILABLE, NOT_MEASURED, ERROR
-	SpeedStatus      string    `json:"speed_status"`        // AVAILABLE, UNAVAILABLE, NOT_MEASURED, ERROR
-	PacketLoss       float64   `json:"packet_loss_pct"`     // Packet loss percentage (-1 if unmeasured)
-	PacketLossStatus string    `json:"packet_loss_status"`  // AVAILABLE, UNAVAILABLE, NOT_MEASURED, ERROR
-	DurationMs       int64     `json:"duration_ms"`         // Test duration in ms
+	RTT              int       `json:"rtt_ms"`             // Round-trip time in milliseconds (-1 if unmeasured)
+	Throughput       int64     `json:"throughput_bps"`     // Aggregate throughput in bps
+	DownloadSpeed    int64     `json:"download_bps"`       // Download throughput
+	UploadSpeed      int64     `json:"upload_bps"`         // Upload throughput
+	UploadStatus     string    `json:"upload_status"`      // AVAILABLE, UNAVAILABLE, NOT_MEASURED, ERROR
+	SpeedStatus      string    `json:"speed_status"`       // AVAILABLE, UNAVAILABLE, NOT_MEASURED, ERROR
+	PacketLoss       float64   `json:"packet_loss_pct"`    // Packet loss percentage (-1 if unmeasured)
+	PacketLossStatus string    `json:"packet_loss_status"` // AVAILABLE, UNAVAILABLE, NOT_MEASURED, ERROR
+	DurationMs       int64     `json:"duration_ms"`        // Test duration in ms
 	LastChecked      time.Time `json:"last_checked"`
 }

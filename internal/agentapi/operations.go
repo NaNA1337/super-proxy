@@ -111,7 +111,14 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 	sched.Mu.Lock()
 	if oldTunnel, exists := sched.ActiveSlots[op.Slot]; exists {
 		log.Printf("[Operation-%s] Moving old tunnel %s to DRAINING (preserving connections)", op.ID, oldTunnel.Node.IP)
-		sched.TransitionToDraining(op.Slot, oldTunnel)
+		sched.DrainSlotLocked(op.Slot, oldTunnel)
+		if _, stillActive := sched.ActiveSlots[op.Slot]; stillActive {
+			sched.ManualOverride[op.Slot] = false
+			sched.Mu.Unlock()
+			lease.Release()
+			updateOpStatus(op, OpFailed, "Failed to drain previous tunnel")
+			return
+		}
 	}
 	sched.Mu.Unlock()
 
@@ -126,10 +133,10 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 
 	// 2. CONNECTING
 	updateOpStatus(op, OpConnecting, "")
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(sched.Context(), 60*time.Second)
 	defer cancel()
 
-	tunnel, err := openvpn.StartTunnel(ctx, op.Slot, &node)
+	tunnel, err := openvpn.StartTunnel(sched.Context(), sched.NextTunnelID(), &node)
 	if err != nil {
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to start tunnel: %v", err))
 		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
@@ -153,6 +160,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 	}
 
 	// Perform end-to-end health check
+	node.ObservedExitIP = ""
 	res := health.VerifyTunnel(ctx, op.Slot, tunnel.Interface, routing.BaseTableID+op.Slot, &node)
 	if !res.TunnelHealthy || res.Error != nil {
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Health check failed on tun dev %s: %v", tunnel.Interface, res.Error))
@@ -163,6 +171,9 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 		releaseSlot(op.Slot)
 		return
 	}
+
+	node.ObservedExitIP = res.ObservedExitIP
+	database.DB.Model(&node).Update("observed_exit_ip", node.ObservedExitIP)
 
 	// Transition node to QUALIFIED
 	_ = scheduler.TransitionNode(database.DB, &node, models.StatusQualified)
@@ -177,7 +188,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 		routing.ClearSlotRouting(op.Slot)
 		tunnel.Stop()
 		lease.Release()
-		releaseSlot(op.Slot)
+		sched.ManualOverride[op.Slot] = false
 		updateOpStatus(op, OpFailed, "Operation preempted by newer request")
 		return
 	}
@@ -185,18 +196,14 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 	// If conflict tunnel exists, drain it safely
 	if conflictTunnel, exists := sched.ActiveSlots[op.Slot]; exists && conflictTunnel != tunnel {
 		log.Printf("[Operation-%s] Conflict tunnel on slot %d safely transitioned to DRAINING", op.ID, op.Slot)
-		sched.TransitionToDraining(op.Slot, conflictTunnel)
-	}
-
-	sched.ActiveSlots[op.Slot] = tunnel
-	_ = scheduler.TransitionNode(database.DB, &node, models.StatusActive)
-
-	if sc != nil {
-		sc.Mu.Lock()
-		sc.ActiveTunnel = tunnel
-		sc.State = scheduler.SlotActive
-		sc.OutboundActive = true
-		sc.Mu.Unlock()
+		sched.DrainSlotLocked(op.Slot, conflictTunnel)
+		if _, stillActive := sched.ActiveSlots[op.Slot]; stillActive {
+			tunnel.Stop()
+			lease.Release()
+			sched.ManualOverride[op.Slot] = false
+			updateOpStatus(op, OpFailed, "Failed to drain conflicting tunnel")
+			return
+		}
 	}
 
 	if sched.XraySupervisor != nil {
@@ -207,9 +214,21 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 			_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
 			updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to activate Xray routing: %v", err))
 			lease.Release()
-			releaseSlot(op.Slot)
+			sched.ManualOverride[op.Slot] = false
 			return
 		}
+	}
+
+	tunnel.SlotIndex = op.Slot
+	sched.ActiveSlots[op.Slot] = tunnel
+	_ = scheduler.TransitionNode(database.DB, &node, models.StatusActive)
+
+	if sc != nil {
+		sc.Mu.Lock()
+		sc.ActiveTunnel = tunnel
+		sc.State = scheduler.SlotActive
+		sc.OutboundActive = true
+		sc.Mu.Unlock()
 	}
 
 	lease.Release()

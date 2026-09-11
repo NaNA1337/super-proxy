@@ -4,6 +4,8 @@ import base64
 import hashlib
 import http.cookiejar
 import io
+import http.server
+import threading
 import json
 import os
 from pathlib import Path
@@ -45,7 +47,15 @@ with tempfile.TemporaryDirectory(prefix='sp-linked-') as temp:
     subprocess.run([initializer, '-address', 'proxy.example.com', '-output', str(cfg)], check=True)
     original = cfg.read_text()
     token = re.search(r"key: ([0-9a-f]{64})", original).group(1)
-    cfg.write_text(original.replace('https://www.vpngate.net/api/iphone/', 'http://127.0.0.1:9'))
+    class SlowDiscovery(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(30)
+            self.send_response(503)
+            self.end_headers()
+        def log_message(self,*args): pass
+    source=http.server.ThreadingHTTPServer(('127.0.0.1',0),SlowDiscovery)
+    threading.Thread(target=source.serve_forever,daemon=True).start()
+    cfg.write_text(original.replace('https://www.vpngate.net/api/iphone/', f'http://127.0.0.1:{source.server_port}'))
     assert cfg.stat().st_mode & 0o777 == 0o600
     duplicate = subprocess.run([initializer, '-address', 'proxy.example.com', '-output', str(cfg)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     assert duplicate.returncode != 0, 'initializer overwrote existing credentials'
@@ -54,7 +64,7 @@ with tempfile.TemporaryDirectory(prefix='sp-linked-') as temp:
     try:
         for name, argv, env in [
             ('daemon', [binary, str(cfg)], {}),
-            ('manager', [str(Path(manager)/'bin/super-proxy-web'), '-host', '127.0.0.1', '-port', '18443', '-data-dir', str(root/'manager')], {'ALLOW_PRIVATE_HOSTS':'true'}),
+            ('manager', [os.environ.get('LINKED_MANAGER_BINARY', str(Path(manager)/'bin/super-proxy-web')), '-host', '127.0.0.1', '-port', '18443', '-data-dir', str(root/'manager')], {'ALLOW_PRIVATE_HOSTS':'true'}),
         ]:
             log = open(root/f'{name}.log', 'w+')
             logs.append(log)
@@ -62,6 +72,7 @@ with tempfile.TemporaryDirectory(prefix='sp-linked-') as temp:
         agent = 'https://127.0.0.1:60000'
         web = 'http://127.0.0.1:18443'
         auth = {'Authorization': f'Bearer {token}'}
+        ready_started=time.monotonic()
         for _ in range(150):
             try:
                 request(agent+'/api/v1/status', headers=auth)
@@ -71,6 +82,8 @@ with tempfile.TemporaryDirectory(prefix='sp-linked-') as temp:
                 time.sleep(.1)
         else:
             raise AssertionError('processes did not become ready')
+        assert time.monotonic()-ready_started < 15, 'slow discovery delayed management startup'
+        print('PASS: management starts while discovery HTTP response is stalled',flush=True)
         password = re.search(r'Temporary password:\s*([^\r\n]+)', (root/'manager.log').read_text()).group(1).strip()
         login = request(web+'/api/auth/login', {'username':'admin', 'password':password})
         csrf = login['csrf_token']

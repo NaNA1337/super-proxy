@@ -23,8 +23,8 @@ type VlessConfig struct {
 	PublicAddress       string   `json:"public_address,omitempty" mapstructure:"public_address"` // optional explicit public domain/IP
 	UUID                string   `json:"uuid" mapstructure:"uuid"`
 	Flow                string   `json:"flow" mapstructure:"flow"`                 // default "xtls-rprx-vision"
-	Dest                string   `json:"dest" mapstructure:"dest"`                 // default "www.microsoft.com:443"
-	ServerNames         []string `json:"server_names" mapstructure:"server_names"` // default ["www.microsoft.com"]
+	Dest                string   `json:"dest" mapstructure:"dest"`                 // default "www.cloudflare.com:443"
+	ServerNames         []string `json:"server_names" mapstructure:"server_names"` // default ["www.cloudflare.com"]
 	PrivateKey          string   `json:"private_key" mapstructure:"private_key"`
 	PublicKey           string   `json:"public_key" mapstructure:"public_key"`
 	ShortIds            []string `json:"short_ids" mapstructure:"short_ids"`

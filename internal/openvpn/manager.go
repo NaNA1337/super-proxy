@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -32,8 +33,8 @@ type Tunnel struct {
 	cleanupOnce       sync.Once
 
 	// Lifecycle synchronization: single waiter goroutine owns cmd.Wait()
-	doneChan          chan struct{}
-	exitErr           error
+	doneChan chan struct{}
+	exitErr  error
 }
 
 // StartTunnel decodes config, injects route-nopull, and starts the OpenVPN process.
@@ -138,6 +139,9 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node, rawB64Co
 		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
 			line := scanner.Text()
+			if strings.Contains(line, "Options error") || strings.Contains(line, "TLS Error") || strings.Contains(line, "AUTH_FAILED") || strings.Contains(line, "Initialization Sequence Completed") {
+				log.Printf("[Slot %d] %s", slotIndex, line)
+			}
 			if status := ParseDCOLogLine(line); status != "" {
 				tunnel.Mu.Lock()
 				tunnel.DCOStatus = status

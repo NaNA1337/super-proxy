@@ -38,9 +38,13 @@ func InitGlobalIptables() error {
 		}
 	}
 
+	// Remove the legacy unconditional restore rule: ctmark=0 on a new connection
+	// must not erase Xray's SO_MARK before its first packet reaches POSTROUTING.
+	for runCmd("iptables", "-t", "mangle", "-D", ChainConnmark, "-j", "CONNMARK", "--restore-mark") == nil {
+	}
 	// 4. Ensure SUPER_PROXY_CONNMARK has the global restore-mark rule
-	if err := runCmd("iptables", "-t", "mangle", "-C", ChainConnmark, "-j", "CONNMARK", "--restore-mark"); err != nil {
-		if err := runCmd("iptables", "-t", "mangle", "-A", ChainConnmark, "-j", "CONNMARK", "--restore-mark"); err != nil {
+	if err := runCmd("iptables", "-t", "mangle", "-C", ChainConnmark, "-m", "connmark", "!", "--mark", "0", "-j", "CONNMARK", "--restore-mark"); err != nil {
+		if err := runCmd("iptables", "-t", "mangle", "-A", ChainConnmark, "-m", "connmark", "!", "--mark", "0", "-j", "CONNMARK", "--restore-mark"); err != nil {
 			log.Printf("[IPTables] Warning: failed to append restore-mark to %s: %v", ChainConnmark, err)
 		}
 	}

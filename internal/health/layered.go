@@ -34,7 +34,7 @@ type VerifyResult struct {
 func VerifyTunnel(ctx context.Context, slot int, interfaceName string, tableID int, node *models.Node) *VerifyResult {
 	res := &VerifyResult{
 		Interface:      interfaceName,
-		ExpectedExitIP: node.IP,
+		ExpectedExitIP: node.ObservedExitIP,
 	}
 
 	// 1. Process/Tun check
@@ -62,6 +62,9 @@ func VerifyTunnel(ctx context.Context, slot int, interfaceName string, tableID i
 			err := c.Control(func(fd uintptr) {
 				// Requires CAP_NET_RAW / root
 				controlErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, interfaceName)
+				if controlErr == nil {
+					controlErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, tableID)
+				}
 			})
 			if err != nil {
 				return err
@@ -104,7 +107,14 @@ func VerifyTunnel(ctx context.Context, slot int, interfaceName string, tableID i
 	}
 
 	res.ObservedExitIP = ipify.IP
-	if res.ObservedExitIP == res.ExpectedExitIP {
+	observed := net.ParseIP(res.ObservedExitIP)
+	if observed == nil || observed.To4() == nil || !observed.IsGlobalUnicast() || observed.IsPrivate() {
+		res.Error = fmt.Errorf("invalid observed exit IPv4: %q", res.ObservedExitIP)
+		return res
+	}
+	// First qualification learns the egress through a device-bound, marked socket.
+	// VPN Gate server endpoints can sit behind a different NAT egress address.
+	if res.ExpectedExitIP == "" || res.ObservedExitIP == res.ExpectedExitIP {
 		res.ExitIPMatch = true
 		res.TunnelHealthy = true
 	} else {

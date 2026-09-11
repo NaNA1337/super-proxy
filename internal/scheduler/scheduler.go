@@ -22,19 +22,19 @@ import (
 const drainingTimeout = 30 * time.Second
 
 type Scheduler struct {
-	MaxActive        int
-	MaxStandby       int
-	RepEngine        *reputation.Engine
-	RegionConfig     config.RegionConfig
-	ActiveSlots      map[int]*openvpn.Tunnel
-	DrainingSlots    map[int]*openvpn.Tunnel // Tunnels being drained before shutdown
-	drainingTableIDs map[int]int
-	drainingTunIPs   map[int]string
-	StandbyNodes     []*openvpn.Tunnel
-	Slots            *SlotManager
-	ManualOverride   map[int]bool
-	XraySupervisor   *xray.Supervisor
-	Benchmarker      func(ctx context.Context, interfaceName string) (*models.PerformanceMetrics, error)
+	MaxActive              int
+	MaxStandby             int
+	RepEngine              *reputation.Engine
+	RegionConfig           config.RegionConfig
+	ActiveSlots            map[int]*openvpn.Tunnel
+	DrainingSlots          map[int]*openvpn.Tunnel // Tunnels being drained before shutdown
+	drainingTableIDs       map[int]int
+	drainingTunIPs         map[int]string
+	StandbyNodes           []*openvpn.Tunnel
+	Slots                  *SlotManager
+	ManualOverride         map[int]bool
+	XraySupervisor         *xray.Supervisor
+	Benchmarker            func(ctx context.Context, interfaceName string, mark int) (*models.PerformanceMetrics, error)
 	ScoringEngine          *ScoringEngine
 	SetupDrainingRoutingFn func(drainingTableID int, interfaceName string, tunIP string) error
 	Mu                     sync.Mutex
@@ -47,17 +47,21 @@ type Scheduler struct {
 func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine, regionCfg config.RegionConfig) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Scheduler{
-		MaxActive:              maxActive,
-		MaxStandby:             maxStandby,
-		RepEngine:              repEngine,
-		RegionConfig:           regionCfg,
-		ActiveSlots:            make(map[int]*openvpn.Tunnel),
-		DrainingSlots:          make(map[int]*openvpn.Tunnel),
-		drainingTableIDs:       make(map[int]int),
-		drainingTunIPs:         make(map[int]string),
-		Slots:                  NewSlotManager(maxActive),
-		ManualOverride:         make(map[int]bool),
-		Benchmarker:            benchmark.BenchmarkInterface,
+		MaxActive:        maxActive,
+		MaxStandby:       maxStandby,
+		RepEngine:        repEngine,
+		RegionConfig:     regionCfg,
+		ActiveSlots:      make(map[int]*openvpn.Tunnel),
+		DrainingSlots:    make(map[int]*openvpn.Tunnel),
+		drainingTableIDs: make(map[int]int),
+		drainingTunIPs:   make(map[int]string),
+		Slots:            NewSlotManager(maxActive),
+		ManualOverride:   make(map[int]bool),
+		Benchmarker: func(ctx context.Context, dev string, mark int) (*models.PerformanceMetrics, error) {
+			cfg := benchmark.DefaultBenchmarkConfig()
+			cfg.RoutingMark = mark
+			return benchmark.BenchmarkInterfaceWithConfig(ctx, dev, cfg)
+		},
 		ScoringEngine:          NewScoringEngine(config.ScoringConfig{}),
 		SetupDrainingRoutingFn: routing.SetupDrainingRouting,
 		ctx:                    ctx,
@@ -66,6 +70,17 @@ func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine, regio
 	// Start virtual slot counter after active + standby range
 	s.standbySlotCount.Store(int64(maxActive + maxStandby + 10))
 	return s
+}
+
+// Context binds long-lived tunnels to daemon shutdown, not qualification deadlines.
+func (s *Scheduler) Context() context.Context { return s.ctx }
+
+// NextTunnelID gives each new tunnel its own interface even while an old slot drains.
+func (s *Scheduler) NextTunnelID() int { return int(s.standbySlotCount.Add(1)) }
+
+// DrainSlotLocked is for controllers that already hold Mu.
+func (s *Scheduler) DrainSlotLocked(slot int, tunnel *openvpn.Tunnel) {
+	s.transitionToDrainingLocked(slot, tunnel)
 }
 
 // SetXraySupervisor connects the Xray supervisor to dynamically coordinate active egress slots.
@@ -82,8 +97,9 @@ func (s *Scheduler) SetSpeedTestConfig(cfg config.SpeedTestConfig) {
 
 	if !cfg.Enabled {
 		log.Println("[Scheduler] SpeedTest disabled in config; using lightweight RTT probe")
-		s.Benchmarker = func(ctx context.Context, dev string) (*models.PerformanceMetrics, error) {
+		s.Benchmarker = func(ctx context.Context, dev string, mark int) (*models.PerformanceMetrics, error) {
 			return benchmark.BenchmarkInterfaceWithConfig(ctx, dev, benchmark.BenchmarkConfig{
+				RoutingMark:  mark,
 				RTTTargetURL: cfg.RTTTargetURL,
 				Timeout:      time.Duration(cfg.TimeoutSec) * time.Second,
 			})
@@ -105,8 +121,10 @@ func (s *Scheduler) SetSpeedTestConfig(cfg config.SpeedTestConfig) {
 		benchCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
 	}
 
-	s.Benchmarker = func(ctx context.Context, dev string) (*models.PerformanceMetrics, error) {
-		return benchmark.BenchmarkInterfaceWithConfig(ctx, dev, benchCfg)
+	s.Benchmarker = func(ctx context.Context, dev string, mark int) (*models.PerformanceMetrics, error) {
+		current := benchCfg
+		current.RoutingMark = mark
+		return benchmark.BenchmarkInterfaceWithConfig(ctx, dev, current)
 	}
 	log.Printf("[Scheduler] SpeedTestConfig integrated: RTT=%s, DL=%s, UL=%s, Timeout=%v",
 		benchCfg.RTTTargetURL, benchCfg.DownloadURL, benchCfg.UploadURL, benchCfg.Timeout)
@@ -385,7 +403,9 @@ func (s *Scheduler) cleanupDrainingSlots() {
 		if elapsed > drainingTimeout {
 			log.Printf("[Scheduler] Slot %d draining timeout exceeded (%.0fs). Force stopping.", slot, elapsed.Seconds())
 			routing.ClearDrainingRouting(drainingTableID, tunIP)
-			routing.ClearSlotRouting(slot)
+			if _, active := s.ActiveSlots[slot]; !active {
+				routing.ClearSlotRouting(slot)
+			}
 			tunnel.Stop()
 			s.markNodeFailed(tunnel.Node)
 			delete(s.DrainingSlots, slot)
@@ -535,7 +555,7 @@ func (s *Scheduler) maintainStandbyPool() {
 
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
-	tunnel, err := openvpn.StartTunnel(ctx, standbyVirtualSlot, &node)
+	tunnel, err := openvpn.StartTunnel(s.ctx, standbyVirtualSlot, &node)
 	if err != nil {
 		_ = TransitionNode(database.DB, &node, models.StatusFailed)
 		return
@@ -550,14 +570,20 @@ func (s *Scheduler) maintainStandbyPool() {
 
 	// Verify the tunnel without polluting main route table
 	_ = routing.SetupSlotRouting(standbyVirtualSlot, tunnel.Interface)
+	node.ObservedExitIP = "" // Establish a fresh baseline for this new tunnel.
 	hRes := health.VerifyTunnel(ctx, standbyVirtualSlot, tunnel.Interface, routing.BaseTableID+standbyVirtualSlot, &node)
 
 	if !hRes.TunnelHealthy || hRes.Error != nil {
+		log.Printf("[Scheduler] Tunnel %s qualification failed: %v", tunnel.Interface, hRes.Error)
 		_ = routing.ClearSlotRouting(standbyVirtualSlot)
 		tunnel.Stop()
 		_ = TransitionNode(database.DB, &node, models.StatusFailed)
 		return
 	}
+
+	node.ObservedExitIP = hRes.ObservedExitIP
+	database.DB.Model(&node).Update("observed_exit_ip", node.ObservedExitIP)
+	log.Printf("[Scheduler] Verified tunnel %s: endpoint=%s, observed exit=%s", tunnel.Interface, node.IP, node.ObservedExitIP)
 
 	// 3. SPEED_TEST
 	if err := TransitionNode(database.DB, &node, models.StatusSpeedTest); err != nil {
@@ -567,7 +593,7 @@ func (s *Scheduler) maintainStandbyPool() {
 	benchFn := s.Benchmarker
 	if benchFn != nil {
 		benchCtx, benchCancel := context.WithTimeout(s.ctx, 20*time.Second)
-		perf, err := benchFn(benchCtx, tunnel.Interface)
+		perf, err := benchFn(benchCtx, tunnel.Interface, routing.BaseTableID+standbyVirtualSlot)
 		benchCancel()
 
 		_ = routing.ClearSlotRouting(standbyVirtualSlot) // Remove temp routing
@@ -582,14 +608,16 @@ func (s *Scheduler) maintainStandbyPool() {
 		node.Performance = *perf
 		if database.DB != nil {
 			database.DB.Model(&node).Updates(map[string]interface{}{
-				"perf_rtt_ms":          perf.RTT,
-				"perf_throughput_bps":  perf.Throughput,
-				"perf_download_bps":    perf.DownloadSpeed,
-				"perf_upload_bps":      perf.UploadSpeed,
-				"perf_upload_status":   perf.UploadStatus,
-				"perf_packet_loss_pct": perf.PacketLoss,
-				"perf_duration_ms":     perf.DurationMs,
-				"perf_last_checked":    perf.LastChecked,
+				"perf_rtt":                perf.RTT,
+				"perf_throughput":         perf.Throughput,
+				"perf_download_speed":     perf.DownloadSpeed,
+				"perf_upload_speed":       perf.UploadSpeed,
+				"perf_upload_status":      perf.UploadStatus,
+				"perf_speed_status":       perf.SpeedStatus,
+				"perf_packet_loss_status": perf.PacketLossStatus,
+				"perf_packet_loss":        perf.PacketLoss,
+				"perf_duration_ms":        perf.DurationMs,
+				"perf_last_checked":       perf.LastChecked,
 			})
 		}
 	} else {

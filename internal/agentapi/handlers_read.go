@@ -104,17 +104,23 @@ func handleCurrentExits(w http.ResponseWriter, r *http.Request) {
 
 	exits := make([]map[string]interface{}, 0)
 	for slot, tunnel := range sched.ActiveSlots {
+		exitIP := tunnel.Node.ObservedExitIP
+		if exitIP == "" {
+			exitIP = tunnel.Node.IP
+		}
 		exits = append(exits, map[string]interface{}{
-			"slot":       slot,
-			"status":     tunnel.State,
-			"node_id":    tunnel.Node.ID,
-			"ip":         tunnel.Node.IP,
-			"country":    tunnel.Node.Country,
-			"region":     tunnel.Node.Country, // Simplified mapping
-			"score":      tunnel.Node.Score,
-			"reputation": tunnel.Node.Reputation,
-			"throughput": tunnel.Node.Performance.Throughput,
-			"last_check": tunnel.Node.LastSeen,
+			"slot":        slot,
+			"status":      tunnel.State,
+			"node_id":     tunnel.Node.ID,
+			"ip":          exitIP,
+			"endpoint_ip": tunnel.Node.IP,
+			"interface":   tunnel.Interface,
+			"country":     tunnel.Node.Country,
+			"region":      tunnel.Node.Country, // Simplified mapping
+			"score":       tunnel.Node.Score,
+			"reputation":  tunnel.Node.Reputation,
+			"throughput":  tunnel.Node.Performance.Throughput,
+			"last_check":  tunnel.Node.LastSeen,
 		})
 	}
 	sendJSON(w, exits)

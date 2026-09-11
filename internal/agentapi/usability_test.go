@@ -3,11 +3,15 @@ package agentapi
 import (
 	"encoding/json"
 	"github.com/NaNA1337/super-proxy/internal/config"
+	"github.com/NaNA1337/super-proxy/internal/database"
+	"github.com/NaNA1337/super-proxy/internal/models"
+	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOperationLookupUsesReturnedIDAndSnapshot(t *testing.T) {
@@ -70,5 +74,37 @@ func TestUnauthenticatedRequestsDoNotDrainManagerQuota(t *testing.T) {
 		if !auth.Allow() {
 			t.Fatal("authenticated burst reduced by unauthenticated requests")
 		}
+	}
+}
+
+// A switch on an occupied slot used to deadlock by taking Scheduler.Mu twice.
+func TestManualSwitchOnOccupiedSlotDoesNotDeadlock(t *testing.T) {
+	if err := database.InitDatabase(":memory:"); err != nil {
+		t.Fatal(err)
+	}
+	s := scheduler.NewScheduler(3, 2, reputation.NewEngine(), config.RegionConfig{Primary: "JP"})
+	SetScheduler(s)
+	defer SetScheduler(nil)
+	s.SetupDrainingRoutingFn = func(int, string, string) error { return nil }
+	node := &models.Node{ID: "old-node", IP: "198.51.100.1", Status: models.StatusActive}
+	if err := database.DB.Create(node).Error; err != nil {
+		t.Fatal(err)
+	}
+	s.ActiveSlots[0] = &openvpn.Tunnel{Node: node, Interface: "nonexistent-test", State: "ACTIVE"}
+	op := createSwitchOperation("occupied-switch", 0, "missing-target")
+	lease, err := s.Slots.TryAcquireSlot(0, "manual-switch", op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { executeManualSwitch(op, lease); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("occupied-slot switch deadlocked")
+	}
+	result, _ := getOperation(op.ID)
+	if result.Status != OpFailed {
+		t.Fatalf("missing target should fail: %+v", result)
 	}
 }

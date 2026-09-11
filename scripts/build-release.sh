@@ -28,7 +28,7 @@ Version: $version
 Section: net
 Priority: optional
 Architecture: $arch
-Depends: openvpn, iproute2, iptables, ca-certificates
+Depends: openvpn, iproute2, iptables, ca-certificates, conntrack, iputils-ping
 Maintainer: NaNA1337 <mr.sime666@gmail.com>
 Homepage: https://github.com/NaNA1337/super-proxy
 Description: Multi-egress OpenVPN and Xray proxy manager

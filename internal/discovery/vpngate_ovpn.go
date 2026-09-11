@@ -53,8 +53,6 @@ var disallowedDirectives = map[string]bool{
 	"management-query-passwords": true,
 	"script-security":            true,
 	"system":                     true,
-	"persist-key":                true,
-	"persist-tun":                true,
 	"setenv":                     true,
 	"setenv-safe":                true,
 	"exec":                       true,
@@ -68,6 +66,10 @@ var disallowedDirectives = map[string]bool{
 
 // Allowed directives in untrusted VPN Gate configurations.
 var allowedDirectives = map[string]bool{
+	// VPN Gate emits these flags. Accept but omit them from the canonical config;
+	// tunnel and credential lifecycle remain controlled by the supervisor.
+	"persist-key":          true,
+	"persist-tun":          true,
 	"client":               true,
 	"proto":                true,
 	"remote":               true,

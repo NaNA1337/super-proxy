@@ -49,12 +49,7 @@ func BuildRealityClientProfile(r *http.Request) (*xray.RealityClientProfile, err
 		if cfg.Fingerprint != "" && cfg.Fingerprint != xray.DefaultRealityFP {
 			return nil, fmt.Errorf("active config fingerprint %q does not match required %q", cfg.Fingerprint, xray.DefaultRealityFP)
 		}
-		if len(cfg.ServerNames) > 0 && cfg.ServerNames[0] != "" && cfg.ServerNames[0] != xray.DefaultRealitySNI {
-			return nil, fmt.Errorf("active config SNI %q does not match required %q", cfg.ServerNames[0], xray.DefaultRealitySNI)
-		}
-		if cfg.Dest != "" && cfg.Dest != xray.DefaultRealityTarget {
-			return nil, fmt.Errorf("active config dest %q does not match required %q", cfg.Dest, xray.DefaultRealityTarget)
-		}
+
 	}
 
 	profile := &xray.RealityClientProfile{
@@ -180,16 +175,16 @@ func BuildClashMetaProxyItem(p *xray.RealityClientProfile) (map[string]interface
 	}
 
 	return map[string]interface{}{
-		"name":               p.Tag,
-		"type":               "vless",
-		"server":             p.Address,
-		"port":               p.Port,
-		"uuid":               p.UUID,
-		"network":            "tcp",
-		"tls":                true,
-		"udp":                true,
-		"flow":               p.Flow,
-		"servername":         p.SNI,
+		"name":       p.Tag,
+		"type":       "vless",
+		"server":     p.Address,
+		"port":       p.Port,
+		"uuid":       p.UUID,
+		"network":    "tcp",
+		"tls":        true,
+		"udp":        true,
+		"flow":       p.Flow,
+		"servername": p.SNI,
 		"reality-opts": map[string]interface{}{
 			"public-key": p.PublicKey,
 			"short-id":   p.ShortID,
@@ -479,11 +474,8 @@ func BuildClientConfigBundle(r *http.Request) (*ClientConfigBundle, error) {
 	if profile.Fingerprint != xray.DefaultRealityFP {
 		return nil, fmt.Errorf("runtime client fingerprint %q does not match required %q", profile.Fingerprint, xray.DefaultRealityFP)
 	}
-	if profile.SNI != xray.DefaultRealitySNI {
-		return nil, fmt.Errorf("runtime client SNI %q does not match required %q", profile.SNI, xray.DefaultRealitySNI)
-	}
-	if profile.RealityTarget != xray.DefaultRealityTarget {
-		return nil, fmt.Errorf("runtime client destination %q does not match required %q", profile.RealityTarget, xray.DefaultRealityTarget)
+	if _, _, err := xray.ValidateRealityDestination(profile.RealityTarget, profile.SNI); err != nil {
+		return nil, fmt.Errorf("runtime Reality target is invalid: %w", err)
 	}
 	if err := xray.ValidatePublicAddress(profile.Address); err != nil {
 		return nil, fmt.Errorf("runtime client address is invalid: %w", err)

@@ -179,8 +179,6 @@ func TestParseOpenVPNConfig_MaliciousDirectivesStrictlyRejected(t *testing.T) {
 		{"management-client", "management-client"},
 		{"script-security 2", "script-security 2"},
 		{"system directive", "system echo pwn"},
-		{"persist-key", "persist-key"},
-		{"persist-tun", "persist-tun"},
 		{"setenv injection", "setenv FOO bar"},
 		{"setenv-safe injection", "setenv-safe FOO bar"},
 		{"exec directive", "exec /tmp/pwn.sh"},
@@ -344,3 +342,13 @@ func TestNodeJSON_NeverLeaksPrivateKeyOrRawConfig(t *testing.T) {
 	}
 }
 
+func TestVPNGatePersistenceFlagsAreAcceptedButNotForwarded(t *testing.T) {
+	raw := "client\ndev tun\nproto tcp\nremote 203.0.113.10 443\npersist-key\npersist-tun\ncipher AES-128-CBC\ndata-ciphers AES-128-CBC\nauth SHA1\n"
+	safe, meta, err := ParseOpenVPNConfig(base64.StdEncoding.EncodeToString([]byte(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.PrimaryEndpoint.Port != 443 || strings.Contains(safe, "persist-") || !strings.Contains(safe, "route-nopull") {
+		t.Fatalf("unexpected canonical config: %s", safe)
+	}
+}

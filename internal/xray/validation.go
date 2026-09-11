@@ -13,8 +13,8 @@ const (
 	ManagementPort  = 60000
 
 	DefaultVlessPublicPort = VlessPublicPort
-	DefaultRealityTarget   = "www.microsoft.com:443"
-	DefaultRealitySNI      = "www.microsoft.com"
+	DefaultRealityTarget   = "www.cloudflare.com:443"
+	DefaultRealitySNI      = "www.cloudflare.com"
 	DefaultRealityFP       = "chrome"
 	DefaultFlow            = "xtls-rprx-vision"
 	DefaultSecurity        = "reality"
