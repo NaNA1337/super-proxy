@@ -13,8 +13,8 @@ const (
 	ManagementPort  = 60000
 
 	DefaultVlessPublicPort = VlessPublicPort
-	DefaultRealityTarget   = "www.cloudflare.com:443"
-	DefaultRealitySNI      = "www.cloudflare.com"
+	DefaultRealityTarget   = "icloud.com:443"
+	DefaultRealitySNI      = "icloud.com"
 	DefaultRealityFP       = "chrome"
 	DefaultFlow            = "xtls-rprx-vision"
 	DefaultSecurity        = "reality"

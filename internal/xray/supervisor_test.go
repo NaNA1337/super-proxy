@@ -298,11 +298,11 @@ func TestXray_VlessRealityConfigValidation(t *testing.T) {
 	if vlessCfg.Flow != "xtls-rprx-vision" {
 		t.Errorf("expected flow xtls-rprx-vision, got %s", vlessCfg.Flow)
 	}
-	if vlessCfg.Dest != "www.cloudflare.com:443" {
-		t.Errorf("expected dest www.cloudflare.com:443, got %s", vlessCfg.Dest)
+	if vlessCfg.Dest != "icloud.com:443" {
+		t.Errorf("expected dest icloud.com:443, got %s", vlessCfg.Dest)
 	}
-	if len(vlessCfg.ServerNames) == 0 || vlessCfg.ServerNames[0] != "www.cloudflare.com" {
-		t.Errorf("expected serverNames [www.cloudflare.com], got %v", vlessCfg.ServerNames)
+	if len(vlessCfg.ServerNames) == 0 || vlessCfg.ServerNames[0] != "icloud.com" {
+		t.Errorf("expected serverNames [icloud.com], got %v", vlessCfg.ServerNames)
 	}
 	if vlessCfg.Fingerprint != "chrome" {
 		t.Errorf("expected fingerprint chrome, got %s", vlessCfg.Fingerprint)
@@ -370,8 +370,8 @@ func TestXray_VlessRealityConfigValidation(t *testing.T) {
 		t.Errorf("expected security reality, got %v", streamSettings["security"])
 	}
 	realitySettings := streamSettings["realitySettings"].(map[string]interface{})
-	if realitySettings["dest"] != "www.cloudflare.com:443" {
-		t.Errorf("expected reality dest www.cloudflare.com:443, got %v", realitySettings["dest"])
+	if realitySettings["dest"] != "icloud.com:443" {
+		t.Errorf("expected reality dest icloud.com:443, got %v", realitySettings["dest"])
 	}
 
 	// Verify routing rules: active-balancer-rule-vless (port 443) and vless-non-443-block

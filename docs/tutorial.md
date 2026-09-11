@@ -102,7 +102,7 @@ xray run -c xray-client.json
 curl --proxy socks5h://127.0.0.1:10808 https://你的HTTPS验收站点/
 ```
 
-客户端出口限制 443，默认 Reality 目标与 SNI 固定为 `www.cloudflare.com:443` / `www.cloudflare.com`。不要用 HTTP/80 测试。配置中的公网地址必须是可达真实地址，不是文档 example 域名。
+客户端出口限制 443，默认 Reality 目标与 SNI 固定为 `icloud.com:443` / `icloud.com`。不要用 HTTP/80 测试。配置中的公网地址必须是可达真实地址，不是文档 example 域名。
 
 ## 7. 公网完整验收清单
 

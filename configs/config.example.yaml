@@ -27,7 +27,7 @@ xray:
     public_key: "" # Derived from private_key when omitted.
     short_ids: []
     flow: "xtls-rprx-vision"
-    dest: "www.cloudflare.com:443"
-    server_names: ["www.cloudflare.com"]
+    dest: "icloud.com:443"
+    server_names: ["icloud.com"]
     fingerprint: "chrome"
     outbound_only_443: true
