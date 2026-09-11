@@ -2,10 +2,10 @@ package agentapi
 
 import (
 	"encoding/json"
-        "fmt"
-        "strconv"
+	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +13,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
+	"github.com/NaNA1337/super-proxy/internal/routing"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/NaNA1337/super-proxy/internal/xray"
 	"github.com/shirou/gopsutil/v3/cpu"
@@ -47,13 +48,17 @@ func SetScheduler(s *scheduler.Scheduler) {
 	sched = s
 }
 
+var buildVersion = "dev"
+
+func SetVersion(version string) { buildVersion = version }
+
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	hostname, _ := os.Hostname()
 	resp := map[string]interface{}{
 		"server_id": hostname,
 		"name":      "Super-Proxy Egress Manager",
 		"region":    os.Getenv("XRAY_MANAGER_REGION"), // E.g., JP
-		"version":   "1.0.0",
+		"version":   buildVersion,
 		"status":    "online",
 		"uptime":    int64(time.Since(appStartTime).Seconds()),
 	}
@@ -97,19 +102,19 @@ func handleCurrentExits(w http.ResponseWriter, r *http.Request) {
 	sched.Mu.Lock()
 	defer sched.Mu.Unlock()
 
-	var exits []map[string]interface{}
+	exits := make([]map[string]interface{}, 0)
 	for slot, tunnel := range sched.ActiveSlots {
 		exits = append(exits, map[string]interface{}{
-			"slot":         slot,
-			"status":       tunnel.State,
-			"node_id":      tunnel.Node.ID,
-			"ip":           tunnel.Node.IP,
-			"country":      tunnel.Node.Country,
-			"region":       tunnel.Node.Country, // Simplified mapping
-			"score":        tunnel.Node.Score,
-			"reputation":   tunnel.Node.Reputation,
-			"throughput":   tunnel.Node.Performance.Throughput,
-			"last_check":   tunnel.Node.LastSeen,
+			"slot":       slot,
+			"status":     tunnel.State,
+			"node_id":    tunnel.Node.ID,
+			"ip":         tunnel.Node.IP,
+			"country":    tunnel.Node.Country,
+			"region":     tunnel.Node.Country, // Simplified mapping
+			"score":      tunnel.Node.Score,
+			"reputation": tunnel.Node.Reputation,
+			"throughput": tunnel.Node.Performance.Throughput,
+			"last_check": tunnel.Node.LastSeen,
 		})
 	}
 	sendJSON(w, exits)
@@ -123,12 +128,12 @@ func handleSlots(w http.ResponseWriter, r *http.Request) {
 
 	sched.Mu.Lock()
 	defer sched.Mu.Unlock()
-	
+
 	slots := make(map[int]string)
 	for k, v := range sched.ActiveSlots {
 		slots[k] = v.Node.ID
 	}
-	
+
 	sendJSON(w, map[string]interface{}{
 		"total_configured": sched.MaxActive,
 		"slots":            slots,
@@ -141,9 +146,9 @@ func handlePool(w http.ResponseWriter, r *http.Request) {
 		Status string
 		Count  int
 	}
-	
+
 	database.DB.Model(&models.Node{}).Select("status, count(*) as count").Group("status").Scan(&counts)
-	
+
 	resp := map[string]int{
 		"active":    0,
 		"standby":   0,
@@ -169,15 +174,15 @@ func handlePool(w http.ResponseWriter, r *http.Request) {
 			resp["rejected"] += c.Count
 		}
 	}
-	
+
 	sendJSON(w, resp)
 }
 
 func handlePoolQualified(w http.ResponseWriter, r *http.Request) {
-	var nodes []models.Node
+	nodes := make([]models.Node, 0)
 	// Only return nodes that have been vetted (DISCOVERED/STANDBY)
 	database.DB.Where("status IN ?", []string{"DISCOVERED", "STANDBY"}).Find(&nodes)
-	
+
 	// Strip out raw credentials and sanitize config for list endpoints
 	for i := range nodes {
 		nodes[i].OpenVPN = ""
@@ -255,7 +260,7 @@ func handleNodesList(w http.ResponseWriter, r *http.Request) {
 		offset = o
 	}
 
-	var nodes []models.Node
+	nodes := make([]models.Node, 0)
 	query.Order("score DESC, uptime DESC").Limit(limit).Offset(offset).Find(&nodes)
 
 	for i := range nodes {
@@ -290,7 +295,7 @@ func handleRoutingOverview(w http.ResponseWriter, r *http.Request) {
 	if sched != nil {
 		sched.Mu.Lock()
 		for i := 0; i < sched.MaxActive; i++ {
-			tableID := 10000 + i
+			tableID := routing.BaseTableID + i
 			info := SlotRouteInfo{
 				Slot:      i,
 				TableID:   tableID,

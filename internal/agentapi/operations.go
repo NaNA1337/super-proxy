@@ -13,7 +13,6 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/routing"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
-	"github.com/google/uuid"
 )
 
 type OperationStatus string
@@ -47,9 +46,9 @@ func init() {
 	go cleanupOldOperations()
 }
 
-func createSwitchOperation(slot int, targetNodeID string) *SwitchOperation {
+func createSwitchOperation(id string, slot int, targetNodeID string) *SwitchOperation {
 	op := &SwitchOperation{
-		ID:        uuid.New().String(),
+		ID:        id,
 		Slot:      slot,
 		TargetID:  targetNodeID,
 		Status:    OpRequested,
@@ -66,7 +65,11 @@ func getOperation(id string) (*SwitchOperation, bool) {
 	opsMu.RLock()
 	defer opsMu.RUnlock()
 	op, exists := ops[id]
-	return op, exists
+	if !exists {
+		return nil, false
+	}
+	snapshot := *op
+	return &snapshot, true
 }
 
 func updateOpStatus(op *SwitchOperation, status OperationStatus, errStr string) {

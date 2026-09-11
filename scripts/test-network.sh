@@ -79,9 +79,9 @@ for slot in 0 1 2; do
 done
 
 # Verify rules exist in namespace
-in_ns ip rule show | grep -q "100.*table 100" || log_fail "Missing ip rule for table 100"
-in_ns ip rule show | grep -q "101.*table 101" || log_fail "Missing ip rule for table 101"
-in_ns ip rule show | grep -q "102.*table 102" || log_fail "Missing ip rule for table 102"
+in_ns ip rule show | grep -E "fwmark 0x64.*(lookup|table) 100" >/dev/null || log_fail "Missing ip rule for table 100"
+in_ns ip rule show | grep -E "fwmark 0x65.*(lookup|table) 101" >/dev/null || log_fail "Missing ip rule for table 101"
+in_ns ip rule show | grep -E "fwmark 0x66.*(lookup|table) 102" >/dev/null || log_fail "Missing ip rule for table 102"
 log_info "PASS: Policy routing rules verified."
 
 # Test 2: Idempotent custom iptables chains
@@ -115,13 +115,13 @@ log_info "PASS: Iptables custom chains are idempotent."
 log_info "4. Testing /32 Endpoint Underlay Bypass..."
 ENDPOINT_IP="198.51.100.50"
 in_ns ip route add "${ENDPOINT_IP}/32" dev dummy0 table main
-in_ns ip route show table main | grep -q "${ENDPOINT_IP}" || log_fail "Endpoint /32 route missing"
+in_ns ip route show table main | grep "${ENDPOINT_IP}" >/dev/null || log_fail "Endpoint /32 route missing"
 log_info "PASS: Endpoint /32 underlay route correctly established."
 
 # Test 4: IPv6 Leak Protection
 log_info "5. Testing IPv6 Leak Protection Rule..."
 in_ns ip -6 rule add unreachable priority 50
-in_ns ip -6 rule show | grep -q "unreachable" || log_fail "IPv6 unreachable rule missing"
+in_ns ip -6 rule show | grep "unreachable" >/dev/null || log_fail "IPv6 unreachable rule missing"
 in_ns ip -6 rule del unreachable priority 50
 log_info "PASS: IPv6 leak protection verified."
 
@@ -139,12 +139,12 @@ in_ns ip rule add from "${TUN_IP}" table "${DRAIN_TABLE}" priority 90
 in_ns ip route add default dev dummy0 table "${DRAIN_TABLE}"
 
 # Verify active rule is gone
-if in_ns ip rule show | grep -q "fwmark 0x64.*table 100"; then
+if in_ns ip rule show | grep -E "fwmark 0x64.*(lookup|table) 100" >/dev/null; then
     log_fail "Active fwmark rule 100 still present during DRAINING!"
 fi
 
 # Verify draining rule is in place with higher priority (90 < 100)
-in_ns ip rule show | grep -q "from 10.100.0.2.*table 200" || log_fail "Draining route table 200 missing"
+in_ns ip rule show | grep -E "from 10.100.0.2.*(lookup|table) 200" >/dev/null || log_fail "Draining route table 200 missing"
 log_info "PASS: DRAINING data path verified: new connections cannot enter table 100; existing flow on 10.100.0.2 pinned to table 200."
 
 log_info "============================================================"

@@ -28,8 +28,6 @@ func TestP0_XrayConfigGeneration_ArbitraryDirectory(t *testing.T) {
 	}
 
 	err = xray.GenerateConfigWithOptions(opts)
-	// Currently this fails if MkdirAll is not performed
-	if err != nil {
-		t.Logf("Observed current behavior: GenerateConfigWithOptions failed on non-existent directory: %v", err)
-	}
+	require.NoError(t, err)
+	require.FileExists(t, nestedConfigPath)
 }

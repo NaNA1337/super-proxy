@@ -18,19 +18,19 @@ import (
 // VlessConfig holds options for configuring a VLESS Reality ingress.
 type VlessConfig struct {
 	Enabled             bool     `json:"enabled" mapstructure:"enabled"`
-	Listen              string   `json:"listen" mapstructure:"listen"`                         // default "0.0.0.0"
-	Port                int      `json:"port" mapstructure:"port"`                             // default 443 (strictly TCP/443)
+	Listen              string   `json:"listen" mapstructure:"listen"`                           // default "0.0.0.0"
+	Port                int      `json:"port" mapstructure:"port"`                               // default 443 (strictly TCP/443)
 	PublicAddress       string   `json:"public_address,omitempty" mapstructure:"public_address"` // optional explicit public domain/IP
 	UUID                string   `json:"uuid" mapstructure:"uuid"`
-	Flow                string   `json:"flow" mapstructure:"flow"`                             // default "xtls-rprx-vision"
-	Dest                string   `json:"dest" mapstructure:"dest"`                             // default "www.microsoft.com:443"
-	ServerNames         []string `json:"server_names" mapstructure:"server_names"`             // default ["www.microsoft.com"]
+	Flow                string   `json:"flow" mapstructure:"flow"`                 // default "xtls-rprx-vision"
+	Dest                string   `json:"dest" mapstructure:"dest"`                 // default "www.microsoft.com:443"
+	ServerNames         []string `json:"server_names" mapstructure:"server_names"` // default ["www.microsoft.com"]
 	PrivateKey          string   `json:"private_key" mapstructure:"private_key"`
 	PublicKey           string   `json:"public_key" mapstructure:"public_key"`
 	ShortIds            []string `json:"short_ids" mapstructure:"short_ids"`
 	Fingerprint         string   `json:"fingerprint" mapstructure:"fingerprint"`               // default "chrome" (uTLS)
-	OutboundOnlyPort443 bool     `json:"outbound_only_443" mapstructure:"outbound_only_443"`  // default true (outbound restricted to 443)
-	OnlyPort443         bool     `json:"only_port_443,omitempty" mapstructure:"only_port_443"`// backward-compatible alias
+	OutboundOnlyPort443 bool     `json:"outbound_only_443" mapstructure:"outbound_only_443"`   // default true (outbound restricted to 443)
+	OnlyPort443         bool     `json:"only_port_443,omitempty" mapstructure:"only_port_443"` // backward-compatible alias
 }
 
 // ConfigOptions holds options for generating an Xray configuration.
@@ -109,18 +109,31 @@ func NormalizeVlessConfig(cfg *VlessConfig) error {
 	if len(cfg.ShortIds) == 0 || cfg.ShortIds[0] == "" {
 		cfg.ShortIds = []string{GenerateShortID()}
 	}
-	if cfg.PrivateKey == "" || cfg.PublicKey == "" {
+	if cfg.PrivateKey == "" {
+		if cfg.PublicKey != "" {
+			return fmt.Errorf("reality private_key is required when public_key is supplied")
+		}
 		priv, pub, err := GenerateX25519Keypair()
 		if err != nil {
 			return err
 		}
-		if cfg.PrivateKey == "" {
-			cfg.PrivateKey = priv
+		cfg.PrivateKey, cfg.PublicKey = priv, pub
+	} else {
+		raw, err := base64.RawURLEncoding.DecodeString(cfg.PrivateKey)
+		if err != nil {
+			return fmt.Errorf("invalid reality private_key: %w", err)
 		}
-		if cfg.PublicKey == "" {
-			cfg.PublicKey = pub
+		priv, err := ecdh.X25519().NewPrivateKey(raw)
+		if err != nil {
+			return fmt.Errorf("invalid reality private_key: %w", err)
 		}
+		pub := base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())
+		if cfg.PublicKey != "" && cfg.PublicKey != pub {
+			return fmt.Errorf("reality public_key does not match private_key")
+		}
+		cfg.PublicKey = pub
 	}
+
 	if !cfg.OutboundOnlyPort443 && !cfg.OnlyPort443 {
 		cfg.OutboundOnlyPort443 = true
 		cfg.OnlyPort443 = true

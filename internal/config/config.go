@@ -58,14 +58,14 @@ type ReputationConfig struct {
 }
 
 type ScoringConfig struct {
-	VPNPenalty     int     `mapstructure:"vpn_penalty"`     // default 5
-	TorPenalty     int     `mapstructure:"tor_penalty"`     // default 50
-	HostingPenalty int     `mapstructure:"hosting_penalty"` // default 10
-	PrefixBadLimit int     `mapstructure:"prefix_bad_limit"`// default 3 bad IPs
-	PrefixPenalty  int     `mapstructure:"prefix_penalty"`  // default 20
-	FailurePenalty int     `mapstructure:"failure_penalty"` // default 30 per fail
-	SpeedWeight    float64 `mapstructure:"speed_weight"`    // default 1.0
-	LatencyWeight  float64 `mapstructure:"latency_weight"`  // default 0.5
+	VPNPenalty     int     `mapstructure:"vpn_penalty"`      // default 5
+	TorPenalty     int     `mapstructure:"tor_penalty"`      // default 50
+	HostingPenalty int     `mapstructure:"hosting_penalty"`  // default 10
+	PrefixBadLimit int     `mapstructure:"prefix_bad_limit"` // default 3 bad IPs
+	PrefixPenalty  int     `mapstructure:"prefix_penalty"`   // default 20
+	FailurePenalty int     `mapstructure:"failure_penalty"`  // default 30 per fail
+	SpeedWeight    float64 `mapstructure:"speed_weight"`     // default 1.0
+	LatencyWeight  float64 `mapstructure:"latency_weight"`   // default 0.5
 }
 
 type SpeedTestConfig struct {
@@ -79,52 +79,53 @@ type SpeedTestConfig struct {
 
 // LoadConfig loads the configuration from file and environment variables
 func LoadConfig(path string) (*Config, error) {
-	viper.SetConfigFile(path)
-	viper.SetConfigType("yaml")
-	
-	// Default settings
-	viper.SetDefault("database.path", "xray_manager.db")
-	viper.SetDefault("discovery.url", "http://www.vpngate.net/api/iphone/")
-	viper.SetDefault("discovery.interval", 15)
-	viper.SetDefault("api.listen", "127.0.0.1")
-	viper.SetDefault("api.port", 60000)
-	viper.SetDefault("reputation.failure_policy", "conservative")
-	viper.SetDefault("scoring.vpn_penalty", 5)
-	viper.SetDefault("scoring.tor_penalty", 50)
-	viper.SetDefault("scoring.hosting_penalty", 10)
-	viper.SetDefault("scoring.prefix_bad_limit", 3)
-	viper.SetDefault("scoring.prefix_penalty", 20)
-	viper.SetDefault("scoring.failure_penalty", 30)
-	viper.SetDefault("scoring.speed_weight", 1.0)
-	viper.SetDefault("scoring.latency_weight", 0.5)
-	viper.SetDefault("speed_test.enabled", true)
-	viper.SetDefault("speed_test.rtt_target_url", "https://1.1.1.1")
-	viper.SetDefault("speed_test.download_url", "https://speed.cloudflare.com/__down?bytes=5000000")
-	viper.SetDefault("speed_test.upload_url", "https://speed.cloudflare.com/__up")
-	viper.SetDefault("speed_test.timeout_sec", 15)
-	viper.SetDefault("speed_test.ping_targets", []string{"1.1.1.1", "8.8.8.8"})
-	viper.SetDefault("xray.vless.enabled", false)
-	viper.SetDefault("xray.vless.port", xray.DefaultVlessPublicPort)
-	viper.SetDefault("xray.vless.flow", xray.DefaultFlow)
-	viper.SetDefault("xray.vless.dest", xray.DefaultRealityTarget)
-	viper.SetDefault("xray.vless.server_names", []string{xray.DefaultRealitySNI})
-	viper.SetDefault("xray.vless.fingerprint", xray.DefaultRealityFP)
-	viper.SetDefault("xray.vless.outbound_only_443", true)
-	viper.SetDefault("xray.vless.only_port_443", true)
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigType("yaml")
 
-	viper.SetEnvPrefix("XRAY_MANAGER")
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	viper.AutomaticEnv()
+	// Default settings
+	v.SetDefault("database.path", "xray_manager.db")
+	v.SetDefault("discovery.url", "http://www.vpngate.net/api/iphone/")
+	v.SetDefault("discovery.interval", 15)
+	v.SetDefault("api.listen", "127.0.0.1")
+	v.SetDefault("api.port", 60000)
+	v.SetDefault("reputation.failure_policy", "conservative")
+	v.SetDefault("scoring.vpn_penalty", 5)
+	v.SetDefault("scoring.tor_penalty", 50)
+	v.SetDefault("scoring.hosting_penalty", 10)
+	v.SetDefault("scoring.prefix_bad_limit", 3)
+	v.SetDefault("scoring.prefix_penalty", 20)
+	v.SetDefault("scoring.failure_penalty", 30)
+	v.SetDefault("scoring.speed_weight", 1.0)
+	v.SetDefault("scoring.latency_weight", 0.5)
+	v.SetDefault("speed_test.enabled", true)
+	v.SetDefault("speed_test.rtt_target_url", "https://1.1.1.1")
+	v.SetDefault("speed_test.download_url", "https://speed.cloudflare.com/__down?bytes=5000000")
+	v.SetDefault("speed_test.upload_url", "https://speed.cloudflare.com/__up")
+	v.SetDefault("speed_test.timeout_sec", 15)
+	v.SetDefault("speed_test.ping_targets", []string{"1.1.1.1", "8.8.8.8"})
+	v.SetDefault("xray.vless.enabled", false)
+	v.SetDefault("xray.vless.port", xray.DefaultVlessPublicPort)
+	v.SetDefault("xray.vless.flow", xray.DefaultFlow)
+	v.SetDefault("xray.vless.dest", xray.DefaultRealityTarget)
+	v.SetDefault("xray.vless.server_names", []string{xray.DefaultRealitySNI})
+	v.SetDefault("xray.vless.fingerprint", xray.DefaultRealityFP)
+	v.SetDefault("xray.vless.outbound_only_443", true)
+	v.SetDefault("xray.vless.only_port_443", true)
+
+	v.SetEnvPrefix("XRAY_MANAGER")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
 
 	var cfg Config
-	if err := viper.ReadInConfig(); err != nil {
+	if err := v.ReadInConfig(); err != nil {
 		// It's okay if config file doesn't exist, we can rely on defaults/env
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return nil, err
 		}
 	}
 
-	err := viper.Unmarshal(&cfg)
+	err := v.Unmarshal(&cfg)
 	if err != nil {
 		return nil, err
 	}

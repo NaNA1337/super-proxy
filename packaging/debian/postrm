@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+# Configuration, certificates and databases are deliberately retained for recovery.
+if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi

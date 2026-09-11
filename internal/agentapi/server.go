@@ -2,9 +2,11 @@ package agentapi
 
 import (
 	"crypto/tls"
-	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
@@ -18,6 +20,14 @@ func StartServer(port int, schedulerInstance *scheduler.Scheduler, configKey str
 
 // StartServerWithAddr initializes and starts the Agent API Control Plane on a specific address.
 func StartServerWithAddr(listenAddr string, port int, schedulerInstance *scheduler.Scheduler, configKey string) *http.Server {
+	return StartServerWithTLSPaths(listenAddr, port, schedulerInstance, configKey, "configs/cert.pem", "configs/key.pem")
+}
+
+// StartServerWithTLSPaths uses explicit persistent certificate paths, independent of CWD.
+func StartServerWithTLSPaths(listenAddr string, port int, schedulerInstance *scheduler.Scheduler, configKey, certPath, keyPath string) *http.Server {
+	if key := os.Getenv("XRAY_MANAGER_API_KEY"); key != "" {
+		configKey = key
+	}
 	if listenAddr == "" {
 		listenAddr = "127.0.0.1"
 	}
@@ -33,10 +43,10 @@ func StartServerWithAddr(listenAddr string, port int, schedulerInstance *schedul
 	}
 
 	handler := NewHandler(schedulerInstance, configKey)
-	addr := fmt.Sprintf("%s:%d", listenAddr, port)
+	addr := net.JoinHostPort(listenAddr, strconv.Itoa(port))
 
 	// Generate in-memory self-signed TLS cert
-	tlsCert, err := LoadOrGenerateCert("configs/cert.pem", "configs/key.pem")
+	tlsCert, err := LoadOrGenerateCert(certPath, keyPath)
 	if err != nil {
 		log.Fatalf("[AgentAPI] Failed to generate TLS certificate: %v", err)
 	}

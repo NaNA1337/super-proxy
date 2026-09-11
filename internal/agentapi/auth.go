@@ -15,9 +15,9 @@ import (
 )
 
 var (
-	masterAPIKey          = ""
-	subTokensMu           sync.RWMutex
-	subTokenHashes        = make(map[[32]byte]bool)
+	masterAPIKey   = ""
+	subTokensMu    sync.RWMutex
+	subTokenHashes = make(map[[32]byte]bool)
 )
 
 func InitAuth(configKey string) {
@@ -101,6 +101,7 @@ func sanitizeURI(uri string) string {
 	}
 	if q.Has("key") {
 		q.Set("key", "[REDACTED]")
+		modified = true
 	}
 	if modified {
 		u.RawQuery = q.Encode()

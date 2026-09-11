@@ -1,31 +1,33 @@
+# Development baseline: no public VLESS ingress until explicitly enabled.
+# For production, generate stable keys with cmd/init-config; see README.md.
 region:
   primary: JP
-  fallback:
-    - KR
-    - SG
-
+  fallback: [KR, SG]
 database:
-  path: xray_manager.db
-
+  path: /var/lib/super-proxy/manager.db
 discovery:
-  url: "http://www.vpngate.net/api/iphone/"
+  url: "https://www.vpngate.net/api/iphone/"
   interval: 15
-
 reputation:
   enabled: false
-
+  # Used when enabled=true. conservative rejects UNKNOWN; lenient allows it.
+  failure_policy: conservative
 api:
   listen: "127.0.0.1"
   port: 60000
-
+  key: "" # Required: generate a random token or set XRAY_MANAGER_API_KEY.
 xray:
+  config_path: /var/lib/super-proxy/xray_config.json
   vless:
     enabled: false
+    public_address: "" # Actual public IPv4 / DNS name, not the VPN exit IP.
     port: 443
+    uuid: "" # Persist UUID, private_key and short_ids before enabling production ingress.
+    private_key: ""
+    public_key: "" # Derived from private_key when omitted.
+    short_ids: []
     flow: "xtls-rprx-vision"
     dest: "www.microsoft.com:443"
-    server_names:
-      - "www.microsoft.com"
+    server_names: ["www.microsoft.com"]
     fingerprint: "chrome"
     outbound_only_443: true
-

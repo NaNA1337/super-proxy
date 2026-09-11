@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -24,8 +25,15 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+var version = "dev"
+var commit = "unknown"
+
 func main() {
-	log.Println("Starting Super-Proxy Egress Manager Daemon...")
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Printf("super-proxy %s (%s)\n", version, commit)
+		return
+	}
+	log.Printf("Starting Super-Proxy %s (%s)...", version, commit)
 
 	// P2: Routing Diagnostics Command
 	if len(os.Args) > 1 && os.Args[1] == "diagnose" {
@@ -47,8 +55,8 @@ func main() {
 	if len(os.Args) > 1 {
 		cfgPath = os.Args[1]
 	}
-	// Fallback to local example if the system path doesn't exist
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+	// Only the implicit default may fall back to the development example.
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) && len(os.Args) == 1 {
 		cfgPath = "configs/config.example.yaml"
 		log.Printf("Warning: using fallback config %s (production should use /etc/super-proxy/config.yaml)", cfgPath)
 	}
@@ -83,8 +91,12 @@ func main() {
 	}
 
 	// 4. Initialize Reputation Engine with multi-provider support
+	reputationPolicy := cfg.Reputation.FailurePolicy
+	if !cfg.Reputation.Enabled {
+		reputationPolicy = "lenient"
+	}
 	repEngine := reputation.NewEngineWithConfig(reputation.EngineConfig{
-		FailurePolicy: cfg.Reputation.FailurePolicy,
+		FailurePolicy: reputationPolicy,
 		CacheTTL:      24 * time.Hour,
 	})
 	repEngine.SetDB(database.DB)
@@ -140,23 +152,7 @@ func main() {
 		log.Println("[Reputation] Engine disabled in config")
 	}
 
-	// 5. Initial Discovery (Bootstrap pool if empty)
-	nodes, err := discovery.FetchAndParseNodes(cfg.Discovery.URL)
-	if err != nil {
-		log.Printf("Warning: Failed initial VPN Gate fetch (will retry later): %v", err)
-	} else {
-		err := database.DB.Transaction(func(tx *gorm.DB) error {
-			return tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "id"}},
-				DoUpdates: clause.AssignmentColumns(models.NodeUpsertColumns),
-			}).Create(&nodes).Error
-		})
-		if err != nil {
-			log.Printf("Warning: Initial node bootstrap transaction failed: %v", err)
-		} else {
-			log.Printf("Bootstrapped %d nodes into database.", len(nodes))
-		}
-	}
+	// Initial discovery runs in the background after local services are ready.
 
 	// 6. Initialize Xray Supervisor (Config generation, validation, execution, and health monitoring)
 	xrayConfigPath := cfg.Xray.ConfigPath
@@ -192,6 +188,14 @@ func main() {
 	}
 
 	xsup := xray.NewSupervisor(xrayConfigPath, 10085, "127.0.0.1", 1080, 3)
+	if vlessCfg.Enabled && vlessCfg.PublicAddress != "" {
+		if err := xray.ValidatePublicAddress(vlessCfg.PublicAddress); err != nil {
+			log.Fatalf("Invalid VLESS public address: %v", err)
+		}
+		if err := xsup.SetPublicAddress(vlessCfg.PublicAddress); err != nil {
+			log.Fatalf("Failed to set VLESS public address: %v", err)
+		}
+	}
 	xsup.OnRestart = func(attempt int) {
 		metrics.XrayRestarts.Inc()
 	}
@@ -236,7 +240,9 @@ func main() {
 	if apiKey == "" {
 		apiKey = cfg.APIKey
 	}
-	apiServer := agentapi.StartServerWithAddr(cfg.API.Listen, cfg.API.Port, sched, apiKey)
+	agentapi.SetVersion(version)
+	apiServer := agentapi.StartServerWithTLSPaths(cfg.API.Listen, cfg.API.Port, sched, apiKey,
+		filepath.Join(filepath.Dir(cfgPath), "cert.pem"), filepath.Join(filepath.Dir(cfgPath), "key.pem"))
 	log.Printf("Agent API Server listening on %s:%d.", cfg.API.Listen, cfg.API.Port)
 
 	// 11. Wait for Interrupt for Graceful Shutdown
@@ -282,17 +288,11 @@ func runPeriodicDiscovery(ctx context.Context, url string, interval time.Duratio
 	defer ticker.Stop()
 
 	for {
-		select {
-		case <-ctx.Done():
-			log.Println("[Discovery] Periodic discovery loop stopped.")
-			return
-		case <-ticker.C:
-			nodes, err := discovery.FetchAndParseNodes(url)
-			if err != nil {
-				log.Printf("[Discovery] Periodic fetch failed: %v", err)
-				continue
-			}
-
+		// Fetch once immediately, then on the configured interval. Never gate API startup on the network.
+		nodes, err := discovery.FetchAndParseNodes(url)
+		if err != nil {
+			log.Printf("[Discovery] Fetch failed (will retry): %v", err)
+		} else if len(nodes) > 0 {
 			txErr := database.DB.Transaction(func(tx *gorm.DB) error {
 				return tx.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "id"}},
@@ -300,10 +300,15 @@ func runPeriodicDiscovery(ctx context.Context, url string, interval time.Duratio
 				}).Create(&nodes).Error
 			})
 			if txErr != nil {
-				log.Printf("[Discovery] Periodic refresh transaction failed: %v", txErr)
+				log.Printf("[Discovery] Refresh failed: %v", txErr)
 			} else {
-				log.Printf("[Discovery] Refreshed %d nodes with updated scores and configs.", len(nodes))
+				log.Printf("[Discovery] Refreshed %d nodes", len(nodes))
 			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }

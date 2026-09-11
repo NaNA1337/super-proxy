@@ -13,99 +13,51 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestP0_Daemon_StartupFromArbitraryCWD verifies that the compiled production binary
-// can cleanly start, initialize database, generate Xray configs, and initialize
-// routing/firewall when executed with WorkingDirectory = / (root directory).
+// Run the real daemon in its own network namespace: its firewall and fixed
+// ports must never collide with a running installation on the development host.
 func TestP0_Daemon_StartupFromArbitraryCWD(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("Skipping root daemon startup test: requires root privileges")
+		t.Skip("requires root and network namespaces")
 	}
-
-	tempDir, err := os.MkdirTemp("", "superproxy_root_cwd_*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-
-	configDir := filepath.Join(tempDir, "etc")
-	require.NoError(t, os.MkdirAll(configDir, 0755))
-
-	dbDir := filepath.Join(tempDir, "var")
-	require.NoError(t, os.MkdirAll(dbDir, 0755))
-
-	configPath := filepath.Join(configDir, "config.yaml")
-	cfgContent := fmt.Sprintf(`region:
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(fmt.Sprintf(`region:
   primary: JP
 database:
-  path: "%s/manager.db"
+  path: %s/manager.db
 discovery:
-  url: "http://127.0.0.1:9"
+  url: http://127.0.0.1:9
   interval: 60
 api:
-  listen: "127.0.0.1"
+  listen: 127.0.0.1
   port: 60000
-`, dbDir)
-	require.NoError(t, os.WriteFile(configPath, []byte(cfgContent), 0644))
-
-	binPath := filepath.Join(tempDir, "super-proxy-bin")
-	buildCmd := exec.Command("go", "build", "-trimpath", "-o", binPath, "github.com/NaNA1337/super-proxy/cmd/manager")
-	buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-	buildOut, err := buildCmd.CombinedOutput()
-	require.NoError(t, err, "Build failed: %s", string(buildOut))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+  key: isolated-startup-test
+`, dir)), 0600))
+	binPath := filepath.Join(dir, "super-proxy")
+	build := exec.Command("go", "build", "-trimpath", "-o", binPath, "github.com/NaNA1337/super-proxy/cmd/manager")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	out, err := build.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-
-	cmd := exec.CommandContext(ctx, binPath, configPath)
-	cmd.Dir = "/" // Execute from root directory!
+	cmd := exec.CommandContext(ctx, "unshare", "--net", "--mount", "bash", "-c", `
+set -eu
+mount -t tmpfs tmpfs /run
+ip link set lo up
+"$1" "$2" > "$3" 2>&1 &
+daemon_pid=$!
+trap 'kill -TERM "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" || true' EXIT
+for i in $(seq 1 100); do
+ if curl --silent --fail --insecure -H 'Authorization: Bearer isolated-startup-test' https://127.0.0.1:60000/api/v1/status > /dev/null; then exit 0; fi
+ sleep 0.1
+done
+cat "$3"
+exit 1
+`, "startup-test", binPath, cfgPath, filepath.Join(dir, "daemon.log"))
+	cmd.Dir = "/"
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	require.NoError(t, err)
-	cmd.Stderr = cmd.Stdout
-
-	err = cmd.Start()
-	require.NoError(t, err)
-
-	// Wait for process to reach "Agent API Server listening" or terminate early on failure
-	startedChan := make(chan bool, 1)
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, rerr := stdoutPipe.Read(buf)
-			if n > 0 {
-				output := string(buf[:n])
-				t.Logf("[daemon output]: %s", output)
-				if containsAny(output, "Agent API Server listening", "Server listening securely") {
-					startedChan <- true
-					return
-				}
-			}
-			if rerr != nil {
-				return
-			}
-		}
-	}()
-
-	select {
-	case <-startedChan:
-		t.Log("Daemon successfully started from CWD / without crashing!")
-	case <-time.After(8 * time.Second):
-		t.Fatal("Daemon failed to reach listening state within 8s when executed from CWD /")
-	}
-
-	// Clean shutdown via SIGINT
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
-	_ = cmd.Wait()
-}
-
-func containsAny(s string, substrs ...string) bool {
-	for _, sub := range substrs {
-		if len(s) >= len(sub) {
-			for i := 0; i+len(sub) <= len(s); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, "startup from / did not serve authenticated HTTPS: %s", out)
+	require.FileExists(t, filepath.Join(dir, "cert.pem"))
+	require.FileExists(t, filepath.Join(dir, "key.pem"))
 }

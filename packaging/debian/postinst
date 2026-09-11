@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    install -d -m 750 /etc/super-proxy /var/lib/super-proxy
+    if [ ! -e /etc/super-proxy/config.yaml ]; then
+        /usr/bin/super-proxy-init-config -management-only -output /etc/super-proxy/config.yaml
+    fi
+    chmod 600 /etc/super-proxy/config.yaml
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        systemctl try-restart super-proxy.service || true
+    fi
+    echo 'Install Xray-core, configure /etc/super-proxy/config.yaml, then systemctl enable --now super-proxy.'
+    echo 'Existing configuration and credentials were preserved. New installs default to API-only mode.'
+fi

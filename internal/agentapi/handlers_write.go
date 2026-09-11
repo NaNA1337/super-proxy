@@ -143,13 +143,13 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create async operation
-	op := createSwitchOperation(slot, req.NodeID)
-	op.ID = opID // Match the lease operation ID
+	op := createSwitchOperation(opID, slot, req.NodeID)
 
 	// Execute state machine in background with generation lease
 	go executeManualSwitch(op, lease)
 
 	// Return 202 Accepted
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	sendJSON(w, map[string]string{
 		"operation_id": op.ID,

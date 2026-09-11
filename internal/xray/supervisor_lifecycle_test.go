@@ -28,14 +28,14 @@ func createTestVlessConfig(t *testing.T, apiPort, socksPort int) (string, xray.V
 	configPath := filepath.Join(tempDir, fmt.Sprintf("xray_vless_%d.json", apiPort))
 
 	vlessCfg := xray.VlessConfig{
-		Enabled:             true,
-		Port:                443,
-		UUID:                "b831381d-6324-4d53-ad4f-8cda48b30811",
-		Flow:                "xtls-rprx-vision",
-		Dest:                "www.microsoft.com:443",
-		ServerNames:         []string{"www.microsoft.com"},
-		Fingerprint:         "chrome",
-		PublicKey:           "Af0aicE9KbySwRkPTZJrI0PfgEH5g3nydVMA79RGBCg",
+		Enabled:     true,
+		Port:        443,
+		UUID:        "b831381d-6324-4d53-ad4f-8cda48b30811",
+		Flow:        "xtls-rprx-vision",
+		Dest:        "www.microsoft.com:443",
+		ServerNames: []string{"www.microsoft.com"},
+		Fingerprint: "chrome",
+
 		ShortIds:            []string{"0123456789abcdef"},
 		OutboundOnlyPort443: true,
 	}

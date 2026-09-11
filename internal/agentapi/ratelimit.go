@@ -66,23 +66,19 @@ func getVisitorLimiter(ip string, isAuthenticated bool) *rate.Limiter {
 	rlMu.Lock()
 	defer rlMu.Unlock()
 
-	v, exists := visitors[ip]
+	// Failed authentication must not downgrade an authenticated Manager bucket.
+	bucket := ip + ":unauth"
+	if isAuthenticated {
+		bucket = ip + ":auth"
+	}
+	v, exists := visitors[bucket]
 	if !exists {
 		l := rate.NewLimiter(unauthLimit, unauthBurst)
 		if isAuthenticated {
 			l = rate.NewLimiter(authLimit, authBurst)
 		}
-		visitors[ip] = &ClientLimiter{limiter: l, lastSeen: time.Now()}
+		visitors[bucket] = &ClientLimiter{limiter: l, lastSeen: time.Now()}
 		return l
-	}
-
-	// Update limiter dynamically based on auth status
-	if isAuthenticated && v.limiter.Limit() == unauthLimit {
-		v.limiter.SetLimit(authLimit)
-		v.limiter.SetBurst(authBurst)
-	} else if !isAuthenticated && v.limiter.Limit() == authLimit {
-		v.limiter.SetLimit(unauthLimit)
-		v.limiter.SetBurst(unauthBurst)
 	}
 
 	v.lastSeen = time.Now()

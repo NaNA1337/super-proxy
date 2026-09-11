@@ -1,0 +1,59 @@
+Validation 2026-09-11 UTC
+Core baseline: 755b1b7; Manager baseline: 9864745
+
+Core race tests
+?   	github.com/NaNA1337/super-proxy/cmd/benchmark	[no test files]
+?   	github.com/NaNA1337/super-proxy/cmd/init-config	[no test files]
+?   	github.com/NaNA1337/super-proxy/cmd/manager	[no test files]
+ok  	github.com/NaNA1337/super-proxy/internal/agentapi	3.776s
+ok  	github.com/NaNA1337/super-proxy/internal/benchmark	10.252s
+?   	github.com/NaNA1337/super-proxy/internal/config	[no test files]
+ok  	github.com/NaNA1337/super-proxy/internal/database	1.413s
+ok  	github.com/NaNA1337/super-proxy/internal/discovery	1.411s
+?   	github.com/NaNA1337/super-proxy/internal/health	[no test files]
+?   	github.com/NaNA1337/super-proxy/internal/metrics	[no test files]
+ok  	github.com/NaNA1337/super-proxy/internal/models	1.047s
+ok  	github.com/NaNA1337/super-proxy/internal/openvpn	6.427s
+ok  	github.com/NaNA1337/super-proxy/internal/region	1.100s
+ok  	github.com/NaNA1337/super-proxy/internal/reputation	8.199s
+ok  	github.com/NaNA1337/super-proxy/internal/routing	1.352s
+ok  	github.com/NaNA1337/super-proxy/internal/scheduler	2.101s
+ok  	github.com/NaNA1337/super-proxy/internal/xray	23.469s
+ok  	github.com/NaNA1337/super-proxy/tests/integration	7.631s
+ok  	github.com/NaNA1337/super-proxy/tests/reproduction	4.851s
+
+Manager race tests
+?   	github.com/NaNA1337/super-proxy-manager/backend/audit	[no test files]
+ok  	github.com/NaNA1337/super-proxy-manager/backend/auth	10.529s
+?   	github.com/NaNA1337/super-proxy-manager/backend/cmd/server	[no test files]
+ok  	github.com/NaNA1337/super-proxy-manager/backend/db	1.045s
+?   	github.com/NaNA1337/super-proxy-manager/backend/embedded	[no test files]
+ok  	github.com/NaNA1337/super-proxy-manager/backend/host	1.152s
+ok  	github.com/NaNA1337/super-proxy-manager/backend/proxy	1.119s
+ok  	github.com/NaNA1337/super-proxy-manager/backend/server	27.940s
+ok  	github.com/NaNA1337/super-proxy-manager/backend/sharelink	1.048s
+ok  	github.com/NaNA1337/super-proxy-manager/backend/subscription	1.040s
+
+Browser mock-Agent suite
+  14 passed (32.6s)
+
+Real linked tests
+PASS: real Manager bootstrap, login, mandatory password change
+PASS: pinned HTTPS host registration, auth failures, nine management endpoints, empty pool
+PASS: manual switch accepted, returned operation ID is pollable, missing VPN credentials fail explicitly
+PASS: five exact canonical profiles, Xray client validation, ZIP, subscription and revocation
+PASS: real Chromium login, eleven pages with empty VPN pool, canonical profile display and QR
+PASS: stopped daemon invalidates client configuration; no stale successful export
+PASS: generated config is private and never overwritten; restart from / preserves TLS and all client credentials
+PASS: linked control-plane and browser checks. Public VPN/Reality reachability is not asserted.
+
+Network harness
+[INFO] PASS: Policy routing rules verified.
+[INFO] PASS: Iptables custom chains are idempotent.
+[INFO] PASS: Endpoint /32 underlay route correctly established.
+[INFO] PASS: IPv6 leak protection verified.
+[INFO] PASS: DRAINING data path verified: new connections cannot enter table 100; existing flow on 10.100.0.2 pinned to table 200.
+[INFO] ALL LINUX NETWORK INTEGRATION TESTS PASSED SUCCESSFULLY!
+
+Core go vet: exit 0
+Manager go vet, frontend typecheck, frontend lint: exit 0
