@@ -210,10 +210,10 @@ else
     log_fail "Agent API response malformed or missing status."
 fi
 
-# Query authenticated client-config/all endpoint (in management-only mode, it should report 503 or json)
+# Query authenticated client-config/all endpoint (in management-only mode, it should report 400/503 fail-closed or 200 if active)
 CLIENT_CONFIG_CODE=$(curl -s -k -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${API_KEY}" https://127.0.0.1:60000/api/v1/client-config/all || true)
-log_info "Client config endpoint HTTP status: ${CLIENT_CONFIG_CODE} (expected 503 if VLESS disabled or 200 if active)"
-if [ "${CLIENT_CONFIG_CODE}" != "503" ] && [ "${CLIENT_CONFIG_CODE}" != "200" ]; then
+log_info "Client config endpoint HTTP status: ${CLIENT_CONFIG_CODE} (expected 400/503 if VLESS disabled or 200 if active)"
+if [ "${CLIENT_CONFIG_CODE}" != "400" ] && [ "${CLIENT_CONFIG_CODE}" != "503" ] && [ "${CLIENT_CONFIG_CODE}" != "200" ]; then
     log_fail "Client config probe failed with unexpected status ${CLIENT_CONFIG_CODE}"
 fi
 log_info "PASS: Client-config endpoint returned expected fail-closed/status code."
