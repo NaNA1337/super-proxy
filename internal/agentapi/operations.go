@@ -100,58 +100,77 @@ func cleanupOldOperations() {
 }
 
 // executeManualSwitch executes the state machine for manual slot switching.
-// GUARANTEE: Never bypasses DRAINING. Old tunnels always enter DRAINING first.
+// GUARANTEE: Non-destructive candidate preparation.
+// The old ACTIVE tunnel is NEVER disturbed or drained until the candidate tunnel has
+// successfully connected, established its tun interface, passed isolated policy routing
+// health checks, and passed atomic cutover.
 func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
-	log.Printf("[Operation-%s] Starting manual switch for slot %d -> node %s (generation: %d)",
+	log.Printf("[Operation-%s] Starting transactional manual switch for slot %d -> node %s (generation: %d)",
 		op.ID, op.Slot, op.TargetID, lease.Generation)
 
-	// 1. PREPARING — Move old tunnel to DRAINING without killing existing connections
+	// 1. PRE-FLIGHT VALIDATION — Validate target node BEFORE touching anything
 	updateOpStatus(op, OpPreparing, "")
 
-	sched.Mu.Lock()
-	if oldTunnel, exists := sched.ActiveSlots[op.Slot]; exists {
-		log.Printf("[Operation-%s] Moving old tunnel %s to DRAINING (preserving connections)", op.ID, oldTunnel.Node.IP)
-		sched.DrainSlotLocked(op.Slot, oldTunnel)
-		if _, stillActive := sched.ActiveSlots[op.Slot]; stillActive {
-			sched.ManualOverride[op.Slot] = false
-			sched.Mu.Unlock()
-			lease.Release()
-			updateOpStatus(op, OpFailed, "Failed to drain previous tunnel")
-			return
-		}
-	}
-	sched.Mu.Unlock()
-
-	// Fetch target node from DB
 	var node models.Node
 	if result := database.DB.Where("id = ?", op.TargetID).First(&node); result.Error != nil {
-		updateOpStatus(op, OpFailed, "Node not found in DB")
+		log.Printf("[Operation-%s] Pre-flight rejected: target node %s not found in DB", op.ID, op.TargetID)
+		updateOpStatus(op, OpFailed, "Target node not found in DB")
 		lease.Release()
 		releaseSlot(op.Slot)
 		return
 	}
 
-	// 2. CONNECTING
+	sched.Mu.Lock()
+	currentActive, hasCurrent := sched.ActiveSlots[op.Slot]
+	sched.Mu.Unlock()
+
+	if hasCurrent && currentActive != nil && currentActive.Node != nil && currentActive.Node.ID == op.TargetID {
+		log.Printf("[Operation-%s] Pre-flight rejected: target node %s is already active on slot %d", op.ID, op.TargetID, op.Slot)
+		updateOpStatus(op, OpFailed, "Target node is already active on this slot")
+		lease.Release()
+		releaseSlot(op.Slot)
+		return
+	}
+
+	// Verify lease is still valid before spending resources on OpenVPN connect
+	sc, _ := sched.Slots.GetSlot(op.Slot)
+	if sc != nil && !sc.ValidateLease(lease) {
+		log.Printf("[Operation-%s] Lease preempted before candidate start. Aborting.", op.ID)
+		updateOpStatus(op, OpFailed, "Operation preempted by newer request")
+		lease.Release()
+		releaseSlot(op.Slot)
+		return
+	}
+
+	// 2. CANDIDATE PREPARATION & CONNECTING — In an isolated virtual slot
 	updateOpStatus(op, OpConnecting, "")
+	candidateSlot := sched.NextTunnelID()
+	log.Printf("[Operation-%s] Launching candidate tunnel for node %s on virtual slot %d (active slot %d remains healthy)",
+		op.ID, node.IP, candidateSlot, op.Slot)
+
 	ctx, cancel := context.WithTimeout(sched.Context(), 60*time.Second)
 	defer cancel()
 
-	tunnel, err := openvpn.StartTunnel(sched.Context(), sched.NextTunnelID(), &node)
+	tunnel, err := openvpn.StartTunnel(sched.Context(), candidateSlot, &node)
 	if err != nil {
-		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to start tunnel: %v", err))
+		log.Printf("[Operation-%s] Candidate tunnel failed to start: %v. Old active slot %d is unaffected.",
+			op.ID, err, op.Slot)
+		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to start candidate tunnel: %v", err))
 		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
 		lease.Release()
 		releaseSlot(op.Slot)
 		return
 	}
 
-	// Give it time to establish tun device
+	// Give OpenVPN time to negotiate and create the tun device
 	time.Sleep(5 * time.Second)
 
-	// 3. VERIFYING
+	// 3. CANDIDATE VERIFICATION — In isolated candidate routing table
 	updateOpStatus(op, OpVerifying, "")
-	if err := routing.SetupSlotRouting(op.Slot, tunnel.Interface); err != nil {
-		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to setup routing: %v", err))
+	if err := routing.SetupCandidateRouting(candidateSlot, tunnel.Interface); err != nil {
+		log.Printf("[Operation-%s] Candidate routing setup failed: %v. Destroying candidate, old active remains healthy.",
+			op.ID, err)
+		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to setup candidate routing: %v", err))
 		tunnel.Stop()
 		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
 		lease.Release()
@@ -159,12 +178,14 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 		return
 	}
 
-	// Perform end-to-end health check
+	candidateIdent := routing.SlotRoutingIdentity(candidateSlot)
 	node.ObservedExitIP = ""
-	res := health.VerifyTunnel(ctx, op.Slot, tunnel.Interface, routing.BaseTableID+op.Slot, &node)
+	res := health.VerifyTunnel(ctx, candidateSlot, tunnel.Interface, candidateIdent.TableID, &node)
 	if !res.TunnelHealthy || res.Error != nil {
-		updateOpStatus(op, OpFailed, fmt.Sprintf("Health check failed on tun dev %s: %v", tunnel.Interface, res.Error))
-		routing.ClearSlotRouting(op.Slot)
+		log.Printf("[Operation-%s] Candidate health verification failed on %s: %v. Old active slot %d remains healthy.",
+			op.ID, tunnel.Interface, res.Error, op.Slot)
+		updateOpStatus(op, OpFailed, fmt.Sprintf("Candidate health verification failed on dev %s: %v", tunnel.Interface, res.Error))
+		routing.ClearCandidateRouting(candidateSlot)
 		tunnel.Stop()
 		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
 		lease.Release()
@@ -174,53 +195,66 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 
 	node.ObservedExitIP = res.ObservedExitIP
 	database.DB.Model(&node).Update("observed_exit_ip", node.ObservedExitIP)
-
-	// Transition node to QUALIFIED
 	_ = scheduler.TransitionNode(database.DB, &node, models.StatusQualified)
+	log.Printf("[Operation-%s] Candidate tunnel %s VERIFIED (observed exit: %s). Proceeding to atomic cutover.",
+		op.ID, tunnel.Interface, node.ObservedExitIP)
 
-	// 4. ACTIVE — Re-acquire lock and validate lease generation
-	sched.Mu.Lock()
-	defer sched.Mu.Unlock()
-
-	sc, _ := sched.Slots.GetSlot(op.Slot)
+	// 4. ATOMIC CUTOVER & DRAIN OLD — Candidate is verified READY
+	// Check generation lease again to guarantee no concurrent preemption happened
 	if sc != nil && !sc.ValidateLease(lease) {
-		log.Printf("[Operation-%s] Stale lease detected! Preempted by newer operation. Aborting.", op.ID)
-		routing.ClearSlotRouting(op.Slot)
+		log.Printf("[Operation-%s] Lease preempted during candidate verification. Aborting candidate.", op.ID)
+		routing.ClearCandidateRouting(candidateSlot)
 		tunnel.Stop()
 		lease.Release()
-		sched.ManualOverride[op.Slot] = false
+		releaseSlot(op.Slot)
 		updateOpStatus(op, OpFailed, "Operation preempted by newer request")
 		return
 	}
 
-	// If conflict tunnel exists, drain it safely
-	if conflictTunnel, exists := sched.ActiveSlots[op.Slot]; exists && conflictTunnel != tunnel {
-		log.Printf("[Operation-%s] Conflict tunnel on slot %d safely transitioned to DRAINING", op.ID, op.Slot)
-		sched.DrainSlotLocked(op.Slot, conflictTunnel)
-		if _, stillActive := sched.ActiveSlots[op.Slot]; stillActive {
-			tunnel.Stop()
-			lease.Release()
-			sched.ManualOverride[op.Slot] = false
-			updateOpStatus(op, OpFailed, "Failed to drain conflicting tunnel")
-			return
-		}
-	}
-
+	// 4a. Update Xray active slots (outside sched.Mu lock!)
 	if sched.XraySupervisor != nil {
 		if err := sched.XraySupervisor.ActivateSlot(op.Slot); err != nil {
-			log.Printf("[Operation-%s] ERROR: Failed to activate Xray slot %d: %v. Rolling back manual switch.", op.ID, op.Slot, err)
-			routing.ClearSlotRouting(op.Slot)
+			log.Printf("[Operation-%s] Failed to activate Xray slot %d: %v. Rolling back candidate, old active remains intact.",
+				op.ID, op.Slot, err)
+			routing.ClearCandidateRouting(candidateSlot)
 			tunnel.Stop()
 			_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
 			updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to activate Xray routing: %v", err))
 			lease.Release()
-			sched.ManualOverride[op.Slot] = false
+			releaseSlot(op.Slot)
 			return
 		}
 	}
 
+	// 4b. Switch Linux slot routing to point to candidate interface
+	if err := routing.SetupSlotRouting(op.Slot, tunnel.Interface); err != nil {
+		log.Printf("[Operation-%s] Failed to switch slot routing to %s: %v. Rolling back candidate.",
+			op.ID, tunnel.Interface, err)
+		routing.ClearCandidateRouting(candidateSlot)
+		tunnel.Stop()
+		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to switch slot routing: %v", err))
+		lease.Release()
+		releaseSlot(op.Slot)
+		return
+	}
+
+	// Clean up temporary candidate routing now that slot routing owns the tunnel
+	routing.ClearCandidateRouting(candidateSlot)
+
+	// 4c. Atomic Scheduler State Commit & Move Old Tunnel to DRAINING
+	sched.Mu.Lock()
+	oldTunnel, hadOld := sched.ActiveSlots[op.Slot]
 	tunnel.SlotIndex = op.Slot
 	sched.ActiveSlots[op.Slot] = tunnel
+
+	if hadOld && oldTunnel != nil && oldTunnel != tunnel {
+		log.Printf("[Operation-%s] Confirmed cutover: transitioning previous tunnel %s on slot %d to DRAINING",
+			op.ID, oldTunnel.Node.IP, op.Slot)
+		sched.DrainSlotLocked(op.Slot, oldTunnel)
+	}
+	sched.Mu.Unlock()
+
 	_ = scheduler.TransitionNode(database.DB, &node, models.StatusActive)
 
 	if sc != nil {
@@ -232,10 +266,10 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 	}
 
 	lease.Release()
-	sched.ManualOverride[op.Slot] = false
+	releaseSlot(op.Slot)
 
 	updateOpStatus(op, OpActive, "")
-	log.Printf("[Operation-%s] Manual switch complete successfully (Node %s ACTIVE on Slot %d).",
+	log.Printf("[Operation-%s] Transactional manual switch COMPLETED successfully (Node %s ACTIVE on Slot %d).",
 		op.ID, node.IP, op.Slot)
 }
 

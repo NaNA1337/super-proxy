@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -28,6 +29,35 @@ import (
 var version = "dev"
 var commit = "unknown"
 
+func runPreflightChecks() error {
+	// 1. Kernel TUN device
+	if _, err := os.Stat("/dev/net/tun"); err != nil {
+		return fmt.Errorf("kernel TUN device (/dev/net/tun) is not accessible: %w", err)
+	}
+
+	// 2. iproute2
+	if _, err := exec.LookPath("ip"); err != nil {
+		return fmt.Errorf("required system tool 'ip' (iproute2) is not found in PATH: %w", err)
+	}
+
+	// 3. iptables
+	if _, err := exec.LookPath("iptables"); err != nil {
+		return fmt.Errorf("required system tool 'iptables' is not found in PATH: %w", err)
+	}
+
+	// 4. openvpn binary
+	if _, err := exec.LookPath("openvpn"); err != nil {
+		return fmt.Errorf("required system tool 'openvpn' is not found in PATH: %w", err)
+	}
+
+	// 5. xray binary
+	if _, err := exec.LookPath("xray"); err != nil {
+		return fmt.Errorf("required system tool 'xray' is not found in PATH: %w", err)
+	}
+
+	return nil
+}
+
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "version") {
 		fmt.Printf("super-proxy %s (%s)\n", version, commit)
@@ -35,19 +65,28 @@ func main() {
 	}
 	log.Printf("Starting Super-Proxy %s (%s)...", version, commit)
 
-	// P2: Routing Diagnostics Command
+	// Diagnostics Commands
 	if len(os.Args) > 1 && os.Args[1] == "diagnose" {
+		if len(os.Args) > 2 && os.Args[2] == "environment" {
+			routing.DiagnoseEnvironment()
+			return
+		}
 		if len(os.Args) > 2 && os.Args[2] == "routing" {
 			routing.Diagnose()
 			return
 		}
-		log.Println("Usage: super-proxy diagnose routing")
+		log.Println("Usage: super-proxy diagnose [routing|environment]")
 		return
 	}
 
 	// 0. Root privilege check — required for ip rule/route/iptables and OpenVPN
 	if os.Geteuid() != 0 {
 		log.Fatalf("FATAL: super-proxy must be run as root (needed for routing, iptables, and OpenVPN)")
+	}
+
+	// Preflight validation of system dependencies
+	if err := runPreflightChecks(); err != nil {
+		log.Fatalf("FATAL PREFLIGHT CHECK FAILED: %v", err)
 	}
 
 	// 1. Load Configuration

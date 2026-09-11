@@ -1,7 +1,7 @@
 super-proxy
 gosec.json
 govulncheck.txt
-release/
+/release/
 dist/
 *.pem
 configs/*.pem

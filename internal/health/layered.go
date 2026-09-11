@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os/exec"
@@ -78,40 +79,89 @@ func VerifyTunnel(ctx context.Context, slot int, interfaceName string, tableID i
 			DialContext:       dialer.DialContext,
 			DisableKeepAlives: true,
 		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Prohibit following external redirects to prevent redirection attacks
+			return http.ErrUseLastResponse
+		},
 		Timeout: 10 * time.Second,
 	}
 
-	// 4. DNS + HTTPS + Exit IP Validation via ipify
-	start := time.Now()
-	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.ipify.org?format=json", nil)
-	resp, err := client.Do(req)
-	duration := time.Since(start)
+	// 4. Multi-Provider DNS + HTTPS + Exit IP Validation with Failover
+	providers := []struct {
+		url    string
+		isJSON bool
+	}{
+		{"https://api.ipify.org?format=json", true},
+		{"https://ifconfig.me/ip", false},
+		{"https://icanhazip.com", false},
+	}
 
-	if err != nil {
-		res.Error = fmt.Errorf("TCP/HTTPS/DNS connection failed on %s: %w", interfaceName, err)
+	var observedIP string
+	var lastErr error
+	var totalDuration time.Duration
+
+	for _, p := range providers {
+		start := time.Now()
+		req, err := http.NewRequestWithContext(ctx, "GET", p.url, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		// Modern User-Agent avoids Cloudflare/anti-bot blocks
+		req.Header.Set("User-Agent", "curl/8.5.0")
+
+		resp, err := client.Do(req)
+		duration := time.Since(start)
+		if err != nil {
+			lastErr = fmt.Errorf("provider %s failed: %w", p.url, err)
+			continue
+		}
+
+		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("provider %s read error: %w", p.url, err)
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("provider %s returned HTTP %d", p.url, resp.StatusCode)
+			continue
+		}
+
+		var candidateIP string
+		if p.isJSON {
+			var parsed struct {
+				IP string `json:"ip"`
+			}
+			if err := json.Unmarshal(bodyBytes, &parsed); err == nil {
+				candidateIP = strings.TrimSpace(parsed.IP)
+			}
+		} else {
+			candidateIP = strings.TrimSpace(string(bodyBytes))
+		}
+
+		parsedIP := net.ParseIP(candidateIP)
+		if parsedIP != nil && parsedIP.To4() != nil && parsedIP.IsGlobalUnicast() && !parsedIP.IsPrivate() {
+			observedIP = candidateIP
+			totalDuration = duration
+			res.TCPConnectivity = true
+			res.HTTPSConnectivity = true
+			res.DNSOK = true
+			res.Latency = totalDuration
+			break
+		} else {
+			lastErr = fmt.Errorf("provider %s returned invalid exit IPv4: %q", p.url, candidateIP)
+		}
+	}
+
+	if observedIP == "" {
+		res.Error = fmt.Errorf("all exit IP verification providers failed on %s: %v", interfaceName, lastErr)
 		return res
 	}
-	defer resp.Body.Close()
 
-	res.TCPConnectivity = true
-	res.HTTPSConnectivity = true
-	res.DNSOK = true // implicitly passed if api.ipify.org resolved
-	res.Latency = duration
+	res.ObservedExitIP = observedIP
 
-	var ipify struct {
-		IP string `json:"ip"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&ipify); err != nil {
-		res.Error = fmt.Errorf("failed to decode ipify response: %w", err)
-		return res
-	}
-
-	res.ObservedExitIP = ipify.IP
-	observed := net.ParseIP(res.ObservedExitIP)
-	if observed == nil || observed.To4() == nil || !observed.IsGlobalUnicast() || observed.IsPrivate() {
-		res.Error = fmt.Errorf("invalid observed exit IPv4: %q", res.ObservedExitIP)
-		return res
-	}
 	// First qualification learns the egress through a device-bound, marked socket.
 	// VPN Gate server endpoints can sit behind a different NAT egress address.
 	if res.ExpectedExitIP == "" || res.ObservedExitIP == res.ExpectedExitIP {

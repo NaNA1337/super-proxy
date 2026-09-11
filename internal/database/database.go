@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/glebarez/sqlite"
@@ -21,6 +22,19 @@ func InitDatabase(dbPath string) error {
 	if err != nil {
 		return err
 	}
+
+	sqlDB, err := DB.DB()
+	if err == nil {
+		sqlDB.SetMaxOpenConns(10)
+		sqlDB.SetMaxIdleConns(5)
+		sqlDB.SetConnMaxLifetime(time.Hour)
+	}
+
+	// Explicitly configure SQLite pragmas for high concurrency and fail-safe operation
+	DB.Exec("PRAGMA journal_mode=WAL;")
+	DB.Exec("PRAGMA busy_timeout=5000;")
+	DB.Exec("PRAGMA foreign_keys=ON;")
+	DB.Exec("PRAGMA synchronous=NORMAL;")
 
 	// Auto-migrate models
 	err = DB.AutoMigrate(

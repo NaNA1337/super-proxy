@@ -100,6 +100,13 @@ func NewHandler(schedulerInstance *scheduler.Scheduler, configKey string) http.H
 		return panicRecoveryMiddleware(rateLimitMiddleware(authMiddleware(h)))
 	}
 
+	// Unauthenticated Liveness & Readiness endpoints for monitoring/k8s/systemd
+	mux.HandleFunc("/health/live", handleHealthLive)
+	mux.HandleFunc("/health/ready", handleHealthReady)
+	mux.HandleFunc("/api/v1/health/live", handleHealthLive)
+	mux.HandleFunc("/api/v1/health/ready", handleHealthReady)
+	mux.HandleFunc("/healthz", handleHealthLive)
+
 	mux.Handle("/api/v1/status", secureChain(http.HandlerFunc(handleStatus)))
 	mux.Handle("/api/v1/system", secureChain(http.HandlerFunc(handleSystem)))
 	mux.Handle("/api/v1/current-exits", secureChain(http.HandlerFunc(handleCurrentExits)))

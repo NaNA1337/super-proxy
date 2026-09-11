@@ -52,6 +52,50 @@ var buildVersion = "dev"
 
 func SetVersion(version string) { buildVersion = version }
 
+func handleHealthLive(w http.ResponseWriter, r *http.Request) {
+	sendJSON(w, map[string]interface{}{
+		"status":    "alive",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"uptime":    int64(time.Since(appStartTime).Seconds()),
+	})
+}
+
+func handleHealthReady(w http.ResponseWriter, r *http.Request) {
+	isReady := true
+	reasons := make([]string, 0)
+
+	if database.DB == nil {
+		isReady = false
+		reasons = append(reasons, "database connection is uninitialized")
+	} else {
+		sqlDB, err := database.DB.DB()
+		if err != nil || sqlDB.Ping() != nil {
+			isReady = false
+			reasons = append(reasons, "database ping failed")
+		}
+	}
+
+	if sched == nil {
+		isReady = false
+		reasons = append(reasons, "scheduler engine is not initialized")
+	}
+
+	if !isReady {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "not_ready",
+			"reasons": reasons,
+		})
+		return
+	}
+
+	sendJSON(w, map[string]interface{}{
+		"status":    "ready",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	hostname, _ := os.Hostname()
 	resp := map[string]interface{}{

@@ -19,7 +19,10 @@ var iptablesMu sync.Mutex
 func InitGlobalIptables() error {
 	iptablesMu.Lock()
 	defer iptablesMu.Unlock()
+	return initGlobalIptablesLocked()
+}
 
+func initGlobalIptablesLocked() error {
 	// 1. Create chains if they don't already exist (ignore error if already exists)
 	_ = runCmd("iptables", "-t", "mangle", "-N", ChainConnmark)
 	_ = runCmd("iptables", "-t", "mangle", "-N", ChainSlotMark)
@@ -40,8 +43,8 @@ func InitGlobalIptables() error {
 
 	// Remove the legacy unconditional restore rule: ctmark=0 on a new connection
 	// must not erase Xray's SO_MARK before its first packet reaches POSTROUTING.
-	for runCmd("iptables", "-t", "mangle", "-D", ChainConnmark, "-j", "CONNMARK", "--restore-mark") == nil {
-	}
+	safeDeleteLoop("iptables legacy restore-mark", "iptables", "-t", "mangle", "-D", ChainConnmark, "-j", "CONNMARK", "--restore-mark")
+
 	// 4. Ensure SUPER_PROXY_CONNMARK has the global restore-mark rule
 	if err := runCmd("iptables", "-t", "mangle", "-C", ChainConnmark, "-m", "connmark", "!", "--mark", "0", "-j", "CONNMARK", "--restore-mark"); err != nil {
 		if err := runCmd("iptables", "-t", "mangle", "-A", ChainConnmark, "-m", "connmark", "!", "--mark", "0", "-j", "CONNMARK", "--restore-mark"); err != nil {
@@ -60,32 +63,31 @@ func InitGlobalIptables() error {
 	return nil
 }
 
-// SetupConnmarkRules installs slot-specific CONNMARK save rules inside SUPER_PROXY_SLOT_MARK.
-// It is fully idempotent and safe to call multiple times without duplicating rules.
+// SetupConnmarkRules installs slot-specific CONNMARK saving rules in SUPER_PROXY_SLOT_MARK.
 func SetupConnmarkRules(slotIndex int) error {
-	if err := InitGlobalIptables(); err != nil {
-		return err
-	}
-
 	iptablesMu.Lock()
 	defer iptablesMu.Unlock()
 
-	fwmark := BaseTableID + slotIndex
+	if err := initGlobalIptablesLocked(); err != nil {
+		return fmt.Errorf("failed to initialize global custom chains: %w", err)
+	}
+
+	ident := SlotRoutingIdentity(slotIndex)
 
 	// Check if save-mark rule for this fwmark already exists in SUPER_PROXY_SLOT_MARK
 	checkErr := runCmd("iptables", "-t", "mangle", "-C", ChainSlotMark,
-		"-m", "mark", "--mark", fmt.Sprintf("%d", fwmark),
+		"-m", "mark", "--mark", fmt.Sprintf("%d", ident.Mark),
 		"-j", "CONNMARK", "--save-mark")
 	if checkErr != nil {
 		// Rule does not exist, append it
 		if err := runCmd("iptables", "-t", "mangle", "-A", ChainSlotMark,
-			"-m", "mark", "--mark", fmt.Sprintf("%d", fwmark),
+			"-m", "mark", "--mark", fmt.Sprintf("%d", ident.Mark),
 			"-j", "CONNMARK", "--save-mark"); err != nil {
 			return fmt.Errorf("failed to add save-mark rule for slot %d in %s: %w", slotIndex, ChainSlotMark, err)
 		}
 	}
 
-	log.Printf("[Slot %d] Idempotent CONNMARK save rule ensured in %s for fwmark %d", slotIndex, ChainSlotMark, fwmark)
+	log.Printf("[Slot %d] Idempotent CONNMARK save rule ensured in %s for fwmark %d", slotIndex, ChainSlotMark, ident.Mark)
 	return nil
 }
 
@@ -94,18 +96,11 @@ func ClearConnmarkRules(slotIndex int) {
 	iptablesMu.Lock()
 	defer iptablesMu.Unlock()
 
-	fwmark := BaseTableID + slotIndex
+	ident := SlotRoutingIdentity(slotIndex)
 
-	// Delete until all matching rules are gone
-	for {
-		err := runCmd("iptables", "-t", "mangle", "-D", ChainSlotMark,
-			"-m", "mark", "--mark", fmt.Sprintf("%d", fwmark),
-			"-j", "CONNMARK", "--save-mark")
-		if err != nil {
-			break
-		}
-	}
-	log.Printf("[Slot %d] CONNMARK rules cleared from %s for fwmark %d", slotIndex, ChainSlotMark, fwmark)
+	safeDeleteLoop(fmt.Sprintf("Slot %d save-mark", slotIndex), "iptables", "-t", "mangle", "-D", ChainSlotMark,
+		"-m", "mark", "--mark", fmt.Sprintf("%d", ident.Mark),
+		"-j", "CONNMARK", "--save-mark")
 }
 
 // ClearGlobalIptables flushes and tears down super-proxy custom chains. Safe to call multiple times.
@@ -114,12 +109,9 @@ func ClearGlobalIptables() {
 	defer iptablesMu.Unlock()
 
 	// Unlink jumps
-	for runCmd("iptables", "-t", "mangle", "-D", "PREROUTING", "-j", ChainConnmark) == nil {
-	}
-	for runCmd("iptables", "-t", "mangle", "-D", "OUTPUT", "-j", ChainConnmark) == nil {
-	}
-	for runCmd("iptables", "-t", "mangle", "-D", "POSTROUTING", "-j", ChainSlotMark) == nil {
-	}
+	safeDeleteLoop("unlink PREROUTING ChainConnmark", "iptables", "-t", "mangle", "-D", "PREROUTING", "-j", ChainConnmark)
+	safeDeleteLoop("unlink OUTPUT ChainConnmark", "iptables", "-t", "mangle", "-D", "OUTPUT", "-j", ChainConnmark)
+	safeDeleteLoop("unlink POSTROUTING ChainSlotMark", "iptables", "-t", "mangle", "-D", "POSTROUTING", "-j", ChainSlotMark)
 
 	// Flush and delete chains
 	_ = runCmd("iptables", "-t", "mangle", "-F", ChainConnmark)

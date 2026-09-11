@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-const BaseTableID = 100
-
 var (
 	cachedGateway  string
 	cachedIface    string
@@ -20,87 +18,123 @@ var (
 	gatewayCacheMu sync.Mutex
 )
 
+const maxCleanupAttempts = 32
+
+func safeDeleteLoop(desc string, cmd string, args ...string) {
+	for i := 0; i < maxCleanupAttempts; i++ {
+		if err := runCmd(cmd, args...); err != nil {
+			return
+		}
+	}
+	log.Printf("[Routing] Warning: cleanup loop reached max attempts (%d) for %s: %s %v", maxCleanupAttempts, desc, cmd, args)
+}
+
 // SetupSlotRouting configures policy routing for a specific slot and interface
 func SetupSlotRouting(slotIndex int, interfaceName string) error {
-	tableID := BaseTableID + slotIndex
-	fwmark := tableID // use the same number for simplicity
+	ident := SlotRoutingIdentity(slotIndex)
 
 	// 1. Add IP rule based on fwmark (flush stale duplicate rules first for idempotency)
-	for runCmd("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
-	}
-	if err := runCmd("ip", "rule", "add", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
+	safeDeleteLoop(fmt.Sprintf("Slot %d ip rule", slotIndex), "ip", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
+	if err := runCmd("ip", "rule", "add", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID), "pref", fmt.Sprintf("%d", ident.Priority)); err != nil {
 		log.Printf("[Slot %d] Note: ip rule add returned (might already exist): %v", slotIndex, err)
 	}
 
 	// 2. Clear old routes in the table
-	runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", tableID))
+	runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", ident.TableID))
 
 	// 3. Add default route to the table pointing to the tun interface
-	if err := runCmd("ip", "route", "add", "default", "dev", interfaceName, "table", fmt.Sprintf("%d", tableID)); err != nil {
+	if err := runCmd("ip", "route", "add", "default", "dev", interfaceName, "table", fmt.Sprintf("%d", ident.TableID)); err != nil {
 		return fmt.Errorf("failed to add default route for %s: %w", interfaceName, err)
 	}
 
 	// 4. IPv6 Leak Protection (P1-13)
-	for runCmd("ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
-	}
-	if err := runCmd("ip", "-6", "rule", "add", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
+	safeDeleteLoop(fmt.Sprintf("Slot %d ip -6 rule", slotIndex), "ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
+	if err := runCmd("ip", "-6", "rule", "add", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID), "pref", fmt.Sprintf("%d", ident.Priority)); err != nil {
 		log.Printf("[Slot %d] Note: ip -6 rule add returned: %v", slotIndex, err)
 	}
-	runCmd("ip", "-6", "route", "add", "blackhole", "default", "table", fmt.Sprintf("%d", tableID))
+	runCmd("ip", "-6", "route", "add", "blackhole", "default", "table", fmt.Sprintf("%d", ident.TableID))
 
 	// 5. CONNMARK rules for connection tracking (required for DRAINING)
 	if err := SetupConnmarkRules(slotIndex); err != nil {
 		log.Printf("[Slot %d] Warning: failed to setup CONNMARK rules: %v", slotIndex, err)
 	}
 
-	log.Printf("[Slot %d] Routing setup complete: fwmark %d -> table %d -> dev %s", slotIndex, fwmark, tableID, interfaceName)
+	log.Printf("[Slot %d] Routing setup complete: fwmark %d -> table %d -> dev %s", slotIndex, ident.Mark, ident.TableID, interfaceName)
 	return nil
 }
 
 // ClearSlotRouting resets the policy routing for a slot to fail-closed unreachable state.
 // This prevents traffic with this slot's fwmark from leaking out to the physical WAN interface.
 func ClearSlotRouting(slotIndex int) error {
-	tableID := BaseTableID + slotIndex
-	fwmark := tableID
+	ident := SlotRoutingIdentity(slotIndex)
 
 	// Clean up CONNMARK rules first
 	ClearConnmarkRules(slotIndex)
 
 	// Flush old routes in slot table
-	_ = runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", tableID))
-	_ = runCmd("ip", "-6", "route", "flush", "table", fmt.Sprintf("%d", tableID))
+	_ = runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", ident.TableID))
+	_ = runCmd("ip", "-6", "route", "flush", "table", fmt.Sprintf("%d", ident.TableID))
 
 	// Fail-closed: insert unreachable / blackhole default route
-	_ = runCmd("ip", "route", "add", "unreachable", "default", "table", fmt.Sprintf("%d", tableID))
-	_ = runCmd("ip", "-6", "route", "add", "blackhole", "default", "table", fmt.Sprintf("%d", tableID))
+	_ = runCmd("ip", "route", "add", "unreachable", "default", "table", fmt.Sprintf("%d", ident.TableID))
+	_ = runCmd("ip", "-6", "route", "add", "blackhole", "default", "table", fmt.Sprintf("%d", ident.TableID))
 
 	// Ensure fwmark rule stays pointed to this table so marked packets hit unreachable
-	for runCmd("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
-	}
-	_ = runCmd("ip", "rule", "add", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID))
+	safeDeleteLoop(fmt.Sprintf("Slot %d clear ip rule", slotIndex), "ip", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
+	_ = runCmd("ip", "rule", "add", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID), "pref", fmt.Sprintf("%d", ident.Priority))
 
-	for runCmd("ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
-	}
-	_ = runCmd("ip", "-6", "rule", "add", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID))
+	safeDeleteLoop(fmt.Sprintf("Slot %d clear ip -6 rule", slotIndex), "ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
+	_ = runCmd("ip", "-6", "rule", "add", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID), "pref", fmt.Sprintf("%d", ident.Priority))
 
-	log.Printf("[Slot %d] Routing cleared to fail-closed unreachable state (table %d).", slotIndex, tableID)
+	log.Printf("[Slot %d] Routing cleared to fail-closed unreachable state (table %d).", slotIndex, ident.TableID)
 	return nil
 }
 
 // TeardownSlotRouting completely removes rules and routes for a slot (used on graceful daemon shutdown).
 func TeardownSlotRouting(slotIndex int) {
-	tableID := BaseTableID + slotIndex
-	fwmark := tableID
+	ident := SlotRoutingIdentity(slotIndex)
 
 	ClearConnmarkRules(slotIndex)
-	_ = runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", tableID))
-	_ = runCmd("ip", "-6", "route", "flush", "table", fmt.Sprintf("%d", tableID))
+	_ = runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", ident.TableID))
+	_ = runCmd("ip", "-6", "route", "flush", "table", fmt.Sprintf("%d", ident.TableID))
 
-	for runCmd("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
-	}
-	for runCmd("ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
-	}
+	safeDeleteLoop(fmt.Sprintf("Slot %d teardown ip rule", slotIndex), "ip", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
+	safeDeleteLoop(fmt.Sprintf("Slot %d teardown ip -6 rule", slotIndex), "ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
 	log.Printf("[Slot %d] Policy routing torn down cleanly.", slotIndex)
+}
+
+// SetupCandidateRouting establishes an isolated policy route and fwmark for candidate
+// tunnel qualification without altering the active slot's routing or traffic.
+func SetupCandidateRouting(candidateSlot int, interfaceName string) error {
+	ident := SlotRoutingIdentity(candidateSlot)
+
+	safeDeleteLoop(fmt.Sprintf("Candidate %d ip rule", candidateSlot), "ip", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
+	if err := runCmd("ip", "rule", "add", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID), "pref", fmt.Sprintf("%d", ident.Priority)); err != nil {
+		log.Printf("[Candidate %d] Note: ip rule add returned: %v", candidateSlot, err)
+	}
+
+	_ = runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", ident.TableID))
+	if err := runCmd("ip", "route", "add", "default", "dev", interfaceName, "table", fmt.Sprintf("%d", ident.TableID)); err != nil {
+		return fmt.Errorf("failed to add default route for candidate %s: %w", interfaceName, err)
+	}
+
+	safeDeleteLoop(fmt.Sprintf("Candidate %d ip -6 rule", candidateSlot), "ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
+	_ = runCmd("ip", "-6", "rule", "add", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID), "pref", fmt.Sprintf("%d", ident.Priority))
+	_ = runCmd("ip", "-6", "route", "add", "blackhole", "default", "table", fmt.Sprintf("%d", ident.TableID))
+
+	log.Printf("[Candidate %d] Candidate routing established: fwmark %d -> table %d -> dev %s", candidateSlot, ident.Mark, ident.TableID, interfaceName)
+	return nil
+}
+
+// ClearCandidateRouting removes candidate policy routing and flushes the temporary table.
+func ClearCandidateRouting(candidateSlot int) {
+	ident := SlotRoutingIdentity(candidateSlot)
+
+	_ = runCmd("ip", "route", "flush", "table", fmt.Sprintf("%d", ident.TableID))
+	_ = runCmd("ip", "-6", "route", "flush", "table", fmt.Sprintf("%d", ident.TableID))
+	safeDeleteLoop(fmt.Sprintf("Candidate %d clear ip rule", candidateSlot), "ip", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
+	safeDeleteLoop(fmt.Sprintf("Candidate %d clear ip -6 rule", candidateSlot), "ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", ident.Mark), "table", fmt.Sprintf("%d", ident.TableID))
+	log.Printf("[Candidate %d] Candidate routing cleared.", candidateSlot)
 }
 
 // GetDefaultGateway finds the default gateway and physical interface of the main table.

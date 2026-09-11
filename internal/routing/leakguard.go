@@ -41,14 +41,10 @@ func DisableDNSLeakProtection() {
 		return
 	}
 
-	for runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "udp", "--dport", "53", "-j", "ACCEPT") == nil {
-	}
-	for runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "53", "-j", "ACCEPT") == nil {
-	}
-	for runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP") == nil {
-	}
-	for runCmd("iptables", "-D", "OUTPUT", "-o", physIface, "-p", "tcp", "--dport", "53", "-j", "DROP") == nil {
-	}
+	safeDeleteLoop("leakguard DNS accept udp", "iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "udp", "--dport", "53", "-j", "ACCEPT")
+	safeDeleteLoop("leakguard DNS accept tcp", "iptables", "-D", "OUTPUT", "-o", physIface, "-m", "owner", "--uid-owner", "0", "-p", "tcp", "--dport", "53", "-j", "ACCEPT")
+	safeDeleteLoop("leakguard DNS drop udp", "iptables", "-D", "OUTPUT", "-o", physIface, "-p", "udp", "--dport", "53", "-j", "DROP")
+	safeDeleteLoop("leakguard DNS drop tcp", "iptables", "-D", "OUTPUT", "-o", physIface, "-p", "tcp", "--dport", "53", "-j", "DROP")
 	log.Println("[LeakGuard] DNS leak protection disabled")
 }
 
@@ -79,9 +75,7 @@ func DisableIPv6LeakProtection() {
 		return
 	}
 
-	for runCmd("ip6tables", "-D", "OUTPUT", "-o", physIface, "-j", "DROP") == nil {
-	}
-	for runCmd("ip6tables", "-D", "INPUT", "-i", physIface, "-j", "DROP") == nil {
-	}
+	safeDeleteLoop("leakguard IPv6 drop OUTPUT", "ip6tables", "-D", "OUTPUT", "-o", physIface, "-j", "DROP")
+	safeDeleteLoop("leakguard IPv6 drop INPUT", "ip6tables", "-D", "INPUT", "-i", physIface, "-j", "DROP")
 	log.Println("[LeakGuard] IPv6 leak protection disabled")
 }
