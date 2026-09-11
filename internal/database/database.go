@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 

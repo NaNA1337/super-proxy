@@ -25,7 +25,9 @@ func SetupSlotRouting(slotIndex int, interfaceName string) error {
 	tableID := BaseTableID + slotIndex
 	fwmark := tableID // use the same number for simplicity
 
-	// 1. Add IP rule based on fwmark
+	// 1. Add IP rule based on fwmark (flush stale duplicate rules first for idempotency)
+	for runCmd("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
+	}
 	if err := runCmd("ip", "rule", "add", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
 		log.Printf("[Slot %d] Note: ip rule add returned (might already exist): %v", slotIndex, err)
 	}
@@ -39,6 +41,8 @@ func SetupSlotRouting(slotIndex int, interfaceName string) error {
 	}
 
 	// 4. IPv6 Leak Protection (P1-13)
+	for runCmd("ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
+	}
 	if err := runCmd("ip", "-6", "rule", "add", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
 		log.Printf("[Slot %d] Note: ip -6 rule add returned: %v", slotIndex, err)
 	}
@@ -65,13 +69,11 @@ func ClearSlotRouting(slotIndex int) error {
 		log.Printf("[Slot %d] Note: failed to flush route table: %v", slotIndex, err)
 	}
 
-	if err := runCmd("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
-		log.Printf("[Slot %d] Note: ip rule del returned: %v", slotIndex, err)
+	for runCmd("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
 	}
 
 	// Clean up IPv6 rule (P1-13)
-	if err := runCmd("ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)); err != nil {
-		log.Printf("[Slot %d] Note: ip -6 rule del returned: %v", slotIndex, err)
+	for runCmd("ip", "-6", "rule", "del", "fwmark", fmt.Sprintf("%d", fwmark), "table", fmt.Sprintf("%d", tableID)) == nil {
 	}
 
 	log.Printf("[Slot %d] Routing cleared.", slotIndex)

@@ -3,6 +3,7 @@ package routing
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // Diagnose outputs the current state of ip rules and tables for debugging (P2)
@@ -31,11 +32,16 @@ func runAndPrint(name string, args ...string) {
 	/* #nosec G204 */
 	cmd := exec.Command(name, args...)
 	output, err := cmd.CombinedOutput()
+	outStr := strings.TrimSpace(string(output))
 	if err != nil {
+		if strings.Contains(outStr, "FIB table does not exist") {
+			fmt.Println("(table is empty / slot inactive)")
+			return
+		}
 		fmt.Printf("[Error running %s %v]: %v\n", name, args, err)
 	}
-	if len(output) > 0 {
-		fmt.Print(string(output))
+	if len(outStr) > 0 {
+		fmt.Println(outStr)
 	} else {
 		fmt.Println("(empty)")
 	}

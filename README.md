@@ -111,10 +111,10 @@ Super-Proxy 是一个运行于 Linux 系统的多出口透明代理网关管理�
 
 ```bash
 # 下载 Release 发布的规范 deb 安装包
-wget https://github.com/NaNA1337/super-proxy/releases/download/v1.1.0/super-proxy_1.1.0_amd64.deb
+wget https://github.com/NaNA1337/super-proxy/releases/download/v1.1.1/super-proxy_1.1.1_amd64.deb
 
 # 安装软件包
-sudo dpkg -i super-proxy_1.1.0_amd64.deb
+sudo dpkg -i super-proxy_1.1.1_amd64.deb
 sudo apt-get install -f -y
 ```
 
