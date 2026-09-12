@@ -98,14 +98,14 @@ func RecoverRuntimeNodeStates(db *gorm.DB) error {
 	result := db.Model(&models.Node{}).
 		Where("status IN ?", runtimeStates).
 		Updates(map[string]interface{}{
-			"status":           models.StatusDiscovered,
+			"status":           models.StatusStale,
 			"observed_exit_ip": "",
 		})
 	if result.Error != nil {
 		return result.Error
 	}
 	if result.RowsAffected > 0 {
-		log.Printf("[Database] Recovered %d stale runtime node state(s) for fresh admission", result.RowsAffected)
+		log.Printf("[Database] Quarantined %d stale runtime node state(s) until fresh discovery", result.RowsAffected)
 	}
 	return nil
 }

@@ -228,7 +228,7 @@ func TestRecoverRuntimeNodeStatesForcesFreshAdmission(t *testing.T) {
 
 	var recovered models.Node
 	require.NoError(t, db.First(&recovered, "id = ?", "old-active").Error)
-	assert.Equal(t, models.StatusDiscovered, recovered.Status)
+	assert.Equal(t, models.StatusStale, recovered.Status)
 	assert.Empty(t, recovered.ObservedExitIP)
 	assert.Equal(t, 2, recovered.FailCount)
 	assert.Equal(t, "previous-provider", recovered.Reputation.ProviderName)

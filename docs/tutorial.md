@@ -21,6 +21,8 @@ sudo ./init-config -address 你的公网域名 -output /etc/super-proxy/config.y
 
 基础 ASN/ISP 归属检测不需要 API Key。要硬拒绝活跃 VPN、公共代理、Tor 和近期代理活动，在 `reputation` 中启用至少一个带威胁分类的供应商，例如 `ipqs_key`。程序会分别检查 VPN Gate 端点和隧道实际出口；机房、VPN、代理、Tor、黑名单、UNKNOWN 以及与现有活动/备用出口重复的 IPv4 `/24` 都不会晋升。
 
+OpenVPN 凭据只存在 Core 内存中。服务重启后数据库里的旧运行节点先进入 `STALE`，不会出现在手动切换候选列表；VPN Gate 首次刷新重新取得配置后，仍在线且可重试的节点会自动恢复为 `DISCOVERED`。这通常只需等待一次抓取完成并刷新 Manager。
+
 带 Key 的威胁供应商默认关闭，内置 ASN 归属检测始终运行。`conservative` 会拒绝任一已配置供应商的未知结果；`lenient` 只允许查询失败或证据不足的 UNKNOWN，已经命中的机房、VPN、代理、Tor 和黑名单仍然会被拒绝。
 
 ## 3. 启动核心并分层检查

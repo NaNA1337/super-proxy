@@ -6,6 +6,7 @@ import (
 
 	"github.com/NaNA1337/super-proxy/internal/config"
 	"github.com/NaNA1337/super-proxy/internal/database"
+	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/glebarez/sqlite"
@@ -13,6 +14,8 @@ import (
 )
 
 func setupTestDB(t *testing.T) {
+	discovery.ClearOVPNSecretCache()
+	t.Cleanup(discovery.ClearOVPNSecretCache)
 	var err error
 	database.DB, err = gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -20,6 +23,16 @@ func setupTestDB(t *testing.T) {
 	}
 	if err := database.DB.AutoMigrate(&models.Node{}); err != nil {
 		t.Fatalf("failed to migrate db: %v", err)
+	}
+}
+
+func cacheAllTestNodeCredentials(t *testing.T) {
+	var nodes []models.Node
+	if err := database.DB.Find(&nodes).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := range nodes {
+		discovery.SetOVPNSecret(nodes[i].ID, "test-credential")
 	}
 }
 
@@ -53,6 +66,7 @@ func TestPrimaryPreferred(t *testing.T) {
 		Fallback: []string{"US", "KR"},
 	}
 	sched := NewScheduler(3, 2, reputation.NewEngine(), cfg) // required = 3 + 2 = 5
+	cacheAllTestNodeCredentials(t)
 
 	res, err := sched.SelectNextCandidate()
 	if err != nil {
@@ -90,6 +104,7 @@ func TestDiscoveredDoesNotCountTowardQualifiedCapacity(t *testing.T) {
 		Fallback: []string{"US"},
 	}
 	sched := NewScheduler(3, 2, reputation.NewEngine(), cfg) // required = 5
+	cacheAllTestNodeCredentials(t)
 
 	res, err := sched.SelectNextCandidate()
 	if err != nil {
@@ -135,6 +150,7 @@ func TestFallbackOnlyWhenPrimaryInsufficient(t *testing.T) {
 		Fallback: []string{"KR"},
 	}
 	sched := NewScheduler(3, 2, reputation.NewEngine(), cfg) // required = 5
+	cacheAllTestNodeCredentials(t)
 
 	// 1. First selection: Fallback is enabled, but remaining Primary nodes MUST be chosen first!
 	res1, err := sched.SelectNextCandidate()
@@ -199,6 +215,7 @@ func TestHighScoreFallbackCannotBypassPrimary(t *testing.T) {
 		Fallback: []string{"US"},
 	}
 	sched := NewScheduler(1, 0, reputation.NewEngine(), cfg) // required = 1
+	cacheAllTestNodeCredentials(t)
 
 	res, err := sched.SelectNextCandidate()
 	if err != nil {
@@ -265,6 +282,7 @@ func TestPrimaryQualifiedCapacitySatisfied(t *testing.T) {
 		Fallback: []string{"US"},
 	}
 	sched := NewScheduler(3, 2, reputation.NewEngine(), cfg) // required = 5
+	cacheAllTestNodeCredentials(t)
 
 	res, err := sched.SelectNextCandidate()
 	if err != nil {
@@ -280,5 +298,26 @@ func TestPrimaryQualifiedCapacitySatisfied(t *testing.T) {
 	}
 	if res.Node.ID != "JP-QUALIFIED" {
 		t.Errorf("expected JP-QUALIFIED node to be selected, got %s (country: %s)", res.Node.ID, res.Node.Country)
+	}
+}
+
+func TestCredentiallessQualifiedNodeDoesNotBlockFallback(t *testing.T) {
+	setupTestDB(t)
+	requireCreate := func(node *models.Node) {
+		if err := database.DB.Create(node).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireCreate(&models.Node{ID: "JP-NO-CREDENTIAL", IP: "192.0.2.10", Country: "JP", Status: models.StatusQualified})
+	requireCreate(&models.Node{ID: "US-READY", IP: "198.51.100.10", Country: "US", Status: models.StatusDiscovered})
+	discovery.SetOVPNSecret("US-READY", "test-credential")
+
+	sched := NewScheduler(1, 0, reputation.NewEngine(), config.RegionConfig{Primary: "JP", Fallback: []string{"US"}})
+	result, err := sched.SelectNextCandidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.QualifiedCapacity != 0 || !result.FallbackEnabled || result.Node.ID != "US-READY" {
+		t.Fatalf("credentialless primary must not block ready fallback: %+v", result)
 	}
 }

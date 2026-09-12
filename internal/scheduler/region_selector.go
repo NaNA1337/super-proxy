@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/NaNA1337/super-proxy/internal/database"
+	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"gorm.io/gorm"
 )
@@ -51,24 +52,36 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 
 	primaryRegion := strings.ToUpper(strings.TrimSpace(s.RegionConfig.Primary))
 
-	// 1. Count total qualified capacity in Primary region (active, standby, qualified, healthy, discovered)
-	var qualifiedCapacity int64
+	// 1. Count usable qualified capacity in Primary. Running ACTIVE/STANDBY
+	// tunnels remain capacity; unassigned QUALIFIED/HEALTHY nodes require a
+	// current runtime credential before they count.
+	var qualifiedNodes []models.Node
 	primaryQuery := database.DB.Model(&models.Node{}).
 		Where("status IN (?) AND fail_count < 3", qualifiedCapacityStatuses)
 	if primaryRegion != "" {
 		primaryQuery = primaryQuery.Where("UPPER(country) = ?", primaryRegion)
 	}
-	if err := primaryQuery.Count(&qualifiedCapacity).Error; err != nil {
-		return nil, fmt.Errorf("failed to count primary qualified capacity in DB: %w", err)
+	if err := primaryQuery.Find(&qualifiedNodes).Error; err != nil {
+		return nil, fmt.Errorf("failed to load primary qualified capacity from DB: %w", err)
+	}
+	qualifiedCapacity := 0
+	for i := range qualifiedNodes {
+		if qualifiedNodes[i].Status == models.StatusActive || qualifiedNodes[i].Status == models.StatusStandby {
+			qualifiedCapacity++
+			continue
+		}
+		if _, ok := discovery.GetOVPNSecret(qualifiedNodes[i].ID); ok {
+			qualifiedCapacity++
+		}
 	}
 
-	fallbackEnabled := int(qualifiedCapacity) < required
+	fallbackEnabled := qualifiedCapacity < required
 	log.Printf("[Scheduler] Region capacity audit: primary=%s, qualified_capacity=%d, required=%d, fallback enabled=%v",
 		primaryRegion, qualifiedCapacity, required, fallbackEnabled)
 
 	res := &CandidateSelectionResult{
-		QualifiedCapacity: int(qualifiedCapacity),
-		PrimaryCount:      int(qualifiedCapacity),
+		QualifiedCapacity: qualifiedCapacity,
+		PrimaryCount:      qualifiedCapacity,
 		Required:          required,
 		FallbackEnabled:   fallbackEnabled,
 	}
@@ -82,6 +95,10 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 			return nil, err
 		}
 		for i := range candidates {
+			if _, ok := discovery.GetOVPNSecret(candidates[i].ID); !ok {
+				log.Printf("[Scheduler] Skipping candidate %s: OpenVPN credentials are not available in memory", candidates[i].IP)
+				continue
+			}
 			if err := s.CheckPrefixDiversity(&candidates[i], "", -1); err != nil {
 				log.Printf("[Scheduler] Skipping /24-duplicate candidate %s: %v", candidates[i].IP, err)
 				continue

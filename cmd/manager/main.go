@@ -22,8 +22,6 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/routing"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/NaNA1337/super-proxy/internal/xray"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 var version = "dev"
@@ -326,12 +324,7 @@ func runPeriodicDiscovery(ctx context.Context, url string, interval time.Duratio
 		if err != nil {
 			log.Printf("[Discovery] Fetch failed (will retry): %v", err)
 		} else if len(nodes) > 0 {
-			txErr := database.DB.Transaction(func(tx *gorm.DB) error {
-				return tx.Clauses(clause.OnConflict{
-					Columns:   []clause.Column{{Name: "id"}},
-					DoUpdates: clause.AssignmentColumns(upsertCols),
-				}).Create(&nodes).Error
-			})
+			txErr := discovery.UpsertFreshNodes(database.DB, nodes, upsertCols)
 			if txErr != nil {
 				log.Printf("[Discovery] Refresh failed: %v", txErr)
 			} else {

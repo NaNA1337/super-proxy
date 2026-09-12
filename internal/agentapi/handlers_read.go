@@ -230,15 +230,22 @@ func handlePool(w http.ResponseWriter, r *http.Request) {
 
 func handlePoolQualified(w http.ResponseWriter, r *http.Request) {
 	nodes := make([]models.Node, 0)
-	// Only return nodes that have been vetted (DISCOVERED/STANDBY)
-	database.DB.Where("status IN ?", []string{"DISCOVERED", "STANDBY"}).Find(&nodes)
+	// Return states accepted by the manual switch endpoint.
+	database.DB.Where("status IN ?", []string{"DISCOVERED", "QUALIFIED", "STANDBY"}).Find(&nodes)
 
-	// Strip out raw credentials and sanitize config for list endpoints
+	// A node is switchable only while its raw OpenVPN credentials exist in the
+	// runtime cache. Never expose the credential itself.
+	available := make([]models.Node, 0, len(nodes))
 	for i := range nodes {
+		if _, ok := discovery.GetOVPNSecret(nodes[i].ID); !ok {
+			continue
+		}
+		nodes[i].CredentialsAvailable = true
 		nodes[i].OpenVPN = ""
 		nodes[i].OpenVPNConfig = discovery.StripSecrets(nodes[i].OpenVPNConfig)
+		available = append(available, nodes[i])
 	}
-	sendJSON(w, nodes)
+	sendJSON(w, available)
 }
 
 func handleNodeDetails(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +264,7 @@ func handleNodeDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Guarantee that raw credentials and private keys never leave via API
+	_, node.CredentialsAvailable = discovery.GetOVPNSecret(node.ID)
 	node.OpenVPN = ""
 	node.OpenVPNConfig = discovery.StripSecrets(node.OpenVPNConfig)
 
@@ -314,6 +322,7 @@ func handleNodesList(w http.ResponseWriter, r *http.Request) {
 	query.Order("score DESC, uptime DESC").Limit(limit).Offset(offset).Find(&nodes)
 
 	for i := range nodes {
+		_, nodes[i].CredentialsAvailable = discovery.GetOVPNSecret(nodes[i].ID)
 		nodes[i].OpenVPN = ""
 		nodes[i].OpenVPNConfig = discovery.StripSecrets(nodes[i].OpenVPNConfig)
 	}

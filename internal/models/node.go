@@ -68,15 +68,17 @@ var NodeUpsertColumns = []string{
 type Node struct {
 	ObservedExitIP string `gorm:"column:observed_exit_ip" json:"observed_exit_ip,omitempty"` // Measured NAT egress; not the VPN server endpoint.
 	ID             string `gorm:"primaryKey;column:id" json:"id"`                            // Stable node identity (IP)
-	HostName       string `gorm:"column:host_name" json:"hostname"`
-	IP             string `gorm:"index;column:ip" json:"ip"`
-	Score          int    `gorm:"column:score" json:"score"` // Original VPN Gate score
-	Country        string `gorm:"index;column:country" json:"country"`
-	CountryL       string `gorm:"column:country_long" json:"country_long"`
-	Sessions       int    `gorm:"column:sessions" json:"sessions"`
-	Uptime         int64  `gorm:"column:uptime" json:"uptime"` // in milliseconds
-	Users          int    `gorm:"column:users" json:"users"`
-	Message        string `gorm:"column:message" json:"message"`
+	// CredentialsAvailable is runtime-only. Raw OpenVPN credentials never enter the DB or API.
+	CredentialsAvailable bool   `gorm:"-" json:"credentials_available"`
+	HostName             string `gorm:"column:host_name" json:"hostname"`
+	IP                   string `gorm:"index;column:ip" json:"ip"`
+	Score                int    `gorm:"column:score" json:"score"` // Original VPN Gate score
+	Country              string `gorm:"index;column:country" json:"country"`
+	CountryL             string `gorm:"column:country_long" json:"country_long"`
+	Sessions             int    `gorm:"column:sessions" json:"sessions"`
+	Uptime               int64  `gorm:"column:uptime" json:"uptime"` // in milliseconds
+	Users                int    `gorm:"column:users" json:"users"`
+	Message              string `gorm:"column:message" json:"message"`
 	// OpenVPN holds raw base64 credentials in-memory ONLY during discovery.
 	// It is NEVER persisted to DB (column is kept empty) and NEVER exposed in JSON.
 	OpenVPN   string `gorm:"column:openvpn_config_base64" json:"-"`

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/NaNA1337/super-proxy/internal/database"
+	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/google/uuid"
@@ -112,6 +113,11 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Node already in use by slot %d", otherSlot), http.StatusConflict)
 			return
 		}
+	}
+	if _, ok := discovery.GetOVPNSecret(node.ID); !ok {
+		sched.Mu.Unlock()
+		http.Error(w, "Node is waiting for VPN Gate rediscovery; OpenVPN credentials are not available in memory", http.StatusConflict)
+		return
 	}
 
 	// Enforce /24 diversity atomically with the reservation. The slot being
