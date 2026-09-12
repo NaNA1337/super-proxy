@@ -1,159 +1,218 @@
 # Super-Proxy
 
-Linux 多出口代理核心：发现 VPN Gate 节点、建立 OpenVPN 隧道，通过 Xray 和 Linux 策略路由管理出口，并提供 HTTPS 管理 API。Web 控制台在独立仓库 [super-proxy-manager](https://github.com/NaNA1337/super-proxy-manager)。
-
-本轮检查从核心 `755b1b7`、Manager `9864745` 开始，当前修复和验证结果见 [可用性检查报告](docs/usability-report.md)。自动实时套件已跑通 VPN Gate 获取、三个活动出口、Manager 接入、五种分享配置及 Reality 实际 HTTPS 流量；具体部署仍应检查自己的活动隧道和实际代理请求。
-
-## 两个项目如何协作
+Super-Proxy 是运行在 Linux 服务器上的多出口代理核心。它自动获取 VPN Gate 节点，维护 3 条活动 OpenVPN 出口和 2 条备用隧道，并通过一个 VLESS Reality 入口对外服务。
 
 ```text
-浏览器 → Manager HTTP :8443（生产环境前置 HTTPS）
-                    ↓ HTTPS + Bearer Token + 证书指纹
-         Super-Proxy Agent :60000
-                    ↓ 调度、配置、监控
-客户端 → Xray VLESS Reality :443 → 标记 100/101/102 → OpenVPN 出口
+客户端 → TCP/443 VLESS Reality → Xray → 路由表 100/101/102 → 3 个 OpenVPN 出口
+                                            ↑
+                     Manager → HTTPS/60000 Agent API
 ```
 
-- 一个核心实例有 3 个活动槽位、最多 2 个备用隧道；出口按区域与质量选择。
-- 本机 SOCKS5 为 `127.0.0.1:1080`，Xray 内部 API 为 `127.0.0.1:10085`。
-- VLESS 公网端口固定 `443`，Agent 端口固定 `60000`，Manager 默认 `8443` **使用 HTTP**。
-- 多个 VPN 出口共用一个 VLESS 入口；选择某个出口查看配置，并不会创建绑定该出口的独立 VLESS 入站。
-- 公网 VLESS 出站限制目标端口 443。不要用访问 HTTP/80 来判断它是否正常。
+当前稳定版为 [v1.1.3](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.3)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
 
-## 从源码部署
+## 5 分钟部署
 
-需要 Linux、root、TUN、网络名称空间与策略路由支持；核心程序主动检查 root 身份。Go 版本以 [go.mod](go.mod) 为准（声明 1.25.0，依赖可能触发工具链自动下载；本轮实际工具链见检查报告）。安装运行工具：
+适用于使用 systemd 的 Ubuntu/Debian `amd64` 或 `arm64` 服务器。需要 root、可用的 `/dev/net/tun`、公网 IPv4 或解析到本机的域名，以及未被其他程序占用的 TCP/443。
+
+### 1. 安装 Xray
+
+Super-Proxy 会自行启动和监控 Xray，但不会把 Xray 二进制打进安装包。使用 [XTLS 官方安装脚本](https://github.com/XTLS/Xray-install) 安装：
 
 ```bash
+curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o /tmp/install-xray.sh
+sudo bash /tmp/install-xray.sh install
+
+# Super-Proxy 自己管理 Xray，停用安装脚本创建的独立服务，避免端口冲突。
+sudo systemctl disable --now xray.service 2>/dev/null || true
+xray version
+```
+
+### 2. 安装 Super-Proxy
+
+```bash
+VERSION=1.1.3
+ARCH="$(dpkg --print-architecture)"
+case "$ARCH" in amd64|arm64) ;; *) echo "不支持的架构: $ARCH"; exit 1 ;; esac
+
+mkdir -p /tmp/super-proxy-install
+cd /tmp/super-proxy-install
+curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
+curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"
+sha256sum -c "super-proxy_${VERSION}_${ARCH}.deb.sha256"
 sudo apt-get update
-sudo apt-get install -y openvpn iproute2 iptables ca-certificates curl openssl
+sudo apt-get install -y "./super-proxy_${VERSION}_${ARCH}.deb"
+super-proxy --version
 ```
 
-还需安装 Xray-core，确保 `xray version` 和 `xray run -test` 可用。请按 Xray 官方安装流程安装二进制。核心自行监督 Xray 子进程；独立的 Xray 服务不能同时占用 443、1080、10085。
+安装包会先创建安全的“仅管理”配置，不会自动启动服务或开放公网端口。下面一步会为首次部署生成完整且固定的 API Token、UUID、Reality 密钥和 short ID。
 
-在本仓库根目录执行：
+### 3. 生成生产配置
+
+以下命令只用于首次安装。已有可用配置时不要重新生成，否则现有客户端和 Manager 凭据会失效。
 
 ```bash
-CGO_ENABLED=0 go build -trimpath -o super-proxy ./cmd/manager
-sudo install -m 755 super-proxy /usr/local/bin/super-proxy
+# 自动读取本机公网 IPv4；使用域名时直接改成 PUBLIC_ADDRESS=proxy.example.com。
+PUBLIC_ADDRESS="$(curl -4fsS https://api.ipify.org)"
+test -n "$PUBLIC_ADDRESS" && echo "公网入口: $PUBLIC_ADDRESS"
 
-# 改为这台服务器真实的公网 IPv4 或 DNS 名称。
-# 生成的配置包含随机 API Token、UUID、配对密钥和 short ID，权限 0600。
-# 命令拒绝覆盖已有配置，重启时请继续使用同一文件。
-sudo go run ./cmd/init-config -address proxy.example.com -output /etc/super-proxy/config.yaml
-sudo install -m 644 configs/super-proxy.service /etc/systemd/system/super-proxy.service
+# 保存安装包创建的仅管理配置，再生成完整配置。
+sudo mv /etc/super-proxy/config.yaml /etc/super-proxy/config.management-only.yaml
+sudo super-proxy-init-config \
+  -address "$PUBLIC_ADDRESS" \
+  -output /etc/super-proxy/config.yaml
+sudo chmod 600 /etc/super-proxy/config.yaml
+```
+
+如果服务器在 NAT、CDN 或负载均衡器之后，自动获取的地址可能不正确，请显式设置真实入口 IP 或域名。Reality 必须直接收到客户端的 TCP 连接，普通 HTTP CDN 不能代转 VLESS Reality。
+
+### 4. 启动
+
+```bash
+# UFW 用户只需对客户端开放 443；云厂商安全组也要放行 TCP/443。
+sudo ufw allow 443/tcp 2>/dev/null || true
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now super-proxy
-sudo systemctl status super-proxy
+sudo systemctl status super-proxy --no-pager
+```
+
+启动成功后应监听：
+
+| 端口 | 默认监听 | 用途 |
+| --- | --- | --- |
+| TCP/443 | `0.0.0.0` | 客户端 VLESS Reality |
+| TCP/60000 | `127.0.0.1` | Manager / Agent HTTPS API |
+| TCP/1080 | `127.0.0.1` | 本机 SOCKS5 |
+| TCP/10085 | `127.0.0.1` | Xray 内部 API |
+
+检查端口和日志：
+
+```bash
+sudo ss -lntp | grep -E ':(443|60000|1080|10085)\b'
 sudo journalctl -u super-proxy -n 100 --no-pager
 ```
 
-如果 sudo 环境没有 Go，先 `go build -o init-config ./cmd/init-config`，再 `sudo ./init-config ...`。`proxy.example.com` 是文档占位符，不能用于公网连通验收。
-
-## Debian 包首次启用
-
-`.deb` 安装后会安全地创建一个仅管理配置，但不会自动启用服务或开放公网端口。此时 `xray.vless.enabled: false`、Agent 监听 `127.0.0.1`，所以分享接口返回 400 是预期行为。要提供完整代理服务，先用真实公网地址生成完整配置，再启用服务：
+### 5. 验收并导出客户端配置
 
 ```bash
-sudo super-proxy-init-config -address 203.0.113.10 -output /etc/super-proxy/config.production.yaml
-# 首次安装且还没有接入 Manager 时，用生成的完整配置替换仅管理配置。
-sudo install -m 600 /etc/super-proxy/config.production.yaml /etc/super-proxy/config.yaml
+export XRAY_MANAGER_API_KEY="$(sudo awk '/^[[:space:]]*key:/ {print $2; exit}' /etc/super-proxy/config.yaml)"
+export AGENT_CERT=/etc/super-proxy/cert.pem
+API_EXAMPLE=/usr/share/doc/super-proxy/examples/agent-api.sh
+
+"$API_EXAMPLE" /health/ready
+"$API_EXAMPLE" /api/v1/status
+"$API_EXAMPLE" /api/v1/current-exits
+"$API_EXAMPLE" /api/v1/client-config/all > "$HOME/super-proxy-client-bundle.json"
+"$API_EXAMPLE" /api/v1/export/xray > "$HOME/xray-client.json"
+unset XRAY_MANAGER_API_KEY
+```
+
+`current-exits` 初次可能是 `[]`。VPN Gate 节点发现、连接和测速通常需要几十秒，个别公共节点失效后程序会自动尝试其他节点。使用下面命令持续观察，直到出现 3 个活动出口：
+
+```bash
+sudo journalctl -fu super-proxy
+```
+
+将 `$HOME/xray-client.json` 安全复制到客户端，先检查再启动：
+
+```bash
+xray run -test -c xray-client.json
+xray run -c xray-client.json
+```
+
+导出的 Xray 客户端默认在 `127.0.0.1:10808` 提供 SOCKS5。另开终端验证实际出口：
+
+```bash
+curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
+```
+
+返回值应是 VPN 出口地址，而不是服务器自身公网地址。公网出站只允许目标 TCP/443，请使用 HTTPS 测试。
+
+## 升级
+
+升级会保留 `/etc/super-proxy/config.yaml`、TLS 证书和数据库。不要重新运行 `super-proxy-init-config`。
+
+```bash
+sudo cp -a /etc/super-proxy "/etc/super-proxy.backup.$(date +%Y%m%d-%H%M%S)"
+
+VERSION=1.1.3
+ARCH="$(dpkg --print-architecture)"
+curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
+curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"
+sha256sum -c "super-proxy_${VERSION}_${ARCH}.deb.sha256"
+sudo apt-get install -y "./super-proxy_${VERSION}_${ARCH}.deb"
+sudo systemctl restart super-proxy
+super-proxy --version
+```
+
+## 接入 Web Manager
+
+同机部署 Manager 时，Agent 保持默认 `127.0.0.1:60000`，无需把管理端口暴露到公网。安装 [Manager v1.0.1](https://github.com/NaNA1337/super-proxy-manager/releases/tag/v1.0.1) 后，用下面的信息添加主机：
+
+| Manager 字段 | 填写内容 |
+| --- | --- |
+| Address | 核心服务器的公网 IP 或域名 |
+| Agent URL | `https://127.0.0.1:60000` |
+| Token | `/etc/super-proxy/config.yaml` 中的 `api.key` |
+| TLS fingerprint | 下方命令输出的 SHA-256 指纹 |
+
+```bash
+sudo openssl x509 -in /etc/super-proxy/cert.pem -noout -fingerprint -sha256
+```
+
+Manager 同机连接回环 Agent 时，启动 Manager 需要设置 `ALLOW_PRIVATE_HOSTS=true`。跨服务器管理时才修改核心的 `api.listen`，并且只允许 Manager 来源访问 TCP/60000；不要向整个公网开放 Agent API。
+
+## 常见问题
+
+| 现象 | 处理方法 |
+| --- | --- |
+| `super-proxy.service` 是 disabled/inactive | 安装包不会自动启动；执行 `sudo systemctl enable --now super-proxy` |
+| 启动提示找不到 `xray` | 安装 Xray，并确认 `xray version` 可执行 |
+| 443 端口占用 | 停止独立 `xray.service`、Nginx/Caddy 或其他占用 443 的服务 |
+| 只有 API，分享接口返回 400 | 当前还是 `management-only` 配置；按首次部署步骤生成完整配置 |
+| `current-exits` 长时间为空 | 检查 VPN Gate 连通性、OpenVPN 日志、区域设置和系统时间 |
+| 外部客户端连不上 | 检查 TCP/443 的 UFW、云安全组、NAT 转发和 `public_address` |
+| Manager 无法连接 60000 | 同机用 `https://127.0.0.1:60000`；跨机检查 `api.listen` 和防火墙 |
+| Reality 握手失败且配置使用 Microsoft SNI | 保留备份后迁移到生成器当前默认的 `icloud.com:443` |
+| 重启后客户端全部失效 | 检查是否误删或重新生成了 `/etc/super-proxy/config.yaml` |
+
+进一步诊断：
+
+```bash
+sudo super-proxy diagnose environment
+sudo super-proxy diagnose routing
+sudo journalctl -u super-proxy -b --no-pager
+```
+
+## 从源码构建
+
+Go 版本以 [go.mod](go.mod) 为准。先安装 `openvpn iproute2 iptables conntrack iputils-ping ca-certificates` 和 Xray，然后在仓库根目录执行：
+
+```bash
+CGO_ENABLED=0 go build -trimpath -o super-proxy ./cmd/manager
+CGO_ENABLED=0 go build -trimpath -o super-proxy-init-config ./cmd/init-config
+sudo install -m 755 super-proxy super-proxy-init-config /usr/local/bin/
+sudo install -m 644 configs/super-proxy.service /etc/systemd/system/super-proxy.service
+sudo install -d -m 700 /etc/super-proxy
+sudo super-proxy-init-config -address 你的公网IP或域名 -output /etc/super-proxy/config.yaml
 sudo systemctl daemon-reload
 sudo systemctl enable --now super-proxy
 ```
 
-将 `203.0.113.10` 换成服务器真实公网 IP 或 DNS 名称。若已有 Manager 主机、订阅或客户端，替换配置会改变 API Token 和 Reality 凭据；应先备份 `/etc/super-proxy`，并同步更新客户端和 Manager。旧配置若仍使用 `www.microsoft.com`，当前 Xray 版本可能因目标证书过大导致 Reality 握手失败；新生成配置使用 `icloud.com:443`。
-
-生成器默认将数据库、运行时 Xray 配置和 TLS 证书放在配置文件所在目录；路径为绝对路径。核心启动会重写 `xray_config.json`，请编辑 YAML 配置，勿手动编辑生成文件。TLS 证书为自签名证书，Manager 应保存并校验其 SHA-256 指纹。
-
-防火墙按部署实际放行：客户端到 TCP/443，Manager 到 TCP/60000；保留你的 SSH 管理入口。同机 Manager API 保持监听 `127.0.0.1`。分机部署将 `api.listen` 改为服务器管理地址，并只允许 Manager 来源访问。核心 IPv6 防泄漏规则会影响物理网卡 IPv6 入站/出站，首次部署使用 IPv4 管理连接。
-
-## 首次验证
-
-从受信任的本地配置取得 `api.key`，避免把它写进命令历史：
-
-```bash
-read -rsp 'Agent API token: ' XRAY_MANAGER_API_KEY; echo
-export XRAY_MANAGER_API_KEY
-export AGENT_CERT=/etc/super-proxy/cert.pem
-
-# 脚本对自签名证书使用公钥固定校验，不只是关闭证书验证。
-./examples/agent-api.sh /api/v1/status
-./examples/agent-api.sh /api/v1/current-exits
-./examples/agent-api.sh /api/v1/slots
-./examples/agent-api.sh /api/v1/client-config/all > client-config.json
-sudo super-proxy diagnose routing
-```
-
-`current-exits` 为 `[]` 时尚无活动出口。检查发现、OpenVPN 连接、区域筛选和健康检测日志。首次发现依赖外部 VPN Gate，可能失败或较慢。配置导出要求 VLESS 已启用、有效公网地址已配置且真实 Xray 入站就绪；失败返回 HTTP 400。
-
-## 接入 Web Manager
-
-在 `/root/super-proxy-manager`（或你的 Manager 克隆目录）构建：
-
-```bash
-./scripts/build.sh
-ALLOW_PRIVATE_HOSTS=true ./bin/super-proxy-web \
-  -host 127.0.0.1 -port 8443 -data-dir ./data
-```
-
-浏览器连接 Manager；远程开发可用 SSH 转发 `8443`。首次账号 `admin`，临时密码输出在 Manager 启动日志，首次登录强制改密。
-
-进入 **Hosts Fleet → Add Host**：
-
-| 字段 | 同机示例 |
-| --- | --- |
-| Name | 我的出口网关 |
-| Address | 核心服务器的公网 IP / DNS 名称 |
-| Agent URL | `https://127.0.0.1:60000` |
-| Token | 核心 YAML 的 `api.key` |
-| TLS fingerprint | 与下方本机命令输出核对 |
-
-```bash
-openssl x509 -in /etc/super-proxy/cert.pem -noout -fingerprint -sha256
-```
-
-`ALLOW_PRIVATE_HOSTS=true` 用于明确允许回环或内网 Agent 地址；分机公网接入通常不需要。测试连接、保存并设为默认主机，然后查看 Dashboard、Slots Manager 和 Share Links。Manager 必须使用本轮适配后的代码，旧版本会把核心 schema v1 配置包判为不可用。
-
-完整步骤见 [部署和操作教程](docs/tutorial.md)；Manager 的 [README](../super-proxy-manager/README.md) 介绍独立部署和数据备份。
-
-## 配置与 API
-
-[基础配置示例](configs/config.example.yaml) 默认关闭公网 VLESS，只适合起步检查。生产建议用 `cmd/init-config` 生成并保留固定凭据。
-
-- `reputation.enabled: false`：跳过信誉拒绝，但仍进行隧道和健康检测。启用时 `failure_policy` 只支持 `conservative` 或 `lenient`，不支持 `allow/block`。
-- `XRAY_MANAGER_API_KEY` 可覆盖 API Token；`AGENT_API_KEY` 不受支持。
-- VLESS UUID、私钥、公钥、short ID 以 YAML 为准；未固定的字段可能在重启时变化。生成器一次性固定这些字段。
-- `XRAY_VLESS_ENABLED=true` 可开启 VLESS；公网地址优先在 YAML `xray.vless.public_address` 设置。
-
-所有下列接口都需要认证，没有 `/healthz` 路由。一般用 `Authorization: Bearer TOKEN`，导出接口也兼容查询参数 Token，但日常操作优先请求头。
-
-| 方法 | 路径 | 返回 / 用途 |
-| --- | --- | --- |
-| GET | `/api/v1/status`、`/api/v1/system` | 实例信息、宿主机指标 |
-| GET | `/api/v1/current-exits` | JSON 数组；无出口为 `[]` |
-| GET | `/api/v1/slots` | `total_configured`、`slots`、`manual_overrides` |
-| GET | `/api/v1/pool`、`/api/v1/pool/qualified` | 池统计、候选列表 |
-| GET | `/api/v1/nodes`、`/api/v1/nodes/{id}` | 节点分页列表 / 详情 |
-| GET | `/api/v1/routing` | 槽位路由信息；内核真实状态需 diagnose 检查 |
-| POST | `/api/v1/slots/{slot}/switch` | 请求体 `{"node_id":"真实节点ID"}`，成功 202 |
-| GET | `/api/v1/operations/{operation_id}` | 异步操作；终态 `ACTIVE` 或 `FAILED` |
-| GET | `/api/v1/client-config/all` | `schema_version: 1`、node、endpoint、reality、profiles |
-| GET | `/api/v1/client-config` | 兼容旧版聚合接口 |
-| GET | `/api/v1/export/clash`、`/api/v1/export/singbox`、`/api/v1/export/xray`、`/api/v1/export/sub` | YAML / JSON / Base64 订阅 |
-| GET | `/metrics` | Prometheus 文本 |
-
-## 开发与测试
+## 开发与完整文档
 
 ```bash
 go test ./...
 go test -race ./...
 go vet ./...
 sudo bash scripts/test-network.sh
-# 构建两个仓库，在隔离网络/挂载名称空间内跑真实核心、Xray、Manager 和 Chromium：
 sudo bash scripts/test-manager.sh /root/super-proxy-manager
+sudo python3 tests/live/check.py /root/super-proxy-manager
 ```
 
-联调需 Manager 前端依赖和 Playwright Chromium（`cd ../super-proxy-manager/frontend && npx playwright install chromium`）。运行 root 测试前确认是测试环境；核心启动复现测试现已隔离网络与 `/run`。公网 VPN Gate、三出口、Manager 和 Reality 数据链路可用 `sudo python3 tests/live/check.py /root/super-proxy-manager` 在独立网络名称空间中验收。
+- [详细部署、API、手动切换与客户端教程](docs/tutorial.md)
+- [可用性检查报告](docs/usability-report.md)
+- [生产调试与发布验证](PRODUCTION_DEBUG_REPORT.md)
+- [配置示例](configs/config.example.yaml)
 
-性能测试工具：`go build -o super-proxy-benchmark ./cmd/benchmark`；先运行 `./super-proxy-benchmark -h` 查看实际参数，在已有可用隧道上测试。
+核心固定管理 3 个活动槽位和最多 2 个备用隧道。活动接口名可能是 `tun16`、`tun23` 等动态名称；逻辑槽位仍为 0、1、2，对应 mark 和路由表 100、101、102。多个出口共用一个 VLESS 入口，单个分享链接不会固定到某一条 VPN Gate 节点。
