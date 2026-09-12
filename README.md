@@ -55,10 +55,15 @@ super-proxy --version
 PUBLIC_ADDRESS="$(curl -4fsS https://api.ipify.org)"
 test -n "$PUBLIC_ADDRESS" && echo "公网入口: $PUBLIC_ADDRESS"
 
+# Manager 同机运行用 127.0.0.1；异机运行优先填写服务器内网 IP。
+# 只有没有内网互通时才用 0.0.0.0，并用防火墙限制 Manager 来源。
+API_LISTEN=127.0.0.1
+
 # 保存安装包创建的仅管理配置，再生成完整配置。
 sudo mv /etc/super-proxy/config.yaml /etc/super-proxy/config.management-only.yaml
 sudo super-proxy-init-config \
   -address "$PUBLIC_ADDRESS" \
+  -api-listen "$API_LISTEN" \
   -output /etc/super-proxy/config.yaml
 sudo chmod 600 /etc/super-proxy/config.yaml
 ```
@@ -71,6 +76,9 @@ sudo chmod 600 /etc/super-proxy/config.yaml
 # UFW 用户只需对客户端开放 443；云厂商安全组也要放行 TCP/443。
 sudo ufw allow 443/tcp 2>/dev/null || true
 
+# 异机 Manager 才需要这一条；将地址替换为 Manager 的固定来源 IP。
+# sudo ufw allow from 198.51.100.20 to any port 60000 proto tcp
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now super-proxy
 sudo systemctl status super-proxy --no-pager
@@ -81,7 +89,7 @@ sudo systemctl status super-proxy --no-pager
 | 端口 | 默认监听 | 用途 |
 | --- | --- | --- |
 | TCP/443 | `0.0.0.0` | 客户端 VLESS Reality |
-| TCP/60000 | `127.0.0.1` | Manager / Agent HTTPS API |
+| TCP/60000 | `127.0.0.1` 或配置的管理地址 | Manager / Agent HTTPS API |
 | TCP/1080 | `127.0.0.1` | 本机 SOCKS5 |
 | TCP/10085 | `127.0.0.1` | Xray 内部 API |
 
@@ -147,12 +155,20 @@ super-proxy --version
 
 ## 接入 Web Manager
 
-同机部署 Manager 时，Agent 保持默认 `127.0.0.1:60000`，无需把管理端口暴露到公网。安装 [Manager v1.0.1](https://github.com/NaNA1337/super-proxy-manager/releases/tag/v1.0.1) 后，用下面的信息添加主机：
+同机部署 Manager 时，Agent 保持默认 `127.0.0.1:60000`，无需把管理端口暴露到公网。异机部署时，核心和 Manager 的配置如下：
+
+1. 两台服务器有内网互通：将 `api.listen` 设为核心服务器的内网 IP，例如 `10.0.0.5`。
+2. 只能通过公网连接：将 `api.listen` 设为 `0.0.0.0`，然后在系统防火墙和云安全组中仅允许 Manager 的固定来源 IP 访问 TCP/60000。
+3. 修改已有配置后执行 `sudo systemctl restart super-proxy`，再用 `sudo ss -lntp | grep ':60000'` 确认监听地址。
+
+不要对所有公网来源开放 TCP/60000。Agent 已强制使用 HTTPS、Bearer Token、证书指纹校验和限速，但来源防火墙仍是远程管理入口的第一层保护。
+
+安装 [Manager v1.0.1](https://github.com/NaNA1337/super-proxy-manager/releases/tag/v1.0.1) 后，用下面的信息添加主机：
 
 | Manager 字段 | 填写内容 |
 | --- | --- |
 | Address | 核心服务器的公网 IP 或域名 |
-| Agent URL | `https://127.0.0.1:60000` |
+| Agent URL | 同机 `https://127.0.0.1:60000`；异机 `https://核心管理IP或域名:60000` |
 | Token | `/etc/super-proxy/config.yaml` 中的 `api.key` |
 | TLS fingerprint | 下方命令输出的 SHA-256 指纹 |
 
@@ -160,7 +176,7 @@ super-proxy --version
 sudo openssl x509 -in /etc/super-proxy/cert.pem -noout -fingerprint -sha256
 ```
 
-Manager 同机连接回环 Agent 时，启动 Manager 需要设置 `ALLOW_PRIVATE_HOSTS=true`。跨服务器管理时才修改核心的 `api.listen`，并且只允许 Manager 来源访问 TCP/60000；不要向整个公网开放 Agent API。
+Manager 连接回环或 `10.x`、`172.16-31.x`、`192.168.x` 等内网 Agent 地址时，启动 Manager 需要设置 `ALLOW_PRIVATE_HOSTS=true`。公网 Agent 地址不需要这个选项。
 
 ## 常见问题
 
