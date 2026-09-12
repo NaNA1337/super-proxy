@@ -68,7 +68,45 @@ func InitDatabase(dbPath string) error {
 		log.Printf("[Database] Warning: failed to strip legacy raw OpenVPN secrets: %v", err)
 	}
 
+	// Tunnel and qualification states belong to the previous daemon process.
+	// Force every surviving node through fresh admission and tunnel checks.
+	if err := RecoverRuntimeNodeStates(DB); err != nil {
+		return fmt.Errorf("recover runtime node states: %w", err)
+	}
+
 	log.Printf("Database initialized successfully at %s", dbPath)
+	return nil
+}
+
+// RecoverRuntimeNodeStates resets process-local tunnel states after startup.
+// Historical failures and reputation evidence remain available for audit/scoring.
+func RecoverRuntimeNodeStates(db *gorm.DB) error {
+	if db == nil {
+		return nil
+	}
+	runtimeStates := []string{
+		models.StatusReputationChecked,
+		models.StatusConnecting,
+		models.StatusHealthCheck,
+		models.StatusSpeedTest,
+		models.StatusHealthy,
+		models.StatusQualified,
+		models.StatusStandby,
+		models.StatusActive,
+		models.StatusDraining,
+	}
+	result := db.Model(&models.Node{}).
+		Where("status IN ?", runtimeStates).
+		Updates(map[string]interface{}{
+			"status":           models.StatusDiscovered,
+			"observed_exit_ip": "",
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		log.Printf("[Database] Recovered %d stale runtime node state(s) for fresh admission", result.RowsAffected)
+	}
 	return nil
 }
 

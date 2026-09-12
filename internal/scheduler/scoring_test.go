@@ -37,7 +37,7 @@ func TestScoringEngine_Comprehensive(t *testing.T) {
 		t.Fatalf("Expected score %d, got %d. Explanation: %s", expectedScore, resPrimary.FinalScore, resPrimary.Explanation)
 	}
 
-	// Case 2: Hosting and VPN soft penalties
+	// Case 2: Hosting and VPN traits are hard rejected regardless of score
 	nodeVPN := &models.Node{
 		ID:    "node-vpn",
 		IP:    "198.51.100.11",
@@ -48,12 +48,11 @@ func TestScoringEngine_Comprehensive(t *testing.T) {
 		},
 	}
 	resVPN := engine.EvaluateNode(nodeVPN, false, 0, "")
-	if !resVPN.Allowed {
-		t.Fatalf("VPN/Hosting node should still be allowed with soft penalty")
+	if resVPN.Allowed {
+		t.Fatalf("VPN/Hosting node must be hard rejected")
 	}
-	expectedVPNScore := 100 - 10 - 5 // 85
-	if resVPN.FinalScore != expectedVPNScore {
-		t.Fatalf("Expected score %d, got %d", expectedVPNScore, resVPN.FinalScore)
+	if resVPN.FinalScore != -9999 {
+		t.Fatalf("Expected hard-reject score, got %d", resVPN.FinalScore)
 	}
 
 	// Case 3: Blacklisted node hard reject

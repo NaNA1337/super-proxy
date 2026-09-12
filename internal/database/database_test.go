@@ -6,18 +6,18 @@ import (
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
 func TestParseLegacyNodeID(t *testing.T) {
 	tests := []struct {
-		name         string
-		inputID      string
-		expectedIP   string
-		expectedLeg  bool
+		name        string
+		inputID     string
+		expectedIP  string
+		expectedLeg bool
 	}{
 		{
 			name:        "Pure IPv4",
@@ -200,4 +200,40 @@ func TestMigrateStripRawOVPN(t *testing.T) {
 	// Re-running migration is idempotent
 	err = MigrateStripRawOVPN(db)
 	require.NoError(t, err)
+}
+
+func TestRecoverRuntimeNodeStatesForcesFreshAdmission(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "runtime_recovery.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&models.Node{}))
+
+	require.NoError(t, db.Create(&models.Node{
+		ID:             "old-active",
+		IP:             "198.51.100.10",
+		Status:         models.StatusActive,
+		ObservedExitIP: "203.0.113.20",
+		FailCount:      2,
+		Reputation: models.ReputationMetrics{
+			Status:       "RISKY",
+			ProviderName: "previous-provider",
+		},
+	}).Error)
+	require.NoError(t, db.Create(&models.Node{
+		ID:     "failed-node",
+		IP:     "192.0.2.30",
+		Status: models.StatusFailed,
+	}).Error)
+
+	require.NoError(t, RecoverRuntimeNodeStates(db))
+
+	var recovered models.Node
+	require.NoError(t, db.First(&recovered, "id = ?", "old-active").Error)
+	assert.Equal(t, models.StatusDiscovered, recovered.Status)
+	assert.Empty(t, recovered.ObservedExitIP)
+	assert.Equal(t, 2, recovered.FailCount)
+	assert.Equal(t, "previous-provider", recovered.Reputation.ProviderName)
+
+	var failed models.Node
+	require.NoError(t, db.First(&failed, "id = ?", "failed-node").Error)
+	assert.Equal(t, models.StatusFailed, failed.Status)
 }

@@ -137,9 +137,9 @@ func parseRetryAfter(header string) time.Duration {
 	return 0
 }
 
-func boolPtr(b bool) *bool          { return &b }
-func floatPtr(f float64) *float64   { return &f }
-func intPtr(i int) *int             { return &i }
+func boolPtr(b bool) *bool        { return &b }
+func floatPtr(f float64) *float64 { return &f }
+func intPtr(i int) *int           { return &i }
 
 // ==========================================
 // 1. GreyNoise Provider
@@ -260,34 +260,45 @@ func (g *GreyNoiseProvider) CheckIP(ctx context.Context, ip string) (*Reputation
 
 type IPQSProvider struct {
 	BaseProvider
-	apiKey string
-	client *http.Client
+	apiKey  string
+	client  *http.Client
+	baseURL string
 }
 
 func NewIPQSProvider(apiKey string) *IPQSProvider {
+	return newIPQSProvider(apiKey, "https://ipqualityscore.com/api/json/ip", &http.Client{Timeout: 8 * time.Second})
+}
+
+func newIPQSProvider(apiKey, baseURL string, client *http.Client) *IPQSProvider {
 	p := &IPQSProvider{
-		apiKey: apiKey,
-		client: &http.Client{Timeout: 8 * time.Second},
+		apiKey:  apiKey,
+		client:  client,
+		baseURL: strings.TrimRight(baseURL, "/"),
 	}
 	p.SetName("IPQS")
 	return p
 }
 
 type ipqsResponse struct {
-	Success      bool   `json:"success"`
-	Message      string `json:"message"`
-	FraudScore   int    `json:"fraud_score"`
-	CountryCode  string `json:"country_code"`
-	ISP          string `json:"ISP"`
-	ASN          int    `json:"ASN"`
-	Organization string `json:"organization"`
-	IsCrawler    bool   `json:"is_crawler"`
-	Proxy        bool   `json:"proxy"`
-	VPN          bool   `json:"vpn"`
-	Tor          bool   `json:"tor"`
-	ActiveVPN    bool   `json:"active_vpn"`
-	ActiveTor    bool   `json:"active_tor"`
-	BotStatus    bool   `json:"bot_status"`
+	Success        bool   `json:"success"`
+	Message        string `json:"message"`
+	FraudScore     int    `json:"fraud_score"`
+	CountryCode    string `json:"country_code"`
+	ISP            string `json:"ISP"`
+	ASN            int    `json:"ASN"`
+	Organization   string `json:"organization"`
+	IsCrawler      bool   `json:"is_crawler"`
+	Proxy          bool   `json:"proxy"`
+	VPN            bool   `json:"vpn"`
+	Tor            bool   `json:"tor"`
+	ActiveVPN      bool   `json:"active_vpn"`
+	ActiveTor      bool   `json:"active_tor"`
+	BotStatus      bool   `json:"bot_status"`
+	RecentAbuse    bool   `json:"recent_abuse"`
+	FrequentAbuser bool   `json:"frequent_abuser"`
+	HighRiskAttack bool   `json:"high_risk_attacks"`
+	AbuseVelocity  string `json:"abuse_velocity"`
+	ConnectionType string `json:"connection_type"`
 }
 
 func (q *IPQSProvider) CheckIP(ctx context.Context, ip string) (*ReputationResult, error) {
@@ -303,7 +314,7 @@ func (q *IPQSProvider) CheckIP(ctx context.Context, ip string) (*ReputationResul
 		}, nil
 	}
 
-	reqURL := fmt.Sprintf("https://ipqualityscore.com/api/json/ip/%s/%s?strictness=1&allow_public_access_points=true", q.apiKey, ip)
+	reqURL := fmt.Sprintf("%s/%s/%s?strictness=1&allow_public_access_points=false", q.baseURL, q.apiKey, ip)
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -338,6 +349,10 @@ func (q *IPQSProvider) CheckIP(ctx context.Context, ip string) (*ReputationResul
 		q.RecordFailure(false, 0)
 		return nil, fmt.Errorf("failed to decode IPQS response: %w", err)
 	}
+	if !apiResp.Success {
+		q.RecordFailure(false, 0)
+		return nil, fmt.Errorf("IPQS rejected lookup: %s", apiResp.Message)
+	}
 	q.RecordSuccess()
 
 	asnStr := ""
@@ -366,13 +381,22 @@ func (q *IPQSProvider) CheckIP(ctx context.Context, ip string) (*ReputationResul
 			ASN:          asnStr,
 			ISP:          apiResp.ISP,
 			Organization: apiResp.Organization,
+			NetworkType:  strings.ToLower(apiResp.ConnectionType),
 			IsVPN:        isVPN,
 			IsProxy:      isProxy,
 			IsTor:        isTor,
 		},
 	}
 
-	if apiResp.FraudScore >= 90 || apiResp.BotStatus {
+	activeAbuse := apiResp.RecentAbuse || apiResp.FrequentAbuser || apiResp.HighRiskAttack ||
+		strings.EqualFold(apiResp.AbuseVelocity, "high")
+	prohibitedTrait := isVPN || isProxy || isTor
+	if prohibitedTrait || activeAbuse {
+		res.Status = StatusBad
+		res.HardReject = true
+		res.ProviderReason = fmt.Sprintf("IPQS prohibited classification (VPN=%v, Proxy=%v, Tor=%v, RecentAbuse=%v, FrequentAbuser=%v, HighRiskAttacks=%v, AbuseVelocity=%s)",
+			isVPN, isProxy, isTor, apiResp.RecentAbuse, apiResp.FrequentAbuser, apiResp.HighRiskAttack, apiResp.AbuseVelocity)
+	} else if apiResp.FraudScore >= 90 || apiResp.BotStatus {
 		res.Status = StatusBad
 		res.HardReject = true
 		res.ProviderReason = fmt.Sprintf("IPQS FraudScore: %d, Bot: %v (Hard Reject)", apiResp.FraudScore, apiResp.BotStatus)
@@ -380,7 +404,7 @@ func (q *IPQSProvider) CheckIP(ctx context.Context, ip string) (*ReputationResul
 		res.Status = StatusBad
 		res.ScorePenalty = apiResp.FraudScore / 4
 		res.ProviderReason = fmt.Sprintf("IPQS High FraudScore: %d, Penalty: -%d", apiResp.FraudScore, res.ScorePenalty)
-	} else if isVPN || isProxy || isTor || apiResp.FraudScore >= 25 {
+	} else if apiResp.FraudScore >= 25 {
 		res.Status = StatusRisky
 		res.ScorePenalty = apiResp.FraudScore / 5
 		res.ProviderReason = fmt.Sprintf("IPQS Risky network trait (FraudScore: %d, VPN=%v, Proxy=%v, Tor=%v)", apiResp.FraudScore, isVPN, isProxy, isTor)

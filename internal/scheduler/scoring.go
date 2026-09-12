@@ -69,6 +69,27 @@ func (s *ScoringEngine) EvaluateNodeWithASN(node *models.Node, isPrimaryRegion b
 			Explanations: []string{"Blacklisted by reputation provider"},
 		}
 	}
+	if node.NetClass.IsHosting || node.NetClass.IsVPN || node.NetClass.IsProxy || node.NetClass.IsTor {
+		traits := make([]string, 0, 4)
+		if node.NetClass.IsHosting {
+			traits = append(traits, "hosting/datacenter")
+		}
+		if node.NetClass.IsVPN {
+			traits = append(traits, "VPN")
+		}
+		if node.NetClass.IsProxy {
+			traits = append(traits, "public proxy")
+		}
+		if node.NetClass.IsTor {
+			traits = append(traits, "Tor")
+		}
+		return ScoringResult{
+			FinalScore:   -9999,
+			Allowed:      false,
+			Explanation:  fmt.Sprintf("Node %s (%s) REJECTED: prohibited network traits: %s", node.ID, node.IP, strings.Join(traits, ", ")),
+			Explanations: []string{"Prohibited network traits: " + strings.Join(traits, ", ")},
+		}
+	}
 
 	// 1. Base VPN Gate score
 	vpnGateScore := node.Score
@@ -129,7 +150,8 @@ func (s *ScoringEngine) EvaluateNodeWithASN(node *models.Node, isPrimaryRegion b
 		reasons = append(reasons, fmt.Sprintf("ASN risk penalty: -%d (%s)", asnPenalty, asnReason))
 	}
 
-	// 9. Network Intelligence penalties
+	// 9. Network Intelligence penalties. Prohibited boolean traits are rejected above;
+	// penalties remain for provider-specific scores that do not assert those traits.
 	netPenalty := 0
 	if node.NetClass.IsHosting {
 		netPenalty += s.cfg.HostingPenalty

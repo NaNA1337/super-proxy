@@ -10,7 +10,6 @@ import (
 
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/models"
-	"github.com/NaNA1337/super-proxy/internal/reputation"
 	"github.com/NaNA1337/super-proxy/internal/scheduler"
 	"github.com/google/uuid"
 )
@@ -115,6 +114,14 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Enforce /24 diversity atomically with the reservation. The slot being
+	// replaced is excluded because it will leave the active set after cutover.
+	if err := sched.CheckPrefixDiversityLocked(&node, "", slot); err != nil {
+		sched.Mu.Unlock()
+		http.Error(w, fmt.Sprintf("Node rejected by IPv4 /24 diversity policy: %v", err), http.StatusConflict)
+		return
+	}
+
 	// 5. Acquire atomic generation lease
 	lease, err := sched.Slots.TryAcquireSlot(slot, "manual-switch", opID)
 	if err != nil {
@@ -128,17 +135,13 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 	sched.Mu.Unlock()
 
 	// 7. Reputation check (outside lock since it may take network I/O)
-	repRes, err := sched.RepEngine.EvaluateIP(context.Background(), node.IP)
-	isConservativeUnknown := sched.RepEngine != nil && sched.RepEngine.FailurePolicy() == "conservative" && repRes != nil && repRes.Status == reputation.StatusUnknown
-	if err != nil || repRes == nil || repRes.HardReject || isConservativeUnknown {
+	admissionResult, err := sched.EvaluateIPAdmission(context.Background(), node.IP)
+	scheduler.PersistAdmissionResult(&node, admissionResult)
+	if err != nil {
 		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
 		lease.Release()
 		releaseSlot(slot)
-		reason := "Node rejected by reputation engine"
-		if isConservativeUnknown {
-			reason = "Node rejected: reputation UNKNOWN under conservative fail-closed policy"
-		}
-		http.Error(w, reason, http.StatusForbidden)
+		http.Error(w, fmt.Sprintf("Node rejected by admission policy: %v", err), http.StatusForbidden)
 		return
 	}
 

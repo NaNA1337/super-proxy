@@ -7,6 +7,7 @@ import (
 
 	"github.com/NaNA1337/super-proxy/internal/database"
 	"github.com/NaNA1337/super-proxy/internal/models"
+	"gorm.io/gorm"
 )
 
 // CandidateSelectionResult contains the selected node and region audit details.
@@ -72,20 +73,30 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 		FallbackEnabled:   fallbackEnabled,
 	}
 
-	// Helper to query best unassigned candidate from a region
+	// Select the highest-scoring candidate that does not duplicate an active or
+	// standby endpoint/egress /24.
+	pickDiverseCandidate := func(q *gorm.DB) (*models.Node, error) {
+		var candidates []models.Node
+		if err := q.Order("CASE WHEN status = 'QUALIFIED' THEN 1 WHEN status = 'HEALTHY' THEN 2 ELSE 3 END, score DESC").
+			Limit(512).Find(&candidates).Error; err != nil {
+			return nil, err
+		}
+		for i := range candidates {
+			if err := s.CheckPrefixDiversity(&candidates[i], "", -1); err != nil {
+				log.Printf("[Scheduler] Skipping /24-duplicate candidate %s: %v", candidates[i].IP, err)
+				continue
+			}
+			return &candidates[i], nil
+		}
+		return nil, gorm.ErrRecordNotFound
+	}
+
 	queryBestCandidate := func(countryFilter string) (*models.Node, error) {
-		var n models.Node
 		q := database.DB.Where("status IN (?) AND fail_count < 3", candidateSelectStatuses)
 		if countryFilter != "" {
 			q = q.Where("UPPER(country) = ?", countryFilter)
 		}
-		// Prioritize QUALIFIED first, then HEALTHY, then DISCOVERED; order by score DESC
-		err := q.Order("CASE WHEN status = 'QUALIFIED' THEN 1 WHEN status = 'HEALTHY' THEN 2 ELSE 3 END, score DESC").
-			First(&n).Error
-		if err != nil {
-			return nil, err
-		}
-		return &n, nil
+		return pickDiverseCandidate(q)
 	}
 
 	// Case 1: Primary qualified capacity meets or exceeds required threshold -> Fallback is FORBIDDEN
@@ -122,16 +133,13 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 		return nil, fmt.Errorf("primary candidates exhausted and no fallback regions configured")
 	}
 
-	var fbNode models.Node
-	err := database.DB.Where("status IN (?) AND fail_count < 3 AND UPPER(country) IN ?",
-		candidateSelectStatuses, fallbackUpper).
-		Order("CASE WHEN status = 'QUALIFIED' THEN 1 WHEN status = 'HEALTHY' THEN 2 ELSE 3 END, score DESC").
-		First(&fbNode).Error
+	fbNode, err := pickDiverseCandidate(database.DB.Where("status IN (?) AND fail_count < 3 AND UPPER(country) IN ?",
+		candidateSelectStatuses, fallbackUpper))
 	if err != nil {
 		return nil, fmt.Errorf("no candidates found in fallback regions: %w", err)
 	}
 
-	res.Node = &fbNode
+	res.Node = fbNode
 	res.IsFallbackNode = true
 	log.Printf("[Scheduler] Primary candidates exhausted (%d < %d). Using Fallback node %s (%s, status=%s, score=%d)",
 		qualifiedCapacity, required, fbNode.IP, fbNode.Country, fbNode.Status, fbNode.Score)

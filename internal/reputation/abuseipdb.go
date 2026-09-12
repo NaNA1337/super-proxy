@@ -96,6 +96,11 @@ func (a *AbuseIPDBProvider) CheckIP(ctx context.Context, ip string) (*Reputation
 	score := apiResp.Data.AbuseConfidenceScore
 	scoreFloat := float64(score)
 	reportsCount := apiResp.Data.TotalReports
+	isHosting, _ := ownershipLooksHosting(apiResp.Data.UsageType, apiResp.Data.ISP, apiResp.Data.Domain)
+	networkType := apiResp.Data.UsageType
+	if isHosting {
+		networkType = "hosting"
+	}
 
 	res := &ReputationResult{
 		Provider:        "AbuseIPDB",
@@ -106,16 +111,22 @@ func (a *AbuseIPDBProvider) CheckIP(ctx context.Context, ip string) (*Reputation
 		CountryCode:     apiResp.Data.CountryCode,
 		ISP:             apiResp.Data.ISP,
 		IsTor:           boolPtr(apiResp.Data.IsTor),
+		IsHosting:       boolPtr(isHosting),
 		RawCategory:     apiResp.Data.UsageType,
 		ObservedAt:      now,
 		NetworkInfo: models.NetworkClass{
 			ISP:         apiResp.Data.ISP,
-			NetworkType: apiResp.Data.UsageType,
+			NetworkType: networkType,
 			IsTor:       apiResp.Data.IsTor,
+			IsHosting:   isHosting,
 		},
 	}
 
-	if score > 90 {
+	if isHosting {
+		res.Status = StatusBad
+		res.HardReject = true
+		res.ProviderReason = fmt.Sprintf("AbuseIPDB classified usage as hosting/datacenter: %s", apiResp.Data.UsageType)
+	} else if score > 90 {
 		res.Status = StatusBad
 		res.HardReject = true
 		res.ProviderReason = fmt.Sprintf("Abuse confidence score: %d%% (>90%% hard reject threshold), %d reports", score, reportsCount)

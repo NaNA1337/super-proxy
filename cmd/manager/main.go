@@ -130,15 +130,13 @@ func main() {
 	}
 
 	// 4. Initialize Reputation Engine with multi-provider support
-	reputationPolicy := cfg.Reputation.FailurePolicy
-	if !cfg.Reputation.Enabled {
-		reputationPolicy = "lenient"
-	}
 	repEngine := reputation.NewEngineWithConfig(reputation.EngineConfig{
-		FailurePolicy: reputationPolicy,
+		FailurePolicy: cfg.Reputation.FailurePolicy,
 		CacheTTL:      24 * time.Hour,
 	})
 	repEngine.SetDB(database.DB)
+	repEngine.AddProvider(reputation.NewOwnershipProvider())
+	log.Println("[Reputation] Built-in ASN ownership provider registered (no API key required)")
 	if cfg.Reputation.Enabled {
 		// AbuseIPDB
 		abuseKey := cfg.Reputation.AbuseIPDBKey
@@ -183,12 +181,8 @@ func main() {
 			log.Println("[Reputation] IPInfo provider registered")
 		}
 
-		if abuseKey == "" && greyKey == "" && ipqsKey == "" && ipinfoKey == "" {
-			repEngine.AddProvider(&reputation.NullProvider{})
-			log.Println("[Reputation] Enabled but no provider API keys supplied; using NullProvider")
-		}
 	} else {
-		log.Println("[Reputation] Engine disabled in config")
+		log.Println("[Reputation] Keyed threat providers disabled; built-in ASN ownership checks remain active")
 	}
 
 	// Initial discovery runs in the background after local services are ready.

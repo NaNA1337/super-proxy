@@ -8,7 +8,7 @@ Super-Proxy 是运行在 Linux 服务器上的多出口代理核心。它自动�
                      Manager → HTTPS/60000 Agent API
 ```
 
-当前稳定版为 [v1.1.3](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.3)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
+当前稳定版为 [v1.1.4](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.4)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
 
 ## 5 分钟部署
 
@@ -30,7 +30,7 @@ xray version
 ### 2. 安装 Super-Proxy
 
 ```bash
-VERSION=1.1.3
+VERSION=1.1.4
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in amd64|arm64) ;; *) echo "不支持的架构: $ARCH"; exit 1 ;; esac
 
@@ -121,6 +121,26 @@ unset XRAY_MANAGER_API_KEY
 sudo journalctl -fu super-proxy
 ```
 
+### 出口 ASN 与代理准入
+
+基础 ASN、ISP 和组织归属查询默认启用，不需要 API Key。它会拒绝明确属于云厂商、VPS、托管和数据中心的网段。系统同时检查 VPN Gate 服务器端点与隧道实际出口，并保证活动/备用节点的 IPv4 `/24` 不重复。
+
+精确识别活跃 VPN、公共代理、Tor 和近期代理活动需要信誉供应商数据。当前版本可使用 IPQualityScore；Key 只保存在权限为 `600` 的服务端配置中，不要发送给 Manager 或客户端：
+
+```yaml
+reputation:
+  enabled: true
+  failure_policy: conservative
+  ipqs_key: "你的-IPQS-Key"
+```
+
+```bash
+sudo systemctl restart super-proxy
+sudo journalctl -u super-proxy -n 100 --no-pager | grep -E 'Reputation|REJECTED|/24'
+```
+
+`hosting/datacenter`、`VPN`、`public proxy`、`Tor`、黑名单和保守模式下的 `UNKNOWN` 都是硬拒绝，VPN Gate 分数和测速结果不能覆盖这些结论。
+
 将 `$HOME/xray-client.json` 安全复制到客户端，先检查再启动：
 
 ```bash
@@ -143,7 +163,7 @@ curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
 ```bash
 sudo cp -a /etc/super-proxy "/etc/super-proxy.backup.$(date +%Y%m%d-%H%M%S)"
 
-VERSION=1.1.3
+VERSION=1.1.4
 ARCH="$(dpkg --print-architecture)"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"
@@ -163,7 +183,7 @@ super-proxy --version
 
 不要对所有公网来源开放 TCP/60000。Agent 已强制使用 HTTPS、Bearer Token、证书指纹校验和限速，但来源防火墙仍是远程管理入口的第一层保护。
 
-安装 [Manager v1.0.1](https://github.com/NaNA1337/super-proxy-manager/releases/tag/v1.0.1) 后，用下面的信息添加主机：
+安装 [Manager v1.0.4](https://github.com/NaNA1337/super-proxy-manager/releases/tag/v1.0.4) 后，用下面的信息添加主机：
 
 | Manager 字段 | 填写内容 |
 | --- | --- |

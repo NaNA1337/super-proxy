@@ -195,6 +195,28 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 
 	node.ObservedExitIP = res.ObservedExitIP
 	database.DB.Model(&node).Update("observed_exit_ip", node.ObservedExitIP)
+	exitAdmission, err := sched.EvaluateIPAdmission(ctx, node.ObservedExitIP)
+	scheduler.PersistAdmissionResult(&node, exitAdmission)
+	if err != nil {
+		log.Printf("[Operation-%s] Observed exit %s rejected by admission policy: %v", op.ID, node.ObservedExitIP, err)
+		updateOpStatus(op, OpFailed, fmt.Sprintf("Observed exit rejected by admission policy: %v", err))
+		routing.ClearCandidateRouting(candidateSlot)
+		tunnel.Stop()
+		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		lease.Release()
+		releaseSlot(op.Slot)
+		return
+	}
+	if err := sched.CheckPrefixDiversity(&node, node.ObservedExitIP, op.Slot); err != nil {
+		log.Printf("[Operation-%s] Observed exit %s rejected by /24 diversity policy: %v", op.ID, node.ObservedExitIP, err)
+		updateOpStatus(op, OpFailed, fmt.Sprintf("Observed exit rejected by IPv4 /24 diversity policy: %v", err))
+		routing.ClearCandidateRouting(candidateSlot)
+		tunnel.Stop()
+		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		lease.Release()
+		releaseSlot(op.Slot)
+		return
+	}
 	_ = scheduler.TransitionNode(database.DB, &node, models.StatusQualified)
 	log.Printf("[Operation-%s] Candidate tunnel %s VERIFIED (observed exit: %s). Proceeding to atomic cutover.",
 		op.ID, tunnel.Interface, node.ObservedExitIP)
@@ -252,6 +274,24 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 
 	// 4c. Atomic Scheduler State Commit & Move Old Tunnel to DRAINING
 	sched.Mu.Lock()
+	if err := sched.CheckPrefixDiversityLocked(&node, node.ObservedExitIP, op.Slot); err != nil {
+		sched.Mu.Unlock()
+		log.Printf("[Operation-%s] Candidate failed final /24 commit check: %v. Rolling back candidate.", op.ID, err)
+		if hasCurrent && currentActive != nil {
+			_ = routing.SetupSlotRouting(op.Slot, currentActive.Interface)
+		} else {
+			_ = routing.ClearSlotRouting(op.Slot)
+			if sched.XraySupervisor != nil {
+				_ = sched.XraySupervisor.DrainingSlot(op.Slot)
+			}
+		}
+		tunnel.Stop()
+		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		updateOpStatus(op, OpFailed, fmt.Sprintf("Candidate failed final IPv4 /24 commit check: %v", err))
+		lease.Release()
+		releaseSlot(op.Slot)
+		return
+	}
 	oldTunnel, hadOld := sched.ActiveSlots[op.Slot]
 	tunnel.SlotIndex = op.Slot
 	sched.ActiveSlots[op.Slot] = tunnel

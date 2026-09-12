@@ -514,46 +514,25 @@ func (s *Scheduler) maintainStandbyPool() {
 
 	log.Printf("[Scheduler] Evaluating node %s (%s, score=%d, fallback=%v) for standby pool",
 		node.IP, node.Country, node.Score, selection.IsFallbackNode)
+	if err := s.CheckPrefixDiversity(&node, "", -1); err != nil {
+		log.Printf("[Scheduler] Candidate %s deferred by /24 diversity policy: %v", node.IP, err)
+		return
+	}
 
 	// Windowed Prefix Intelligence check (multi-window statistical profile 24h/7d/30d/90d)
 	_, prefixPenalty, prefixReason := reputation.EvaluatePrefixRisk(database.DB, node.IP, 0)
 
 	// Reputation Check
-	if s.RepEngine != nil {
-		res, repErr := s.RepEngine.EvaluateIP(s.ctx, node.IP)
-		if repErr != nil {
-			log.Printf("[Scheduler] Reputation check returned error for %s: %v", node.IP, repErr)
-			if s.RepEngine.FailurePolicy() == "conservative" {
-				log.Printf("[Scheduler] Candidate %s REJECTED: reputation query error (%v) under conservative fail-closed policy", node.IP, repErr)
-				_ = TransitionNode(database.DB, &node, models.StatusFailed)
-				return
-			}
-		}
-
-		isConservativeUnknown := s.RepEngine.FailurePolicy() == "conservative" && (res == nil || res.Status == reputation.StatusUnknown)
-		if (res != nil && res.HardReject) || isConservativeUnknown {
-			_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, true, true)
-			statusStr := "UNKNOWN"
-			hardReject := false
-			reason := ""
-			if res != nil {
-				statusStr = string(res.Status)
-				hardReject = res.HardReject
-				reason = res.ProviderReason
-			}
-			log.Printf("[Scheduler] Candidate %s REJECTED by reputation policy (Status=%s, HardReject=%v): %s",
-				node.IP, statusStr, hardReject, reason)
-			_ = TransitionNode(database.DB, &node, models.StatusFailed)
-			return
-		}
-
-		if res != nil {
-			_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, res.ScorePenalty > 0, false)
-			node.Reputation.FraudScore = res.ScorePenalty
-			node.Reputation.Status = string(res.Status)
-			node.Reputation.ProviderName = res.ProviderReason
-			node.NetClass = res.NetworkInfo
-		}
+	res, admissionErr := s.EvaluateIPAdmission(s.ctx, node.IP)
+	PersistAdmissionResult(&node, res)
+	if admissionErr != nil {
+		_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, true, true)
+		log.Printf("[Scheduler] Candidate endpoint %s REJECTED by admission policy: %v", node.IP, admissionErr)
+		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		return
+	}
+	if res != nil {
+		_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, res.ScorePenalty > 0, false)
 	}
 
 	// Evaluate candidate using unified ScoringEngine
@@ -568,22 +547,9 @@ func (s *Scheduler) maintainStandbyPool() {
 		node.Score = scoringRes.FinalScore
 	}
 
-	// Persist reputation & network intelligence to DB
+	// Reputation/network evidence was persisted by PersistAdmissionResult above.
 	if database.DB != nil {
-		database.DB.Model(&node).Updates(map[string]interface{}{
-			"score":             node.Score,
-			"rep_status":        node.Reputation.Status,
-			"rep_fraud_score":   node.Reputation.FraudScore,
-			"rep_provider_name": node.Reputation.ProviderName,
-			"net_asn":           node.NetClass.ASN,
-			"net_isp":           node.NetClass.ISP,
-			"net_organization":  node.NetClass.Organization,
-			"net_network_type":  node.NetClass.NetworkType,
-			"net_is_vpn":        node.NetClass.IsVPN,
-			"net_is_proxy":      node.NetClass.IsProxy,
-			"net_is_tor":        node.NetClass.IsTor,
-			"net_is_hosting":    node.NetClass.IsHosting,
-		})
+		database.DB.Model(&node).Update("score", node.Score)
 	}
 
 	if err := TransitionNode(database.DB, &node, models.StatusReputationChecked); err != nil {
@@ -629,6 +595,24 @@ func (s *Scheduler) maintainStandbyPool() {
 	database.DB.Model(&node).Update("observed_exit_ip", node.ObservedExitIP)
 	log.Printf("[Scheduler] Verified tunnel %s: endpoint=%s, observed exit=%s", tunnel.Interface, node.IP, node.ObservedExitIP)
 
+	// The VPN server endpoint can NAT through a different public egress. Check
+	// the address clients will actually use before speed testing or promotion.
+	exitResult, exitAdmissionErr := s.EvaluateIPAdmission(ctx, node.ObservedExitIP)
+	PersistAdmissionResult(&node, exitResult)
+	if exitAdmissionErr != nil {
+		log.Printf("[Scheduler] Observed exit %s REJECTED by admission policy: %v", node.ObservedExitIP, exitAdmissionErr)
+		_ = routing.ClearSlotRouting(standbyVirtualSlot)
+		tunnel.Stop()
+		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		return
+	}
+	if err := s.CheckPrefixDiversity(&node, node.ObservedExitIP, -1); err != nil {
+		log.Printf("[Scheduler] Observed exit %s REJECTED by /24 diversity policy: %v", node.ObservedExitIP, err)
+		_ = routing.ClearSlotRouting(standbyVirtualSlot)
+		tunnel.Stop()
+		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		return
+	}
 	// 3. SPEED_TEST
 	if err := TransitionNode(database.DB, &node, models.StatusSpeedTest); err != nil {
 		log.Printf("[Scheduler] FSM speed test error: %v", err)
@@ -683,6 +667,13 @@ func (s *Scheduler) maintainStandbyPool() {
 	tunnel.Mu.Unlock()
 
 	s.Mu.Lock()
+	if err := s.CheckPrefixDiversityLocked(&node, node.ObservedExitIP, -1); err != nil {
+		s.Mu.Unlock()
+		log.Printf("[Scheduler] Candidate %s failed final standby /24 commit check: %v", node.IP, err)
+		tunnel.Stop()
+		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		return
+	}
 	s.StandbyNodes = append(s.StandbyNodes, tunnel)
 	s.Mu.Unlock()
 	log.Printf("[Scheduler] Successfully added tunnel %s to warm standby pool (Node %s: CONNECTING -> HEALTH_CHECK -> SPEED_TEST -> QUALIFIED -> STANDBY).",

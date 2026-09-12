@@ -9,8 +9,10 @@ discovery:
   url: "https://www.vpngate.net/api/iphone/"
   interval: 15
 reputation:
+  # Basic ASN ownership and obvious hosting detection are always enabled.
+  # Set enabled=true and add provider keys for active VPN/proxy/abuse detection.
   enabled: false
-  # Used when enabled=true. conservative rejects UNKNOWN; lenient allows it.
+  # conservative rejects UNKNOWN for every configured provider; lenient allows it.
   failure_policy: conservative
 api:
   listen: "127.0.0.1"

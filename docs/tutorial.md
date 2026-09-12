@@ -19,7 +19,9 @@ sudo ./init-config -address 你的公网域名 -output /etc/super-proxy/config.y
 
 默认 API 只绑定回环，数据库与 Xray 运行配置使用配置目录下的绝对路径。异机 Manager 访问时改 `api.listen` 为管理地址并限制来源。默认区域 JP，备用 KR/SG，可在 `region` 修改。VPN Gate 节点质量和在线状态会变化。
 
-信誉默认关闭，此时不以 UNKNOWN 拒绝节点。若启用，添加实际供应商密钥；`conservative` 会拒绝未知信誉，`lenient` 接受未知结果，但不代表信誉良好。
+基础 ASN/ISP 归属检测不需要 API Key。要硬拒绝活跃 VPN、公共代理、Tor 和近期代理活动，在 `reputation` 中启用至少一个带威胁分类的供应商，例如 `ipqs_key`。程序会分别检查 VPN Gate 端点和隧道实际出口；机房、VPN、代理、Tor、黑名单、UNKNOWN 以及与现有活动/备用出口重复的 IPv4 `/24` 都不会晋升。
+
+带 Key 的威胁供应商默认关闭，内置 ASN 归属检测始终运行。`conservative` 会拒绝任一已配置供应商的未知结果；`lenient` 只允许查询失败或证据不足的 UNKNOWN，已经命中的机房、VPN、代理、Tor 和黑名单仍然会被拒绝。
 
 ## 3. 启动核心并分层检查
 
