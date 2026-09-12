@@ -62,6 +62,8 @@ log_info "SHA256: $(sha256sum "${DEB_FILE}" | cut -d' ' -f1)"
 
 # 2. Backup existing production state
 BACKUP_DIR=$(mktemp -d /tmp/superproxy_backup_XXXXXX)
+WAS_ACTIVE=$(systemctl is-active super-proxy.service 2>/dev/null || true)
+WAS_ENABLED=$(systemctl is-enabled super-proxy.service 2>/dev/null || true)
 log_step "2. Backing up existing environment to ${BACKUP_DIR}"
 if [ -d "/etc/super-proxy" ]; then
     cp -rp /etc/super-proxy "${BACKUP_DIR}/etc"
@@ -82,6 +84,15 @@ restore_environment() {
         cp -rp "${BACKUP_DIR}/var" /var/lib/super-proxy
     fi
     systemctl daemon-reload
+    if [ "${WAS_ENABLED}" = "enabled" ]; then
+        systemctl enable super-proxy.service >/dev/null
+    else
+        systemctl disable super-proxy.service >/dev/null 2>&1 || true
+    fi
+    if [ "${WAS_ACTIVE}" = "active" ]; then
+        systemctl reset-failed super-proxy.service || true
+        systemctl start super-proxy.service
+    fi
     rm -rf "${BACKUP_DIR}"
 }
 trap restore_environment EXIT INT TERM

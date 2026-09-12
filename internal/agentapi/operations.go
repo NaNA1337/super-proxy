@@ -231,6 +231,14 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 		log.Printf("[Operation-%s] Failed to switch slot routing to %s: %v. Rolling back candidate.",
 			op.ID, tunnel.Interface, err)
 		routing.ClearCandidateRouting(candidateSlot)
+		if hasCurrent && currentActive != nil {
+			_ = routing.SetupSlotRouting(op.Slot, currentActive.Interface)
+		} else {
+			_ = routing.ClearSlotRouting(op.Slot)
+			if sched.XraySupervisor != nil {
+				_ = sched.XraySupervisor.DrainingSlot(op.Slot)
+			}
+		}
 		tunnel.Stop()
 		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to switch slot routing: %v", err))
@@ -251,7 +259,18 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 	if hadOld && oldTunnel != nil && oldTunnel != tunnel {
 		log.Printf("[Operation-%s] Confirmed cutover: transitioning previous tunnel %s on slot %d to DRAINING",
 			op.ID, oldTunnel.Node.IP, op.Slot)
-		sched.DrainSlotLocked(op.Slot, oldTunnel)
+		if err := sched.DrainReplacedTunnelLocked(op.Slot, oldTunnel); err != nil {
+			log.Printf("[Operation-%s] Failed to preserve old tunnel for draining: %v. Rolling slot back.", op.ID, err)
+			sched.ActiveSlots[op.Slot] = oldTunnel
+			_ = routing.SetupSlotRouting(op.Slot, oldTunnel.Interface)
+			sched.Mu.Unlock()
+			tunnel.Stop()
+			_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+			updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to prepare old tunnel draining: %v", err))
+			lease.Release()
+			releaseSlot(op.Slot)
+			return
+		}
 	}
 	sched.Mu.Unlock()
 

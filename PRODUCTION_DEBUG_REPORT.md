@@ -8,19 +8,27 @@
 
 ---
 
+## Post-release audit of `4f16b1a`
+
+`4f16b1a` changes this report only; the v1.1.2 executable was built from `b19be20`. A 2026-09-12 recheck found that the package acceptance script restored files but left the service stopped, the installed bootstrap configuration was intentionally management-only, and the host firewall exposed only SSH. It also found a successful manual-switch commit bug: the legacy drain helper removed the newly committed replacement from `ActiveSlots` and disabled its Xray slot. Follow-up code now keeps the replacement active while the old tunnel drains, restores the prior service state after package acceptance, and documents the explicit production activation steps.
+
+The same recheck passed the complete race suite and a live isolated test with approximately 99 VPN Gate records, three simultaneous JP exits, Manager access, five exact share profiles, Reality HTTPS requests through all three observed NAT exits, and a successful manual replacement while retaining three active exits.
+
+---
+
 ## 1. Environment Specifications
 
 | Component | Detected Version / Specification | Production Status |
 | :--- | :--- | :--- |
 | **OS Distribution** | Ubuntu 26.04.1 LTS | Supported / Native |
 | **Linux Kernel** | `7.0.0-30-generic` (x86_64) | Full policy routing, connmark, SO_MARK |
-| **Init System** | `systemd 255.4` (PID 1 running) | Enabled, Unit `/usr/lib/systemd/system/super-proxy.service` |
+| **Init System** | `systemd 255.4` (PID 1 running) | Unit installed at `/usr/lib/systemd/system/super-proxy.service`; package does not auto-enable it |
 | **WAN Interface** | `enp1s0` (IPv4 `202.182.111.219/23`, Default Gateway `202.182.110.1`) | Dynamically detected, non-hardcoded |
 | **Firewall Backends** | `iptables v1.8.11 (nf_tables)`, `nftables v1.1.6` | Idempotent custom chains `SUPER_PROXY_CONNMARK`, `SUPER_PROXY_SLOT_MARK` |
 | **OpenVPN Core** | `OpenVPN 2.7.0` [SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] [PKCS11] [MH/PKTINFO] [AEAD] [DCO] | Tun & DCO compatible; `/dev/net/tun` available (`crw-rw-rw-`) |
 | **Xray Core** | `Xray 26.3.27` (d2758a0, go1.26.1 linux/amd64) | Reality Ingress TCP 443, Vision flow, Chrome FP, API 10085 |
 | **Database Engine** | Pure-Go SQLite (`github.com/glebarez/sqlite` / `modernc.org/sqlite`) | `CGO_ENABLED=0`, WAL mode, `busy_timeout=5000`, `foreign_keys=ON` |
-| **Public Ports** | TCP 443 (VLESS Reality Ingress), TCP 60000 (Agent Management API) | Strict firewall & port enforcement |
+| **Public Ports** | TCP 443 (VLESS Reality Ingress), TCP 60000 (Agent Management API) | Require production configuration and explicit host-firewall rules |
 
 ---
 
@@ -28,12 +36,12 @@
 
 | Architectural Pillar | Specification & Requirement | Actual Implementation | Status |
 | :--- | :--- | :--- | :--- |
-| **Manual Switch** | Prepare $\to$ Verify $\to$ Commit $\to$ Drain Old; never drain active on failure | 4-phase transaction with candidate qualification on isolated route/mark and full rollback on failure | **PASS** |
-| **Lock Scope** | No holding global scheduler lock across slow I/O, RPCs, or processes | Lock released during OpenVPN connect, health probe, and external calls; lease/CAS checked at commit | **PASS** |
+| **Manual Switch** | Prepare $\to$ Verify $\to$ Commit $\to$ Drain Old; never drain active on failure | Candidate failure is isolated; successful replacement required a follow-up fix because the legacy drain path removed the replacement | **FIXED AFTER v1.1.2** |
+| **Lock Scope** | No holding global scheduler lock across slow I/O, RPCs, or processes | Manual candidate work releases the lock; periodic reconciliation still holds it during health and Xray calls | **FOLLOW-UP** |
 | **Routing Loops** | No unbounded `for runCmd(...) == nil {}` loops that can hang the daemon | All deletion loops replaced by `safeDeleteLoop` capped at `maxCleanupAttempts = 32` with warning logs | **PASS** |
 | **Routing Identity** | Single source of truth for slot marks, routing tables, and priorities | `SlotRoutingIdentity(slot)` provides canonical mark, table, and priority | **PASS** |
 | **Exit IP Lookup** | Resilient multi-provider fallback without hanging daemon | Multi-provider (`api.ipify.org`, `ifconfig.me`, `icanhazip.com`), 64B body limit, redirects blocked | **PASS** |
-| **SQLite Concurrency** | Zero CGO stub crashes; concurrent read/write safety | Pure-Go SQLite with explicit `PRAGMA journal_mode=WAL`, `busy_timeout=5000`, single connection pool | **PASS** |
+| **SQLite Concurrency** | Zero CGO stub crashes; concurrent read/write safety | Pure-Go SQLite with WAL and one shared connection so connection-scoped safety pragmas apply consistently | **PASS AFTER FOLLOW-UP** |
 | **Release Artifact** | Official `.deb` package tested as the primary release acceptance artifact | Built via `scripts/build-release.sh`, verified via `tests/release/deb_acceptance.sh` on live host | **PASS** |
 | **Restart Storm** | Systemd unit clamps flapping crashes instead of looping thousands of times | `StartLimitIntervalSec=300`, `StartLimitBurst=10`, `RestartSec=5s`, fail-fast preflight validation | **PASS** |
 | **Anti-Leak Data Path** | Strict fail-closed protection for IPv4, IPv6, and DNS leaks | Kernel socket drop, iptables drop counters verified, `tcpdump` WAN captures strictly 0 packets | **PASS** |
@@ -121,7 +129,7 @@ The manual switch transaction was completely re-engineered according to the **Pr
   - Unit exited with clean failure; systemd `StartLimitBurst=10` and `StartLimitIntervalSec=300` prevented infinite crash-restart loops.
 - **Fresh Clean Boot**:
   - Service started with fresh credentials generated by `super-proxy-init-config`.
-  - Maintained steady `active (running)` status for continuous observation.
+  - Maintained steady `active (running)` status during the acceptance window; the acceptance script stopped the unit afterward and did not represent a persistent production deployment.
   - `/health/live` and `/health/ready` returned HTTP 200.
   - Management API authenticated queries succeeded.
 
@@ -171,7 +179,7 @@ The manual switch transaction was completely re-engineered according to the **Pr
 
 ## 10. Final Verdict
 
-### **VERDICT: PRODUCTION READY**
+### **VERDICT: RELEASE STARTS, FULL PRODUCTION SETUP IS EXPLICIT**
 
 **Rationale**:
-Every requirement across control plane transactionality, lock granularity, routing cleanup bounds, pure-Go SQLite persistence, systemd daemonization, and kernel data-path leak protection has been implemented, validated through automated regression suites with the race detector, packaged into release Debian artifacts (`.deb`), and verified directly under systemd on an active Ubuntu Server instance. No unresolved blockers remain.
+The v1.1.2 package and management-only startup path pass their acceptance checks. A new package install intentionally leaves the service disabled with VLESS off and the Agent bound to loopback. Full operation requires a real public address, stable credentials, explicit service enablement, firewall policy, and live VPN/Reality verification. Successful manual replacement and periodic lock scope required follow-up work after v1.1.2, so “no unresolved blockers” was too broad.

@@ -19,6 +19,9 @@ func TestDatabase_ConcurrentReadWriteStress(t *testing.T) {
 	dbPath := filepath.Join(tempDir, "concurrent_stress.db")
 
 	require.NoError(t, InitDatabase(dbPath))
+	sqlDB, err := DB.DB()
+	require.NoError(t, err)
+	require.Equal(t, 1, sqlDB.Stats().MaxOpenConnections)
 
 	var journalMode string
 	DB.Raw("PRAGMA journal_mode;").Scan(&journalMode)

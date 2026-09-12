@@ -2,11 +2,11 @@ package database
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
 	"github.com/glebarez/sqlite"
@@ -25,16 +25,25 @@ func InitDatabase(dbPath string) error {
 
 	sqlDB, err := DB.DB()
 	if err == nil {
-		sqlDB.SetMaxOpenConns(10)
-		sqlDB.SetMaxIdleConns(5)
-		sqlDB.SetConnMaxLifetime(time.Hour)
+		// SQLite pragmas such as foreign_keys and busy_timeout are scoped to a
+		// connection. Keep a single shared connection so every operation uses
+		// the configured safety policy and in-memory databases remain coherent.
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+		sqlDB.SetConnMaxLifetime(0)
 	}
 
 	// Explicitly configure SQLite pragmas for high concurrency and fail-safe operation
-	DB.Exec("PRAGMA journal_mode=WAL;")
-	DB.Exec("PRAGMA busy_timeout=5000;")
-	DB.Exec("PRAGMA foreign_keys=ON;")
-	DB.Exec("PRAGMA synchronous=NORMAL;")
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL;",
+		"PRAGMA busy_timeout=5000;",
+		"PRAGMA foreign_keys=ON;",
+		"PRAGMA synchronous=NORMAL;",
+	} {
+		if err := DB.Exec(pragma).Error; err != nil {
+			return fmt.Errorf("configure SQLite (%s): %w", pragma, err)
+		}
+	}
 
 	// Auto-migrate models
 	err = DB.AutoMigrate(
@@ -65,12 +74,12 @@ func InitDatabase(dbPath string) error {
 
 // ParseLegacyNodeID safely inspects a Node ID to determine if it represents a legacy IP:port record.
 // Strictly supports:
-// - IPv4 ("1.2.3.4") -> ("1.2.3.4", false)
-// - IPv4:port ("1.2.3.4:443") -> ("1.2.3.4", true)
-// - Bare IPv6 ("2001:db8::1") -> ("2001:db8::1", false)
-// - Bracketed IPv6:port ("[2001:db8::1]:443") -> ("2001:db8::1", true)
-// - Ambiguous / Malformed IDs (e.g. unbracketed multiple colons "2001:db8::1:443" or "invalid:port:extra")
-//   -> ("", false) with a warning log, NEVER guessing or corrupting addresses.
+//   - IPv4 ("1.2.3.4") -> ("1.2.3.4", false)
+//   - IPv4:port ("1.2.3.4:443") -> ("1.2.3.4", true)
+//   - Bare IPv6 ("2001:db8::1") -> ("2001:db8::1", false)
+//   - Bracketed IPv6:port ("[2001:db8::1]:443") -> ("2001:db8::1", true)
+//   - Ambiguous / Malformed IDs (e.g. unbracketed multiple colons "2001:db8::1:443" or "invalid:port:extra")
+//     -> ("", false) with a warning log, NEVER guessing or corrupting addresses.
 func ParseLegacyNodeID(id string) (string, bool) {
 	id = strings.TrimSpace(id)
 	if id == "" {

@@ -27,6 +27,10 @@ try:
   res=inside(['curl','-kfsS','--max-time','35','-H','Authorization: Bearer '+token,'https://127.0.0.1:60000'+path])
   if res.returncode: raise RuntimeError(res.stderr)
   return json.loads(res.stdout)
+ def api_post(path,data):
+  res=inside(['curl','-kfsS','--max-time','35','-H','Authorization: Bearer '+token,'-H','Content-Type: application/json','--data',json.dumps(data),'https://127.0.0.1:60000'+path])
+  if res.returncode: raise RuntimeError(res.stderr)
+  return json.loads(res.stdout)
  deadline=time.monotonic()+int(os.environ.get('SP_LIVE_TIMEOUT_SECONDS','600'))
  verification_started=False
  while time.monotonic()<deadline:
@@ -69,6 +73,25 @@ try:
     expected={e['ip'] for e in exits}
     observed=json.loads(result.stdout)['ip']
     assert observed in expected,('unexpected Reality egress',observed,expected)
+
+    # Exercise the successful manual transaction, including replacement commit
+    # and preservation of the old tunnel in DRAINING.
+    active_ids={e['node_id'] for e in exits}
+    candidates=[n for n in api('/api/v1/pool/qualified') if n['id'] not in active_ids and n['status']=='DISCOVERED']
+    assert candidates,'no discovered candidate available for manual switch'
+    target=candidates[0]['id']
+    operation=api_post('/api/v1/slots/0/switch',{'node_id':target})
+    op_deadline=time.monotonic()+120
+    while time.monotonic()<op_deadline:
+     state=api('/api/v1/operations/'+operation['operation_id'])
+     if state['status'] in ('ACTIVE','FAILED'): break
+     time.sleep(2)
+    assert state['status']=='ACTIVE',state
+    switched=api('/api/v1/current-exits')
+    assert len(switched)==3,switched
+    assert next(e for e in switched if e['slot']==0)['node_id']==target,switched
+    print('PASS successful manual switch keeps three active exits',flush=True)
+
     time.sleep(65)
     assert len(api('/api/v1/current-exits'))==3,'tunnels did not survive qualification deadlines'
     print('PASS live three exits and Reality traffic beyond 60s',flush=True)

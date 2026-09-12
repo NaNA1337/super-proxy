@@ -2,7 +2,7 @@
 
 Linux 多出口代理核心：发现 VPN Gate 节点、建立 OpenVPN 隧道，通过 Xray 和 Linux 策略路由管理出口，并提供 HTTPS 管理 API。Web 控制台在独立仓库 [super-proxy-manager](https://github.com/NaNA1337/super-proxy-manager)。
 
-本轮检查基于核心 `755b1b7`、Manager `9864745`。具体通过项、修复项和未验证范围见 [可用性检查报告](docs/usability-report.md)。**API 在线、配置可导出都不代表公网 VPN 链路已经可用**；最终验收还必须检查活动隧道和实际代理请求。
+本轮检查从核心 `755b1b7`、Manager `9864745` 开始，当前修复和验证结果见 [可用性检查报告](docs/usability-report.md)。自动实时套件已跑通 VPN Gate 获取、三个活动出口、Manager 接入、五种分享配置及 Reality 实际 HTTPS 流量；具体部署仍应检查自己的活动隧道和实际代理请求。
 
 ## 两个项目如何协作
 
@@ -49,6 +49,20 @@ sudo journalctl -u super-proxy -n 100 --no-pager
 ```
 
 如果 sudo 环境没有 Go，先 `go build -o init-config ./cmd/init-config`，再 `sudo ./init-config ...`。`proxy.example.com` 是文档占位符，不能用于公网连通验收。
+
+## Debian 包首次启用
+
+`.deb` 安装后会安全地创建一个仅管理配置，但不会自动启用服务或开放公网端口。此时 `xray.vless.enabled: false`、Agent 监听 `127.0.0.1`，所以分享接口返回 400 是预期行为。要提供完整代理服务，先用真实公网地址生成完整配置，再启用服务：
+
+```bash
+sudo super-proxy-init-config -address 203.0.113.10 -output /etc/super-proxy/config.production.yaml
+# 首次安装且还没有接入 Manager 时，用生成的完整配置替换仅管理配置。
+sudo install -m 600 /etc/super-proxy/config.production.yaml /etc/super-proxy/config.yaml
+sudo systemctl daemon-reload
+sudo systemctl enable --now super-proxy
+```
+
+将 `203.0.113.10` 换成服务器真实公网 IP 或 DNS 名称。若已有 Manager 主机、订阅或客户端，替换配置会改变 API Token 和 Reality 凭据；应先备份 `/etc/super-proxy`，并同步更新客户端和 Manager。旧配置若仍使用 `www.microsoft.com`，当前 Xray 版本可能因目标证书过大导致 Reality 握手失败；新生成配置使用 `icloud.com:443`。
 
 生成器默认将数据库、运行时 Xray 配置和 TLS 证书放在配置文件所在目录；路径为绝对路径。核心启动会重写 `xray_config.json`，请编辑 YAML 配置，勿手动编辑生成文件。TLS 证书为自签名证书，Manager 应保存并校验其 SHA-256 指纹。
 
@@ -140,6 +154,6 @@ sudo bash scripts/test-network.sh
 sudo bash scripts/test-manager.sh /root/super-proxy-manager
 ```
 
-联调需 Manager 前端依赖和 Playwright Chromium（`cd ../super-proxy-manager/frontend && npx playwright install chromium`）。运行 root 测试前确认是测试环境；核心启动复现测试现已隔离网络与 `/run`。联调不连接公网 VPN，公网验收步骤见教程。
+联调需 Manager 前端依赖和 Playwright Chromium（`cd ../super-proxy-manager/frontend && npx playwright install chromium`）。运行 root 测试前确认是测试环境；核心启动复现测试现已隔离网络与 `/run`。公网 VPN Gate、三出口、Manager 和 Reality 数据链路可用 `sudo python3 tests/live/check.py /root/super-proxy-manager` 在独立网络名称空间中验收。
 
 性能测试工具：`go build -o super-proxy-benchmark ./cmd/benchmark`；先运行 `./super-proxy-benchmark -h` 查看实际参数，在已有可用隧道上测试。

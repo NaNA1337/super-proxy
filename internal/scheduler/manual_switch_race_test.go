@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
@@ -9,6 +10,37 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/openvpn"
 	"github.com/NaNA1337/super-proxy/internal/reputation"
 )
+
+func TestDrainReplacedTunnelKeepsReplacementActive(t *testing.T) {
+	s := NewScheduler(1, 1, reputation.NewEngine(), config.RegionConfig{Primary: "JP"})
+	oldNode := &models.Node{ID: "old", IP: "198.51.100.10", Status: models.StatusActive}
+	newNode := &models.Node{ID: "new", IP: "198.51.100.11", Status: models.StatusActive}
+	oldTunnel := &openvpn.Tunnel{Node: oldNode, Interface: "lo", State: string(SlotActive)}
+	newTunnel := &openvpn.Tunnel{Node: newNode, Interface: "lo", State: string(SlotActive)}
+	s.ActiveSlots[0] = newTunnel
+	s.SetupDrainingRoutingFn = func(table int, dev, ip string) error {
+		if table != 200 || dev != "lo" {
+			return errors.New("unexpected draining identity")
+		}
+		return nil
+	}
+
+	s.Mu.Lock()
+	err := s.DrainReplacedTunnelLocked(0, oldTunnel)
+	s.Mu.Unlock()
+	if err != nil {
+		t.Fatalf("drain replaced tunnel: %v", err)
+	}
+	if s.ActiveSlots[0] != newTunnel {
+		t.Fatal("replacement was removed from active slot")
+	}
+	if s.DrainingSlots[0] != oldTunnel {
+		t.Fatal("old tunnel was not registered for draining")
+	}
+	if oldTunnel.State != string(SlotDraining) {
+		t.Fatalf("old tunnel state = %q, want DRAINING", oldTunnel.State)
+	}
+}
 
 func TestManualSwitch_TwoSimultaneousRequests(t *testing.T) {
 	sm := NewSlotManager(3)

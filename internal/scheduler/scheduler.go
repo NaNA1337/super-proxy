@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -81,6 +82,49 @@ func (s *Scheduler) NextTunnelID() int { return int(s.standbySlotCount.Add(1)) }
 // DrainSlotLocked is for controllers that already hold Mu.
 func (s *Scheduler) DrainSlotLocked(slot int, tunnel *openvpn.Tunnel) {
 	s.transitionToDrainingLocked(slot, tunnel)
+}
+
+// DrainReplacedTunnelLocked preserves an old tunnel after its slot has already
+// been redirected to a verified replacement. It must not remove the replacement
+// from ActiveSlots or disable the Xray slot. The caller must hold Mu.
+func (s *Scheduler) DrainReplacedTunnelLocked(slot int, tunnel *openvpn.Tunnel) error {
+	if tunnel == nil {
+		return nil
+	}
+	if _, exists := s.DrainingSlots[slot]; exists {
+		return fmt.Errorf("slot %d already has a draining tunnel", slot)
+	}
+
+	drainingTableID := 200 + slot
+	tunIP, _ := routing.GetInterfaceIP(tunnel.Interface)
+	setupFn := s.SetupDrainingRoutingFn
+	if setupFn == nil {
+		setupFn = routing.SetupDrainingRouting
+	}
+	if err := setupFn(drainingTableID, tunnel.Interface, tunIP); err != nil {
+		return fmt.Errorf("setup replacement draining route: %w", err)
+	}
+
+	tunnel.Mu.Lock()
+	tunnel.State = string(SlotDraining)
+	tunnel.DrainingStartedAt = time.Now()
+	tunnel.Mu.Unlock()
+	s.drainingTableIDs[slot] = drainingTableID
+	s.drainingTunIPs[slot] = tunIP
+	s.DrainingSlots[slot] = tunnel
+	if database.DB != nil && tunnel.Node != nil {
+		_ = TransitionNode(database.DB, tunnel.Node, models.StatusDraining)
+	}
+
+	if sc, _ := s.Slots.GetSlot(slot); sc != nil {
+		sc.Mu.Lock()
+		sc.DrainingTunnel = tunnel
+		sc.DrainingTableID = drainingTableID
+		sc.Mu.Unlock()
+	}
+	log.Printf("[Scheduler] Replaced tunnel on slot %d is DRAINING (dev %s, tunIP %s, table %d); replacement remains active",
+		slot, tunnel.Interface, tunIP, drainingTableID)
+	return nil
 }
 
 // SetXraySupervisor connects the Xray supervisor to dynamically coordinate active egress slots.
