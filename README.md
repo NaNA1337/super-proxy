@@ -8,7 +8,7 @@ Super-Proxy 是运行在 Linux 服务器上的多出口代理核心。它自动�
                      Manager → HTTPS/60000 Agent API
 ```
 
-当前稳定版为 [v1.1.6](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.6)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
+当前稳定版为 [v1.1.7](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.7)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
 
 ### 三条 TUN 如何使用带宽
 
@@ -44,7 +44,7 @@ xray version
 ### 2. 安装 Super-Proxy
 
 ```bash
-VERSION=1.1.6
+VERSION=1.1.7
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in amd64|arm64) ;; *) echo "不支持的架构: $ARCH"; exit 1 ;; esac
 
@@ -139,7 +139,7 @@ sudo journalctl -fu super-proxy
 
 基础 ASN、ISP 和组织归属查询默认启用，不需要 API Key。它会拒绝明确属于云厂商、VPS、托管和数据中心的网段。系统同时检查 VPN Gate 服务器端点与隧道实际出口，并保证活动/备用节点的 IPv4 `/24` 不重复。
 
-精确识别活跃 VPN、公共代理、Tor 和近期代理活动需要信誉供应商数据。当前版本可使用 IPQualityScore；Key 只保存在权限为 `600` 的服务端配置中，不要发送给 Manager 或客户端：
+精确识别活跃 VPN、公共代理、Tor 和近期代理活动需要信誉供应商数据。推荐使用 [IPQualityScore Proxy & VPN Detection API](https://www.ipqualityscore.com/proxy-vpn-tor-detection-service)：当前 Core 已直接处理 `proxy`、`vpn`、`active_vpn`、`tor`、`active_tor`、`recent_abuse`、`frequent_abuser`、`high_risk_attacks`、`abuse_velocity`、`fraud_score`、ASN 和连接类型。申请 Key 后只需写入服务端配置，不要发送给 Manager 或客户端：
 
 ```yaml
 reputation:
@@ -152,6 +152,10 @@ reputation:
 sudo systemctl restart super-proxy
 sudo journalctl -u super-proxy -n 100 --no-pager | grep -E 'Reputation|REJECTED|/24'
 ```
+
+IPQS 免费额度适合验证配置，不适合持续发现大量 VPN Gate 节点；当前 [官方套餐页](https://www.ipqualityscore.com/plans) 会列出实时额度。Core 会缓存单个供应商结果 24 小时，但一次新节点发现仍可能同时检查服务器端点和实际隧道出口。正式使用应选择足够的月度/每日请求量，避免触发 429 后在 `conservative` 策略下因 UNKNOWN 暂停节点晋升。
+
+如果更需要大量 ASN、hosting、VPN/proxy/Tor 查询，而不要求 IPQS 的近期滥用字段，也可以配置 `ipinfo_key` 使用 [IPinfo Privacy Detection](https://ipinfo.io/products/proxy-vpn-detection-api)。AbuseIPDB 和 GreyNoise 适合作为恶意活动补充，不应单独承担活跃公共代理/VPN 判断。
 
 `hosting/datacenter`、`VPN`、`public proxy`、`Tor`、黑名单和保守模式下的 `UNKNOWN` 都是硬拒绝，VPN Gate 分数和测速结果不能覆盖这些结论。
 
@@ -179,7 +183,7 @@ curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
 ```bash
 sudo cp -a /etc/super-proxy "/etc/super-proxy.backup.$(date +%Y%m%d-%H%M%S)"
 
-VERSION=1.1.6
+VERSION=1.1.7
 ARCH="$(dpkg --print-architecture)"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"
@@ -187,6 +191,38 @@ sha256sum -c "super-proxy_${VERSION}_${ARCH}.deb.sha256"
 sudo apt-get install -y "./super-proxy_${VERSION}_${ARCH}.deb"
 sudo systemctl restart super-proxy
 super-proxy --version
+```
+
+### 清洗老版本数据库
+
+Core 数据库只保存 VPN Gate 节点池、失败计数、测速结果和信誉缓存。API Token、VLESS UUID、Reality 密钥和 short ID 保存在 `/etc/super-proxy/config.yaml`，清洗数据库不会修改它们。
+
+从老版本升级后，如果页面仍显示旧节点、旧信誉结论、无内存凭据的切换候选或异常失败计数，可以执行一次内置清洗命令：
+
+```bash
+sudo systemctl stop super-proxy
+sudo super-proxy database clean \
+  -config /etc/super-proxy/config.yaml \
+  -yes
+sudo systemctl start super-proxy
+sudo journalctl -fu super-proxy
+```
+
+命令执行以下步骤：
+
+1. 拒绝在 Core 仍运行时操作。
+2. 对 SQLite 执行完整性检查并落盘 WAL。
+3. 将旧数据库自动改名为同目录下的 `manager.db.backup-时间戳`。
+4. 创建权限为 `0600` 的当前版本空数据库。
+
+启动后 VPN Gate 会重新发现、重新检查信誉并重新测速，活动出口短时间内为空是正常现象。命令要求配置中的 `database.path` 使用绝对路径；默认生产配置已经满足。备份权限固定为 `0600`，但它仍可能包含旧版本曾保存的历史字段，确认新数据库稳定后应妥善归档或删除备份。
+
+需要恢复旧数据时先停止服务，然后将命令输出的备份文件复制回原数据库路径：
+
+```bash
+sudo systemctl stop super-proxy
+sudo cp -a /etc/super-proxy/manager.db.backup-实际时间戳 /etc/super-proxy/manager.db
+sudo systemctl start super-proxy
 ```
 
 ## 接入 Web Manager

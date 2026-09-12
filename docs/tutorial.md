@@ -47,6 +47,8 @@ super-proxy diagnose routing
 
 预期有 API 60000、本地 SOCKS 1080、Xray 内部 API 10085；启用 VLESS 时有 TCP/443。隧道未就绪时 `tun*` 和活动出口可能为空。
 
+从旧版升级并希望完全重新建立节点与信誉缓存时，先停止 Core，再运行 `sudo super-proxy database clean -config /etc/super-proxy/config.yaml -yes`。命令会保留时间戳备份，只清除可重新发现的数据，不修改 YAML 中的 API 和 Reality 凭据。
+
 API 调用示例使用受信任的本机证书做公钥固定：
 
 ```bash

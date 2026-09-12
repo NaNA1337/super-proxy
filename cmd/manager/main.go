@@ -61,6 +61,12 @@ func main() {
 		fmt.Printf("super-proxy %s (%s)\n", version, commit)
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "database" {
+		if err := runDatabaseCommand(os.Args[2:]); err != nil {
+			log.Fatalf("Database command failed: %v", err)
+		}
+		return
+	}
 	log.Printf("Starting Super-Proxy %s (%s)...", version, commit)
 
 	// Diagnostics Commands
