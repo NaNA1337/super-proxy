@@ -99,8 +99,8 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Verify state is allowed for manual switch (DISCOVERED, QUALIFIED, or STANDBY)
-	if node.Status != models.StatusDiscovered && node.Status != models.StatusStandby && node.Status != models.StatusQualified {
+	// 3. Never allow raw DISCOVERED nodes to bypass ASN/reputation pre-admission.
+	if node.Status != models.StatusReputationChecked && node.Status != models.StatusStandby && node.Status != models.StatusQualified {
 		sched.Mu.Unlock()
 		http.Error(w, fmt.Sprintf("Node is not qualified for manual switch. Current status: %s", node.Status), http.StatusConflict)
 		return
@@ -141,10 +141,10 @@ func handleSlotAction(w http.ResponseWriter, r *http.Request) {
 	sched.Mu.Unlock()
 
 	// 7. Reputation check (outside lock since it may take network I/O)
-	admissionResult, err := sched.EvaluateIPAdmission(context.Background(), node.IP)
+	admissionResult, err := sched.EvaluateIPAdmissionForRegion(context.Background(), node.IP, node.Country)
 	scheduler.PersistAdmissionResult(&node, admissionResult)
 	if err != nil {
-		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = scheduler.FailNode(database.DB, &node, "manual endpoint reputation: "+err.Error())
 		lease.Release()
 		releaseSlot(slot)
 		http.Error(w, fmt.Sprintf("Node rejected by admission policy: %v", err), http.StatusForbidden)

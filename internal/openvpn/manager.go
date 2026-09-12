@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -33,8 +34,9 @@ type Tunnel struct {
 	cleanupOnce       sync.Once
 
 	// Lifecycle synchronization: single waiter goroutine owns cmd.Wait()
-	doneChan chan struct{}
-	exitErr  error
+	doneChan       chan struct{}
+	exitErr        error
+	lastDiagnostic string
 }
 
 // StartTunnel decodes config, injects route-nopull, and starts the OpenVPN process.
@@ -139,8 +141,14 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node, rawB64Co
 		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.Contains(line, "Options error") || strings.Contains(line, "TLS Error") || strings.Contains(line, "AUTH_FAILED") || strings.Contains(line, "Initialization Sequence Completed") {
+			lower := strings.ToLower(line)
+			if strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "fatal") || strings.Contains(line, "AUTH_FAILED") || strings.Contains(line, "Initialization Sequence Completed") {
 				log.Printf("[Slot %d] %s", slotIndex, line)
+			}
+			if strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "fatal") || strings.Contains(lower, "refused") || strings.Contains(lower, "timed out") {
+				tunnel.Mu.Lock()
+				tunnel.lastDiagnostic = line
+				tunnel.Mu.Unlock()
 			}
 			if status := ParseDCOLogLine(line); status != "" {
 				tunnel.Mu.Lock()
@@ -177,18 +185,42 @@ func StartTunnel(ctx context.Context, slotIndex int, node *models.Node, rawB64Co
 		tunnel.cleanup()
 	}()
 
-	// Wait a bit to ensure it doesn't immediately crash
-	time.Sleep(2 * time.Second)
-	tunnel.Mu.Lock()
-	active := tunnel.State == "ACTIVE"
-	tunnel.Mu.Unlock()
-
-	if !active {
-		cancel()
-		return nil, fmt.Errorf("openvpn process exited immediately")
+	// VPN Gate endpoints, especially TCP nodes on high ports, regularly need
+	// longer than the old fixed two-second delay. Wait for the actual TUN device
+	// while also failing immediately if OpenVPN exits.
+	startupTimer := time.NewTimer(25 * time.Second)
+	defer startupTimer.Stop()
+	poll := time.NewTicker(250 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		if _, err := net.InterfaceByName(interfaceName); err == nil {
+			return tunnel, nil
+		}
+		select {
+		case <-tunnel.Done():
+			tunnel.Mu.Lock()
+			diagnostic := tunnel.lastDiagnostic
+			exitErr := tunnel.exitErr
+			tunnel.Mu.Unlock()
+			if diagnostic != "" {
+				return nil, fmt.Errorf("openvpn exited before %s was ready: %s", interfaceName, diagnostic)
+			}
+			return nil, fmt.Errorf("openvpn exited before %s was ready: %v", interfaceName, exitErr)
+		case <-ctx.Done():
+			tunnel.Stop()
+			return nil, fmt.Errorf("openvpn startup canceled before %s was ready: %w", interfaceName, ctx.Err())
+		case <-startupTimer.C:
+			tunnel.Mu.Lock()
+			diagnostic := tunnel.lastDiagnostic
+			tunnel.Mu.Unlock()
+			tunnel.Stop()
+			if diagnostic != "" {
+				return nil, fmt.Errorf("timed out waiting for %s: %s", interfaceName, diagnostic)
+			}
+			return nil, fmt.Errorf("timed out waiting 25s for OpenVPN to create %s", interfaceName)
+		case <-poll.C:
+		}
 	}
-
-	return tunnel, nil
 }
 
 // secureDeleteTempConfig wipes sensitive certificate/key data before unlinking the file.

@@ -523,12 +523,12 @@ func (s *Scheduler) maintainStandbyPool() {
 	_, prefixPenalty, prefixReason := reputation.EvaluatePrefixRisk(database.DB, node.IP, 0)
 
 	// Reputation Check
-	res, admissionErr := s.EvaluateIPAdmission(s.ctx, node.IP)
+	res, admissionErr := s.EvaluateIPAdmissionForRegion(s.ctx, node.IP, node.Country)
 	PersistAdmissionResult(&node, res)
 	if admissionErr != nil {
 		_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, true, true)
 		log.Printf("[Scheduler] Candidate endpoint %s REJECTED by admission policy: %v", node.IP, admissionErr)
-		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = FailNode(database.DB, &node, "endpoint reputation: "+admissionErr.Error())
 		return
 	}
 	if res != nil {
@@ -541,7 +541,7 @@ func (s *Scheduler) maintainStandbyPool() {
 		log.Printf("[Scheduler] %s", scoringRes.Explanation)
 		if !scoringRes.Allowed {
 			log.Printf("[Scheduler] Candidate %s REJECTED by scoring engine: final score %d", node.IP, scoringRes.FinalScore)
-			_ = TransitionNode(database.DB, &node, models.StatusFailed)
+			_ = FailNode(database.DB, &node, "pre-connect scoring: "+scoringRes.Explanation)
 			return
 		}
 		node.Score = scoringRes.FinalScore
@@ -552,9 +552,17 @@ func (s *Scheduler) maintainStandbyPool() {
 		database.DB.Model(&node).Update("score", node.Score)
 	}
 
-	if err := TransitionNode(database.DB, &node, models.StatusReputationChecked); err != nil {
-		log.Printf("[Scheduler] FSM transition error: %v", err)
+	if node.Status == models.StatusReputationChecked {
+		// No-op keeps a uniform audit log for newly admitted candidates.
+	} else if node.Status != models.StatusQualified && node.Status != models.StatusHealthy {
+		log.Printf("[Scheduler] Candidate %s has unexpected pre-connect status %s", node.IP, node.Status)
 		return
+	}
+	if node.Status == models.StatusReputationChecked {
+		if err := TransitionNode(database.DB, &node, models.StatusReputationChecked); err != nil {
+			log.Printf("[Scheduler] FSM transition error: %v", err)
+			return
+		}
 	}
 
 	// 1. CONNECTING
@@ -563,15 +571,13 @@ func (s *Scheduler) maintainStandbyPool() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
 	defer cancel()
-	tunnel, err := openvpn.StartTunnel(s.ctx, standbyVirtualSlot, &node)
+	tunnel, err := openvpn.StartTunnel(ctx, standbyVirtualSlot, &node)
 	if err != nil {
-		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = FailNode(database.DB, &node, "openvpn startup: "+err.Error())
 		return
 	}
-
-	time.Sleep(5 * time.Second)
 
 	// 2. HEALTH_CHECK
 	if err := TransitionNode(database.DB, &node, models.StatusHealthCheck); err != nil {
@@ -587,7 +593,7 @@ func (s *Scheduler) maintainStandbyPool() {
 		log.Printf("[Scheduler] Tunnel %s qualification failed: %v", tunnel.Interface, hRes.Error)
 		_ = routing.ClearSlotRouting(standbyVirtualSlot)
 		tunnel.Stop()
-		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = FailNode(database.DB, &node, "health verification: "+errorText(hRes.Error))
 		return
 	}
 
@@ -597,20 +603,20 @@ func (s *Scheduler) maintainStandbyPool() {
 
 	// The VPN server endpoint can NAT through a different public egress. Check
 	// the address clients will actually use before speed testing or promotion.
-	exitResult, exitAdmissionErr := s.EvaluateIPAdmission(ctx, node.ObservedExitIP)
+	exitResult, exitAdmissionErr := s.EvaluateIPAdmissionForRegion(ctx, node.ObservedExitIP, node.Country)
 	PersistAdmissionResult(&node, exitResult)
 	if exitAdmissionErr != nil {
 		log.Printf("[Scheduler] Observed exit %s REJECTED by admission policy: %v", node.ObservedExitIP, exitAdmissionErr)
 		_ = routing.ClearSlotRouting(standbyVirtualSlot)
 		tunnel.Stop()
-		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = FailNode(database.DB, &node, "observed exit reputation: "+exitAdmissionErr.Error())
 		return
 	}
 	if err := s.CheckPrefixDiversity(&node, node.ObservedExitIP, -1); err != nil {
 		log.Printf("[Scheduler] Observed exit %s REJECTED by /24 diversity policy: %v", node.ObservedExitIP, err)
 		_ = routing.ClearSlotRouting(standbyVirtualSlot)
 		tunnel.Stop()
-		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = FailNode(database.DB, &node, "observed exit /24 diversity: "+err.Error())
 		return
 	}
 	// 3. SPEED_TEST
@@ -629,7 +635,7 @@ func (s *Scheduler) maintainStandbyPool() {
 		if err != nil || perf == nil {
 			log.Printf("[Scheduler] Speed test failed for node %s on %s: %v", node.IP, tunnel.Interface, err)
 			tunnel.Stop()
-			_ = TransitionNode(database.DB, &node, models.StatusFailed)
+			_ = FailNode(database.DB, &node, "speed test: "+errorText(err))
 			return
 		}
 
@@ -652,6 +658,20 @@ func (s *Scheduler) maintainStandbyPool() {
 		_ = routing.ClearSlotRouting(standbyVirtualSlot)
 	}
 
+	// Recalculate after the measured tunnel benchmark and observed-exit
+	// reputation data have replaced discovery metadata.
+	if s.ScoringEngine != nil {
+		finalScoring := s.ScoringEngine.EvaluateNode(&node, !selection.IsFallbackNode, prefixPenalty, prefixReason)
+		if !finalScoring.Allowed {
+			log.Printf("[Scheduler] Candidate %s rejected after measured scoring: %s", node.IP, finalScoring.Explanation)
+			tunnel.Stop()
+			_ = FailNode(database.DB, &node, "measured scoring: "+finalScoring.Explanation)
+			return
+		}
+		node.Score = finalScoring.FinalScore
+		database.DB.Model(&node).Update("score", node.Score)
+	}
+
 	// 4. QUALIFIED
 	if err := TransitionNode(database.DB, &node, models.StatusQualified); err != nil {
 		log.Printf("[Scheduler] FSM qualified error: %v", err)
@@ -671,7 +691,7 @@ func (s *Scheduler) maintainStandbyPool() {
 		s.Mu.Unlock()
 		log.Printf("[Scheduler] Candidate %s failed final standby /24 commit check: %v", node.IP, err)
 		tunnel.Stop()
-		_ = TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = FailNode(database.DB, &node, "final standby /24 diversity: "+err.Error())
 		return
 	}
 	s.StandbyNodes = append(s.StandbyNodes, tunnel)

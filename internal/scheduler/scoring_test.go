@@ -20,9 +20,10 @@ func TestScoringEngine_Comprehensive(t *testing.T) {
 
 	// Case 1: Clean high-performance primary node
 	nodePrimary := &models.Node{
-		ID:    "node-primary",
-		IP:    "198.51.100.10",
-		Score: 100,
+		ID:       "node-primary",
+		IP:       "198.51.100.10",
+		Score:    100,
+		NetClass: models.NetworkClass{NetworkType: "residential"},
 		Performance: models.PerformanceMetrics{
 			DownloadSpeed: 50_000_000, // 50 Mbps -> +50
 			RTT:           50,         // (200 - 50) * 0.5 = +75
@@ -32,7 +33,7 @@ func TestScoringEngine_Comprehensive(t *testing.T) {
 	if !resPrimary.Allowed {
 		t.Fatalf("Expected primary clean node to be allowed")
 	}
-	expectedScore := 100 + 50 + 50 + 75 // 275
+	expectedScore := 40 + 50 + 50 + 75 // VPN Gate source score is excluded
 	if resPrimary.FinalScore != expectedScore {
 		t.Fatalf("Expected score %d, got %d. Explanation: %s", expectedScore, resPrimary.FinalScore, resPrimary.Explanation)
 	}
@@ -74,10 +75,11 @@ func TestScoringEngine_Comprehensive(t *testing.T) {
 		ID:        "node-fails",
 		IP:        "198.51.100.13",
 		Score:     50,
+		NetClass:  models.NetworkClass{NetworkType: "business"},
 		FailCount: 3, // 3 * 30 = 90 penalty
 	}
 	resFails := engine.EvaluateNode(nodeFails, false, 0, "")
-	expectedFailScore := 50 - 90 // -40
+	expectedFailScore := 20 - 90 // source score excluded; business bonus included
 	if resFails.FinalScore != expectedFailScore {
 		t.Fatalf("Expected score %d, got %d", expectedFailScore, resFails.FinalScore)
 	}

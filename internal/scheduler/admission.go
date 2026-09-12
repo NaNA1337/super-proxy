@@ -41,6 +41,21 @@ func (s *Scheduler) EvaluateIPAdmission(ctx context.Context, ip string) (*reputa
 	return result, nil
 }
 
+// EvaluateIPAdmissionForRegion also verifies provider geolocation when it is
+// available. VPN Gate's advertised country is never enough to call an exit local.
+func (s *Scheduler) EvaluateIPAdmissionForRegion(ctx context.Context, ip, expectedCountry string) (*reputation.Result, error) {
+	result, err := s.EvaluateIPAdmission(ctx, ip)
+	if err != nil || result == nil {
+		return result, err
+	}
+	expected := strings.ToUpper(strings.TrimSpace(expectedCountry))
+	actual := strings.ToUpper(strings.TrimSpace(result.CountryCode))
+	if expected != "" && actual != "" && actual != expected {
+		return result, fmt.Errorf("reputation geolocation mismatch for %s: expected %s, provider resolved %s", ip, expected, actual)
+	}
+	return result, nil
+}
+
 func prohibitedTraits(info models.NetworkClass) []string {
 	traits := make([]string, 0, 4)
 	if info.IsHosting {

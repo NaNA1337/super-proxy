@@ -46,3 +46,23 @@ func TestUpsertFreshNodesRevivesOnlyCredentialBackedRetryableNodes(t *testing.T)
 		require.Equal(t, status, node.Status, id)
 	}
 }
+
+func TestUpsertVettedNodesRevivesCleanDeadNodeWithFreshCredentials(t *testing.T) {
+	ClearOVPNSecretCache()
+	defer ClearOVPNSecretCache()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&models.Node{}))
+	require.NoError(t, db.Create(&models.Node{ID: "kr-node", IP: "198.51.100.9", Country: "KR", Status: models.StatusDead, FailCount: 3}).Error)
+	SetOVPNSecret("kr-node", "fresh-credential")
+	fresh := []models.Node{{
+		ID: "kr-node", IP: "198.51.100.9", Country: "KR", Status: models.StatusReputationChecked,
+		Score: 70, NetClass: models.NetworkClass{ASN: "AS64500", NetworkType: "residential"},
+	}}
+	require.NoError(t, UpsertVettedNodes(db, fresh, models.NodeUpsertColumns))
+	var node models.Node
+	require.NoError(t, db.First(&node, "id = ?", "kr-node").Error)
+	require.Equal(t, models.StatusReputationChecked, node.Status)
+	require.Zero(t, node.FailCount)
+	require.Equal(t, "AS64500", node.NetClass.ASN)
+}

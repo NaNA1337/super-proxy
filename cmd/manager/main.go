@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -139,8 +140,21 @@ func main() {
 		CacheTTL:      24 * time.Hour,
 	})
 	repEngine.SetDB(database.DB)
-	repEngine.AddProvider(reputation.NewOwnershipProvider())
-	log.Println("[Reputation] Built-in ASN ownership provider registered (no API key required)")
+	proxyCheckKey := cfg.Reputation.ProxyCheckKey
+	if proxyCheckKey == "" {
+		proxyCheckKey = os.Getenv("XRAY_MANAGER_PROXYCHECK_KEY")
+	}
+	if cfg.Reputation.Enabled {
+		repEngine.AddProvider(reputation.NewProxyCheckProvider(proxyCheckKey, cfg.Reputation.ProxyCheckDays))
+		if proxyCheckKey == "" {
+			log.Printf("[Reputation] proxycheck.io v3 provider registered without a key (low public quota; detection window=%g day(s))", cfg.Reputation.ProxyCheckDays)
+		} else {
+			log.Printf("[Reputation] proxycheck.io v3 provider registered (detection window=%g day(s))", cfg.Reputation.ProxyCheckDays)
+		}
+	} else {
+		repEngine.AddProvider(reputation.NewOwnershipProvider())
+		log.Println("[Reputation] proxycheck.io disabled; built-in ASN ownership provider registered")
+	}
 	if cfg.Reputation.Enabled {
 		// AbuseIPDB
 		abuseKey := cfg.Reputation.AbuseIPDBKey
@@ -269,7 +283,7 @@ func main() {
 		discoveryInterval = 15 * time.Minute
 	}
 	discoveryCtx, cancelDiscovery := context.WithCancel(context.Background())
-	go runPeriodicDiscovery(discoveryCtx, cfg.Discovery.URL, discoveryInterval, models.NodeUpsertColumns)
+	go runPeriodicDiscovery(discoveryCtx, cfg.Discovery.URL, discoveryInterval, models.NodeUpsertColumns, sched)
 	log.Printf("Periodic discovery refresh configured every %v", discoveryInterval)
 
 	// 10. Initialize Agent API
@@ -320,7 +334,7 @@ func main() {
 }
 
 // runPeriodicDiscovery fetches VPN Gate data on a regular interval and upserts into DB.
-func runPeriodicDiscovery(ctx context.Context, url string, interval time.Duration, upsertCols []string) {
+func runPeriodicDiscovery(ctx context.Context, url string, interval time.Duration, upsertCols []string, sched *scheduler.Scheduler) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -330,11 +344,20 @@ func runPeriodicDiscovery(ctx context.Context, url string, interval time.Duratio
 		if err != nil {
 			log.Printf("[Discovery] Fetch failed (will retry): %v", err)
 		} else if len(nodes) > 0 {
-			txErr := discovery.UpsertFreshNodes(database.DB, nodes, upsertCols)
+			vetted, summary := discovery.VetNodes(ctx, nodes, 12, func(ctx context.Context, node *models.Node) (*reputation.Result, error) {
+				return sched.EvaluateIPAdmissionForRegion(ctx, node.IP, node.Country)
+			}, func(node *models.Node) int {
+				if sched.ScoringEngine == nil {
+					return 0
+				}
+				primary := strings.EqualFold(node.Country, sched.RegionConfig.Primary)
+				return sched.ScoringEngine.EvaluateNode(node, primary, 0, "").FinalScore
+			})
+			txErr := discovery.UpsertVettedNodes(database.DB, vetted, upsertCols)
 			if txErr != nil {
 				log.Printf("[Discovery] Refresh failed: %v", txErr)
 			} else {
-				log.Printf("[Discovery] Refreshed %d nodes", len(nodes))
+				log.Printf("[Discovery] Vetted %d fetched nodes before candidate admission: accepted=%d rejected=%d", len(nodes), summary.Accepted, summary.Rejected)
 			}
 		}
 		select {

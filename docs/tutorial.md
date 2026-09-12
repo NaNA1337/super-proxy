@@ -19,7 +19,16 @@ sudo ./init-config -address 你的公网域名 -output /etc/super-proxy/config.y
 
 默认 API 只绑定回环，数据库与 Xray 运行配置使用配置目录下的绝对路径。异机 Manager 访问时改 `api.listen` 为管理地址并限制来源。默认区域 JP，备用 KR/SG，可在 `region` 修改。VPN Gate 节点质量和在线状态会变化。
 
-基础 ASN/ISP 归属检测不需要 API Key。要硬拒绝活跃 VPN、公共代理、Tor 和近期代理活动，在 `reputation` 中启用至少一个带威胁分类的供应商，例如 `ipqs_key`。程序会分别检查 VPN Gate 端点和隧道实际出口；机房、VPN、代理、Tor、黑名单、UNKNOWN 以及与现有活动/备用出口重复的 IPv4 `/24` 都不会晋升。
+基础 ASN/ISP 归属检测不需要 API Key。要硬拒绝活跃 VPN、公共代理、Tor、机房地址和近期代理活动，推荐配置 proxycheck.io v3：
+
+```yaml
+reputation:
+  enabled: true
+  proxycheck_key: "你的-proxycheck.io-Key"
+  proxycheck_days: 1
+```
+
+Key 可以留空使用较低的公共额度，也可以通过 systemd 环境变量 `XRAY_MANAGER_PROXYCHECK_KEY` 提供。每轮发现会先完成整批 ASN、网络类型和 Reputation 检查，然后才将合格地址写入候选池；VPN Gate 自报的 Score 和 Ping 不参与评分。程序还会检查隧道实际出口，机房、VPN、代理、Tor、黑名单、UNKNOWN、国家不符以及与现有活动/备用出口重复的 IPv4 `/24` 都不会晋升。
 
 OpenVPN 凭据只存在 Core 内存中。服务重启后数据库里的旧运行节点先进入 `STALE`，不会出现在手动切换候选列表；VPN Gate 首次刷新重新取得配置后，仍在线且可重试的节点会自动恢复为 `DISCOVERED`。这通常只需等待一次抓取完成并刷新 Manager。
 

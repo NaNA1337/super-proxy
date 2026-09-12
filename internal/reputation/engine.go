@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -221,6 +222,12 @@ func (e *Engine) EvaluateIP(ctx context.Context, ip string) (*Result, error) {
 }
 
 func (e *Engine) mergeProviderResult(finalResult *Result, res *ReputationResult, unknownCount *int) {
+	if res.Country != "" {
+		finalResult.Country = res.Country
+	}
+	if res.CountryCode != "" {
+		finalResult.CountryCode = strings.ToUpper(res.CountryCode)
+	}
 	// Track Network Intelligence
 	asn := res.NetworkInfo.ASN
 	if asn == "" {
@@ -366,16 +373,16 @@ func (e *Engine) persistNetworkAndASN(db *gorm.DB, finalResult *Result) {
 	}
 
 	netIntel := models.NetworkIntelligence{
-		IP:            finalResult.IP,
-		ASN:           finalResult.NetworkInfo.ASN,
-		ISP:           finalResult.NetworkInfo.ISP,
-		Organization:  finalResult.NetworkInfo.Organization,
-		IsHosting:     finalResult.NetworkInfo.IsHosting,
-		IsVPN:         finalResult.NetworkInfo.IsVPN,
-		IsProxy:       finalResult.NetworkInfo.IsProxy,
-		IsTor:         finalResult.NetworkInfo.IsTor,
-		Source:        "reputation_evaluation",
-		ObservedAt:    time.Now(),
+		IP:           finalResult.IP,
+		ASN:          finalResult.NetworkInfo.ASN,
+		ISP:          finalResult.NetworkInfo.ISP,
+		Organization: finalResult.NetworkInfo.Organization,
+		IsHosting:    finalResult.NetworkInfo.IsHosting,
+		IsVPN:        finalResult.NetworkInfo.IsVPN,
+		IsProxy:      finalResult.NetworkInfo.IsProxy,
+		IsTor:        finalResult.NetworkInfo.IsTor,
+		Source:       "reputation_evaluation",
+		ObservedAt:   time.Now(),
 	}
 
 	_ = db.Clauses(clause.OnConflict{

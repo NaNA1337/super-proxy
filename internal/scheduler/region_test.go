@@ -106,17 +106,8 @@ func TestDiscoveredDoesNotCountTowardQualifiedCapacity(t *testing.T) {
 	sched := NewScheduler(3, 2, reputation.NewEngine(), cfg) // required = 5
 	cacheAllTestNodeCredentials(t)
 
-	res, err := sched.SelectNextCandidate()
-	if err != nil {
-		t.Fatalf("unexpected error selecting candidate: %v", err)
-	}
-
-	// DISCOVERED nodes MUST NOT count toward qualified capacity!
-	if res.QualifiedCapacity != 0 {
-		t.Errorf("expected qualified capacity 0 (DISCOVERED must not count toward capacity), got %d", res.QualifiedCapacity)
-	}
-	if !res.FallbackEnabled {
-		t.Errorf("expected fallback to be ENABLED because qualified capacity (0) < required (5)")
+	if _, err := sched.SelectNextCandidate(); err == nil {
+		t.Fatal("DISCOVERED nodes must not be selectable before reputation admission")
 	}
 }
 
@@ -130,7 +121,7 @@ func TestFallbackOnlyWhenPrimaryInsufficient(t *testing.T) {
 			IP:       "192.0.2." + string(rune('0'+i)),
 			Country:  "JP",
 			Score:    100 + i,
-			Status:   models.StatusDiscovered,
+			Status:   models.StatusReputationChecked,
 			LastSeen: time.Now(),
 		})
 	}
@@ -141,7 +132,7 @@ func TestFallbackOnlyWhenPrimaryInsufficient(t *testing.T) {
 		IP:       "203.0.113.1",
 		Country:  "KR",
 		Score:    500,
-		Status:   models.StatusDiscovered,
+		Status:   models.StatusReputationChecked,
 		LastSeen: time.Now(),
 	})
 
@@ -273,7 +264,7 @@ func TestPrimaryQualifiedCapacitySatisfied(t *testing.T) {
 		IP:       "198.51.100.99",
 		Country:  "US",
 		Score:    999999,
-		Status:   models.StatusDiscovered,
+		Status:   models.StatusReputationChecked,
 		LastSeen: time.Now(),
 	})
 
@@ -309,7 +300,7 @@ func TestCredentiallessQualifiedNodeDoesNotBlockFallback(t *testing.T) {
 		}
 	}
 	requireCreate(&models.Node{ID: "JP-NO-CREDENTIAL", IP: "192.0.2.10", Country: "JP", Status: models.StatusQualified})
-	requireCreate(&models.Node{ID: "US-READY", IP: "198.51.100.10", Country: "US", Status: models.StatusDiscovered})
+	requireCreate(&models.Node{ID: "US-READY", IP: "198.51.100.10", Country: "US", Status: models.StatusReputationChecked})
 	discovery.SetOVPNSecret("US-READY", "test-credential")
 
 	sched := NewScheduler(1, 0, reputation.NewEngine(), config.RegionConfig{Primary: "JP", Fallback: []string{"US"}})

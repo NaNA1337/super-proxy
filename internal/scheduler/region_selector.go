@@ -35,7 +35,7 @@ var qualifiedCapacityStatuses = []string{
 var candidateSelectStatuses = []string{
 	models.StatusQualified,
 	models.StatusHealthy,
-	models.StatusDiscovered,
+	models.StatusReputationChecked,
 }
 
 // SelectNextCandidate audits eligible candidates in the database and returns the best node.

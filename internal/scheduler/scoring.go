@@ -24,6 +24,15 @@ type ScoringEngine struct {
 // NewScoringEngine creates a unified scoring engine from configuration.
 func NewScoringEngine(cfg config.ScoringConfig) *ScoringEngine {
 	// Set safe defaults if not configured
+	if cfg.ResidentialBonus <= 0 {
+		cfg.ResidentialBonus = 40
+	}
+	if cfg.BusinessBonus <= 0 {
+		cfg.BusinessBonus = 20
+	}
+	if cfg.WirelessBonus <= 0 {
+		cfg.WirelessBonus = 25
+	}
 	if cfg.VPNPenalty <= 0 {
 		cfg.VPNPenalty = 5
 	}
@@ -91,9 +100,22 @@ func (s *ScoringEngine) EvaluateNodeWithASN(node *models.Node, isPrimaryRegion b
 		}
 	}
 
-	// 1. Base VPN Gate score
-	vpnGateScore := node.Score
-	reasons = append(reasons, fmt.Sprintf("VPNGate base: %d", vpnGateScore))
+	// VPN Gate's self-reported source score is deliberately excluded. Candidate
+	// quality begins with independently resolved network allocation type.
+	networkBonus := 0
+	switch strings.ToLower(strings.TrimSpace(node.NetClass.NetworkType)) {
+	case "residential", "broadband", "isp":
+		networkBonus = s.cfg.ResidentialBonus
+		reasons = append(reasons, fmt.Sprintf("Residential/broadband network bonus: +%d", networkBonus))
+	case "wireless", "mobile":
+		networkBonus = s.cfg.WirelessBonus
+		reasons = append(reasons, fmt.Sprintf("Wireless/mobile network bonus: +%d", networkBonus))
+	case "business", "corporate":
+		networkBonus = s.cfg.BusinessBonus
+		reasons = append(reasons, fmt.Sprintf("Business network bonus: +%d", networkBonus))
+	default:
+		reasons = append(reasons, "Unknown network allocation: +0")
+	}
 
 	// 2. Region score (Primary region receives priority bonus)
 	regionBonus := 0
@@ -176,7 +198,7 @@ func (s *ScoringEngine) EvaluateNodeWithASN(node *models.Node, isPrimaryRegion b
 		reasons = append(reasons, fmt.Sprintf("Failure history penalty: -%d (fails=%d)", failPenalty, node.FailCount))
 	}
 
-	finalScore := vpnGateScore + regionBonus + speedBonus + latencyBonus - lossPenalty - repPenalty - prefixPenalty - asnPenalty - netPenalty - failPenalty
+	finalScore := networkBonus + regionBonus + speedBonus + latencyBonus - lossPenalty - repPenalty - prefixPenalty - asnPenalty - netPenalty - failPenalty
 
 	allowed := finalScore >= -100
 	var explanation string

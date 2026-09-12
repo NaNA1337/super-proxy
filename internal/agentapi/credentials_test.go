@@ -22,8 +22,8 @@ func TestQualifiedPoolHidesNodesWithoutRuntimeCredentials(t *testing.T) {
 	discovery.ClearOVPNSecretCache()
 	defer discovery.ClearOVPNSecretCache()
 	require.NoError(t, database.DB.Create(&[]models.Node{
-		{ID: "available", IP: "198.51.100.1", Status: models.StatusDiscovered},
-		{ID: "missing", IP: "198.51.100.2", Status: models.StatusDiscovered},
+		{ID: "available", IP: "198.51.100.1", Status: models.StatusReputationChecked},
+		{ID: "missing", IP: "198.51.100.2", Status: models.StatusReputationChecked},
 	}).Error)
 	discovery.SetOVPNSecret("available", "credential")
 
@@ -42,7 +42,7 @@ func TestManualSwitchRejectsMissingCredentialsSynchronously(t *testing.T) {
 	discovery.ClearOVPNSecretCache()
 	defer discovery.ClearOVPNSecretCache()
 	require.NoError(t, database.DB.Create(&models.Node{
-		ID: "missing", IP: "198.51.100.2", Status: models.StatusDiscovered,
+		ID: "missing", IP: "198.51.100.2", Status: models.StatusReputationChecked,
 	}).Error)
 	SetScheduler(scheduler.NewScheduler(3, 2, reputation.NewEngine(), config.RegionConfig{Primary: "JP"}))
 

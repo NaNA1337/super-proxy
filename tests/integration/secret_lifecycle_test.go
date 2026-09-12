@@ -206,7 +206,7 @@ MIIDXTCCAkWgAwIBAgIJAP
 	// Verify metadata survived restart
 	assert.Equal(t, "192.168.100.55", restartNode.IP)
 	assert.Equal(t, "JP", restartNode.Country)
-	assert.Equal(t, 850, restartNode.Score)
+	assert.Equal(t, 0, restartNode.Score, "VPN Gate's source score must not survive as an internal score")
 
 	// Verify raw secret DID NOT magically reappear in DB
 	assert.Empty(t, restartNode.OpenVPN, "OpenVPN secret must not reappear after daemon restart")

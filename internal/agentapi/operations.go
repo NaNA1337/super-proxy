@@ -151,19 +151,16 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 	ctx, cancel := context.WithTimeout(sched.Context(), 60*time.Second)
 	defer cancel()
 
-	tunnel, err := openvpn.StartTunnel(sched.Context(), candidateSlot, &node)
+	tunnel, err := openvpn.StartTunnel(ctx, candidateSlot, &node)
 	if err != nil {
 		log.Printf("[Operation-%s] Candidate tunnel failed to start: %v. Old active slot %d is unaffected.",
 			op.ID, err, op.Slot)
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to start candidate tunnel: %v", err))
-		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = scheduler.FailNode(database.DB, &node, "manual openvpn startup: "+err.Error())
 		lease.Release()
 		releaseSlot(op.Slot)
 		return
 	}
-
-	// Give OpenVPN time to negotiate and create the tun device
-	time.Sleep(5 * time.Second)
 
 	// 3. CANDIDATE VERIFICATION — In isolated candidate routing table
 	updateOpStatus(op, OpVerifying, "")
@@ -172,7 +169,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 			op.ID, err)
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to setup candidate routing: %v", err))
 		tunnel.Stop()
-		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = scheduler.FailNode(database.DB, &node, fmt.Sprintf("manual candidate routing: %v", err))
 		lease.Release()
 		releaseSlot(op.Slot)
 		return
@@ -187,7 +184,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Candidate health verification failed on dev %s: %v", tunnel.Interface, res.Error))
 		routing.ClearCandidateRouting(candidateSlot)
 		tunnel.Stop()
-		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = scheduler.FailNode(database.DB, &node, fmt.Sprintf("manual health verification: %v", res.Error))
 		lease.Release()
 		releaseSlot(op.Slot)
 		return
@@ -195,14 +192,14 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 
 	node.ObservedExitIP = res.ObservedExitIP
 	database.DB.Model(&node).Update("observed_exit_ip", node.ObservedExitIP)
-	exitAdmission, err := sched.EvaluateIPAdmission(ctx, node.ObservedExitIP)
+	exitAdmission, err := sched.EvaluateIPAdmissionForRegion(ctx, node.ObservedExitIP, node.Country)
 	scheduler.PersistAdmissionResult(&node, exitAdmission)
 	if err != nil {
 		log.Printf("[Operation-%s] Observed exit %s rejected by admission policy: %v", op.ID, node.ObservedExitIP, err)
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Observed exit rejected by admission policy: %v", err))
 		routing.ClearCandidateRouting(candidateSlot)
 		tunnel.Stop()
-		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = scheduler.FailNode(database.DB, &node, "manual observed exit reputation: "+err.Error())
 		lease.Release()
 		releaseSlot(op.Slot)
 		return
@@ -212,7 +209,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Observed exit rejected by IPv4 /24 diversity policy: %v", err))
 		routing.ClearCandidateRouting(candidateSlot)
 		tunnel.Stop()
-		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = scheduler.FailNode(database.DB, &node, fmt.Sprintf("manual observed exit /24 diversity: %v", err))
 		lease.Release()
 		releaseSlot(op.Slot)
 		return
@@ -240,7 +237,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 				op.ID, op.Slot, err)
 			routing.ClearCandidateRouting(candidateSlot)
 			tunnel.Stop()
-			_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+			_ = scheduler.FailNode(database.DB, &node, fmt.Sprintf("manual Xray activation: %v", err))
 			updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to activate Xray routing: %v", err))
 			lease.Release()
 			releaseSlot(op.Slot)
@@ -262,7 +259,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 			}
 		}
 		tunnel.Stop()
-		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = scheduler.FailNode(database.DB, &node, fmt.Sprintf("manual slot routing cutover: %v", err))
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to switch slot routing: %v", err))
 		lease.Release()
 		releaseSlot(op.Slot)
@@ -286,7 +283,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 			}
 		}
 		tunnel.Stop()
-		_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+		_ = scheduler.FailNode(database.DB, &node, fmt.Sprintf("manual final /24 diversity: %v", err))
 		updateOpStatus(op, OpFailed, fmt.Sprintf("Candidate failed final IPv4 /24 commit check: %v", err))
 		lease.Release()
 		releaseSlot(op.Slot)
@@ -305,7 +302,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 			_ = routing.SetupSlotRouting(op.Slot, oldTunnel.Interface)
 			sched.Mu.Unlock()
 			tunnel.Stop()
-			_ = scheduler.TransitionNode(database.DB, &node, models.StatusFailed)
+			_ = scheduler.FailNode(database.DB, &node, fmt.Sprintf("manual Xray slot synchronization: %v", err))
 			updateOpStatus(op, OpFailed, fmt.Sprintf("Failed to prepare old tunnel draining: %v", err))
 			lease.Release()
 			releaseSlot(op.Slot)

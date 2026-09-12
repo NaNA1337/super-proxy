@@ -121,7 +121,7 @@ func OVPNSecretCacheSize() int {
 // FetchAndParseNodes downloads the VPN Gate CSV and parses it into Node models
 func FetchAndParseNodes(url string) ([]models.Node, error) {
 	log.Printf("Fetching VPN Gate data from %s", url)
-	
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -164,8 +164,6 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 			continue
 		}
 
-		score, _ := strconv.Atoi(record[2])
-		ping, _ := strconv.Atoi(record[3])
 		speed, _ := strconv.ParseInt(record[4], 10, 64)
 		sessions, _ := strconv.Atoi(record[7])
 		uptime, _ := strconv.ParseInt(record[8], 10, 64)
@@ -192,10 +190,12 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 		SetOVPNSecret(id, b64Config)
 
 		node := models.Node{
-			ID:            id,
-			HostName:      record[0],
-			IP:            ip,
-			Score:         score,
+			ID:       id,
+			HostName: record[0],
+			IP:       ip,
+			// The source's score is intentionally ignored. Admission and
+			// measured tunnel performance determine our internal score.
+			Score:         0,
 			CountryL:      record[5],
 			Country:       record[6], // CountryShort
 			Sessions:      sessions,
@@ -216,7 +216,10 @@ func parseCSV(reader io.Reader) ([]models.Node, error) {
 			FirstSeen:     now,
 			FailCount:     0,
 			Performance: models.PerformanceMetrics{
-				RTT:        ping,
+				// VPN Gate's CSV ping is source-supplied metadata, not a
+				// measurement made through our tunnel. Keep it out of the
+				// scheduler score until qualification measures the real RTT.
+				RTT:        -1,
 				Throughput: speed,
 			},
 		}

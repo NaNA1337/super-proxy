@@ -72,7 +72,7 @@ type Node struct {
 	CredentialsAvailable bool   `gorm:"-" json:"credentials_available"`
 	HostName             string `gorm:"column:host_name" json:"hostname"`
 	IP                   string `gorm:"index;column:ip" json:"ip"`
-	Score                int    `gorm:"column:score" json:"score"` // Original VPN Gate score
+	Score                int    `gorm:"column:score" json:"score"` // Internally calculated admission/performance score
 	Country              string `gorm:"index;column:country" json:"country"`
 	CountryL             string `gorm:"column:country_long" json:"country_long"`
 	Sessions             int    `gorm:"column:sessions" json:"sessions"`
@@ -96,10 +96,12 @@ type Node struct {
 	OpenVPNConfig string `gorm:"column:openvpn_config" json:"openvpn_config,omitempty"` // Canonical safe local .ovpn config (credentials stripped)
 	EndpointsJSON string `gorm:"column:endpoints_json" json:"endpoints_json"`           // JSON-encoded []OpenVPNEndpoint
 
-	Status    string    `gorm:"index;column:status" json:"status"` // NEW, DISCOVERED, ACTIVE, FAILED, COOLDOWN, DEAD
-	LastSeen  time.Time `gorm:"column:last_seen" json:"last_seen"`
-	FirstSeen time.Time `gorm:"column:first_seen" json:"first_seen"`
-	FailCount int       `gorm:"column:fail_count" json:"fail_count"`
+	Status        string    `gorm:"index;column:status" json:"status"` // NEW, DISCOVERED, ACTIVE, FAILED, COOLDOWN, DEAD
+	LastSeen      time.Time `gorm:"column:last_seen" json:"last_seen"`
+	FirstSeen     time.Time `gorm:"column:first_seen" json:"first_seen"`
+	FailCount     int       `gorm:"column:fail_count" json:"fail_count"`
+	LastError     string    `gorm:"column:last_error" json:"last_error,omitempty"`
+	LastFailureAt time.Time `gorm:"column:last_failure_at" json:"last_failure_at,omitempty"`
 
 	// Separated concerns using GORM embedded structs
 	Reputation  ReputationMetrics  `gorm:"embedded;embeddedPrefix:rep_" json:"reputation"`

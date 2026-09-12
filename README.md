@@ -8,7 +8,7 @@ Super-Proxy 是运行在 Linux 服务器上的多出口代理核心。它自动�
                      Manager → HTTPS/60000 Agent API
 ```
 
-当前稳定版为 [v1.1.7](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.7)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
+当前稳定版为 [v1.1.8](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.8)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
 
 ### 三条 TUN 如何使用带宽
 
@@ -44,7 +44,7 @@ xray version
 ### 2. 安装 Super-Proxy
 
 ```bash
-VERSION=1.1.7
+VERSION=1.1.8
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in amd64|arm64) ;; *) echo "不支持的架构: $ARCH"; exit 1 ;; esac
 
@@ -137,15 +137,27 @@ sudo journalctl -fu super-proxy
 
 ### 出口 ASN 与代理准入
 
-基础 ASN、ISP 和组织归属查询默认启用，不需要 API Key。它会拒绝明确属于云厂商、VPS、托管和数据中心的网段。系统同时检查 VPN Gate 服务器端点与隧道实际出口，并保证活动/备用节点的 IPv4 `/24` 不重复。
+每次拉取 VPN Gate 列表后，Core 会先完成整批 ASN 和 Reputation 审查，审查结束后才把通过的节点写成 `REPUTATION_CHECKED` 候选。未经检查的 `DISCOVERED` 节点不会出现在 Slot Manager，也不能调用手动切换 API。系统还会检查隧道实际出口，并保证活动/备用节点的 IPv4 `/24` 不重复。
 
-精确识别活跃 VPN、公共代理、Tor 和近期代理活动需要信誉供应商数据。推荐使用 [IPQualityScore Proxy & VPN Detection API](https://www.ipqualityscore.com/proxy-vpn-tor-detection-service)：当前 Core 已直接处理 `proxy`、`vpn`、`active_vpn`、`tor`、`active_tor`、`recent_abuse`、`frequent_abuser`、`high_risk_attacks`、`abuse_velocity`、`fraud_score`、ASN 和连接类型。申请 Key 后只需写入服务端配置，不要发送给 Manager 或客户端：
+推荐使用 [proxycheck.io v3](https://proxycheck.io/api/)。它在一次查询中返回 ASN、ISP、组织、`Residential`/`Business`/`Wireless`/`Hosting` 网络类型、风险分和 VPN/公共代理/Tor/hosting 等检测。未配置 Key 也能运行，但官方公共额度较低；注册免费 Key 后每日可检查 1,000 个地址。VPN Gate 刷新量较大时应按实际节点数准备额度。Key 只配置在 Core：
 
 ```yaml
 reputation:
   enabled: true
   failure_policy: conservative
-  ipqs_key: "你的-IPQS-Key"
+  proxycheck_key: "你的-proxycheck.io-Key"
+  proxycheck_days: 1
+```
+
+也可以不把 Key 写进 YAML：
+
+```bash
+sudo systemctl edit super-proxy
+# 在编辑器中写入：
+# [Service]
+# Environment=XRAY_MANAGER_PROXYCHECK_KEY=你的-proxycheck.io-Key
+sudo systemctl daemon-reload
+sudo systemctl restart super-proxy
 ```
 
 ```bash
@@ -153,13 +165,13 @@ sudo systemctl restart super-proxy
 sudo journalctl -u super-proxy -n 100 --no-pager | grep -E 'Reputation|REJECTED|/24'
 ```
 
-IPQS 免费额度适合验证配置，不适合持续发现大量 VPN Gate 节点；当前 [官方套餐页](https://www.ipqualityscore.com/plans) 会列出实时额度。Core 会缓存单个供应商结果 24 小时，但一次新节点发现仍可能同时检查服务器端点和实际隧道出口。正式使用应选择足够的月度/每日请求量，避免触发 429 后在 `conservative` 策略下因 UNKNOWN 暂停节点晋升。
+Core 将单个地址的供应商结果缓存 24 小时。服务重启会重新审查本轮拉取的所有地址；若额度耗尽或供应商超时，`conservative` 会把结果作为 `UNKNOWN` 拒绝，节点不会偷偷进入候选池。日志中的 `accepted`、`rejected` 和具体供应商原因可用于确认准入结果。
 
-如果更需要大量 ASN、hosting、VPN/proxy/Tor 查询，而不要求 IPQS 的近期滥用字段，也可以配置 `ipinfo_key` 使用 [IPinfo Privacy Detection](https://ipinfo.io/products/proxy-vpn-detection-api)。AbuseIPDB 和 GreyNoise 适合作为恶意活动补充，不应单独承担活跃公共代理/VPN 判断。
+`reputation.enabled: true` 时，即使没有 Key，Core 也会调用 proxycheck.io 的公共接口完成全套检查；日志会提示低额度。`reputation.enabled: false` 才退回无 Key 的基础 ASN/托管归属检查。AbuseIPDB、GreyNoise、IPQS 和 IPinfo 仍可作为附加供应商；保守模式要求所有已配置供应商成功返回。
 
-`hosting/datacenter`、`VPN`、`public proxy`、`Tor`、黑名单和保守模式下的 `UNKNOWN` 都是硬拒绝，VPN Gate 分数和测速结果不能覆盖这些结论。
+`hosting/datacenter`、`VPN`、`public proxy`、`Tor`、高风险、黑名单和保守模式下的 `UNKNOWN` 都是硬拒绝。VPN Gate 自带的 `Score` 不再参与系统评分；系统按独立查询得到的网络类型加分，默认住宅/宽带 `+40`、无线/移动 `+25`、企业网络 `+20`，再结合实际隧道测速、延迟、丢包、信誉和失败历史计算。
 
-OpenVPN 私钥只保存在 Core 进程内存中，不写入数据库。Core 刚重启时，旧节点会暂时标记为 `STALE` 并从手动切换候选中隐藏；本轮 VPN Gate 刷新重新取得配置后才恢复。日志出现 `Refreshed ... nodes` 后刷新 Manager 页面即可。无凭据节点不会再创建一个随后失败的切换任务。
+OpenVPN 私钥只保存在 Core 进程内存中，不写入数据库。Core 刚重启时，旧节点会暂时标记为 `STALE` 并从手动切换候选中隐藏；本轮 VPN Gate 刷新重新取得配置并完成审查后才恢复。日志出现 `Vetted ... accepted=... rejected=...` 后刷新 Manager 页面即可。无凭据节点不会再创建一个随后失败的切换任务。
 
 将 `$HOME/xray-client.json` 安全复制到客户端，先检查再启动：
 
@@ -183,7 +195,7 @@ curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
 ```bash
 sudo cp -a /etc/super-proxy "/etc/super-proxy.backup.$(date +%Y%m%d-%H%M%S)"
 
-VERSION=1.1.7
+VERSION=1.1.8
 ARCH="$(dpkg --print-architecture)"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"
@@ -235,7 +247,7 @@ sudo systemctl start super-proxy
 
 不要对所有公网来源开放 TCP/60000。Agent 已强制使用 HTTPS、Bearer Token、证书指纹校验和限速，但来源防火墙仍是远程管理入口的第一层保护。
 
-安装 [Manager v1.0.4](https://github.com/NaNA1337/super-proxy-manager/releases/tag/v1.0.4) 后，用下面的信息添加主机：
+安装 [Manager v1.0.6](https://github.com/NaNA1337/super-proxy-manager/releases/tag/v1.0.6) 后，用下面的信息添加主机：
 
 | Manager 字段 | 填写内容 |
 | --- | --- |

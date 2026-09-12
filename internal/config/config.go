@@ -48,24 +48,29 @@ type DiscoveryConfig struct {
 }
 
 type ReputationConfig struct {
-	Enabled       bool   `mapstructure:"enabled"`
-	FailurePolicy string `mapstructure:"failure_policy"` // "conservative" (default) or "lenient"
-	AbuseIPDBKey  string `mapstructure:"abuseipdb_key"`
-	GreyNoiseKey  string `mapstructure:"greynoise_key"`
-	IPQSKey       string `mapstructure:"ipqs_key"`
-	IPInfoKey     string `mapstructure:"ipinfo_key"`
-	APIKey        string `mapstructure:"api_key"` // backward-compatible alias for AbuseIPDB
+	Enabled        bool    `mapstructure:"enabled"`
+	FailurePolicy  string  `mapstructure:"failure_policy"` // "conservative" (default) or "lenient"
+	ProxyCheckKey  string  `mapstructure:"proxycheck_key"`
+	ProxyCheckDays float64 `mapstructure:"proxycheck_days"`
+	AbuseIPDBKey   string  `mapstructure:"abuseipdb_key"`
+	GreyNoiseKey   string  `mapstructure:"greynoise_key"`
+	IPQSKey        string  `mapstructure:"ipqs_key"`
+	IPInfoKey      string  `mapstructure:"ipinfo_key"`
+	APIKey         string  `mapstructure:"api_key"` // backward-compatible alias for AbuseIPDB
 }
 
 type ScoringConfig struct {
-	VPNPenalty     int     `mapstructure:"vpn_penalty"`      // default 5
-	TorPenalty     int     `mapstructure:"tor_penalty"`      // default 50
-	HostingPenalty int     `mapstructure:"hosting_penalty"`  // default 10
-	PrefixBadLimit int     `mapstructure:"prefix_bad_limit"` // default 3 bad IPs
-	PrefixPenalty  int     `mapstructure:"prefix_penalty"`   // default 20
-	FailurePenalty int     `mapstructure:"failure_penalty"`  // default 30 per fail
-	SpeedWeight    float64 `mapstructure:"speed_weight"`     // default 1.0
-	LatencyWeight  float64 `mapstructure:"latency_weight"`   // default 0.5
+	ResidentialBonus int     `mapstructure:"residential_bonus"` // default 40
+	BusinessBonus    int     `mapstructure:"business_bonus"`    // default 20
+	WirelessBonus    int     `mapstructure:"wireless_bonus"`    // default 25
+	VPNPenalty       int     `mapstructure:"vpn_penalty"`       // default 5
+	TorPenalty       int     `mapstructure:"tor_penalty"`       // default 50
+	HostingPenalty   int     `mapstructure:"hosting_penalty"`   // default 10
+	PrefixBadLimit   int     `mapstructure:"prefix_bad_limit"`  // default 3 bad IPs
+	PrefixPenalty    int     `mapstructure:"prefix_penalty"`    // default 20
+	FailurePenalty   int     `mapstructure:"failure_penalty"`   // default 30 per fail
+	SpeedWeight      float64 `mapstructure:"speed_weight"`      // default 1.0
+	LatencyWeight    float64 `mapstructure:"latency_weight"`    // default 0.5
 }
 
 type SpeedTestConfig struct {
@@ -90,7 +95,11 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("api.listen", "127.0.0.1")
 	v.SetDefault("api.port", 60000)
 	v.SetDefault("reputation.failure_policy", "conservative")
+	v.SetDefault("reputation.proxycheck_days", 1.0)
 	v.SetDefault("scoring.vpn_penalty", 5)
+	v.SetDefault("scoring.residential_bonus", 40)
+	v.SetDefault("scoring.business_bonus", 20)
+	v.SetDefault("scoring.wireless_bonus", 25)
 	v.SetDefault("scoring.tor_penalty", 50)
 	v.SetDefault("scoring.hosting_penalty", 10)
 	v.SetDefault("scoring.prefix_bad_limit", 3)
@@ -171,6 +180,9 @@ func (c *Config) Validate() error {
 	// 4. Reputation failure policy validation
 	if c.Reputation.FailurePolicy != "" && c.Reputation.FailurePolicy != "conservative" && c.Reputation.FailurePolicy != "lenient" {
 		return fmt.Errorf("invalid reputation.failure_policy: %q (must be 'conservative' or 'lenient')", c.Reputation.FailurePolicy)
+	}
+	if c.Reputation.ProxyCheckDays < 0.01 || c.Reputation.ProxyCheckDays > 60 {
+		return fmt.Errorf("invalid reputation.proxycheck_days: %v (must be between 0.01 and 60)", c.Reputation.ProxyCheckDays)
 	}
 
 	// 5. Benchmark / SpeedTest validation

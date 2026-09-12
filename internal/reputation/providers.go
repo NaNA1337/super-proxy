@@ -55,6 +55,8 @@ type ReputationResult struct {
 // Result defines the aggregate outcome of all reputation evaluations for an IP.
 type Result struct {
 	IP             string
+	Country        string
+	CountryCode    string
 	Status         ReputationStatus
 	HardReject     bool
 	ScorePenalty   int

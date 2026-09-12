@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/models"
@@ -40,18 +41,20 @@ var AllowedTransitions = map[string]map[string]bool{
 		models.StatusFailed:    true,
 	},
 	models.StatusHealthy: {
-		models.StatusSpeedTest: true,
-		models.StatusQualified: true,
-		models.StatusFailed:    true,
+		models.StatusConnecting: true,
+		models.StatusSpeedTest:  true,
+		models.StatusQualified:  true,
+		models.StatusFailed:     true,
 	},
 	models.StatusSpeedTest: {
 		models.StatusQualified: true,
 		models.StatusFailed:    true,
 	},
 	models.StatusQualified: {
-		models.StatusStandby: true,
-		models.StatusActive:  true, // for direct slot assignment after verification
-		models.StatusFailed:  true,
+		models.StatusConnecting: true,
+		models.StatusStandby:    true,
+		models.StatusActive:     true, // for direct slot assignment after verification
+		models.StatusFailed:     true,
 	},
 	models.StatusStandby: {
 		models.StatusActive: true,
@@ -83,6 +86,28 @@ var AllowedTransitions = map[string]map[string]bool{
 	models.StatusDead: {
 		models.StatusDiscovered: true, // manual or admin revival
 	},
+}
+
+// FailNode records the stage-specific failure before applying normal FAILED ->
+// DEAD accounting, so regional outages and provider rejections remain diagnosable.
+func FailNode(db *gorm.DB, node *models.Node, reason string) error {
+	node.LastError = reason
+	node.LastFailureAt = time.Now()
+	if db != nil {
+		if err := db.Model(node).Updates(map[string]interface{}{
+			"last_error": reason, "last_failure_at": node.LastFailureAt,
+		}).Error; err != nil {
+			return err
+		}
+	}
+	return TransitionNode(db, node, models.StatusFailed)
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	return err.Error()
 }
 
 var fsmMu sync.Mutex

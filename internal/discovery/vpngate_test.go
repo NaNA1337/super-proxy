@@ -34,8 +34,11 @@ func TestParseCSV(t *testing.T) {
 	if n1.Country != "JP" {
 		t.Errorf("Expected Country JP, got %s", n1.Country)
 	}
-	if n1.Score != 1000 {
-		t.Errorf("Expected Score 1000, got %d", n1.Score)
+	if n1.Score != 0 {
+		t.Errorf("VPN Gate source score must be ignored, got %d", n1.Score)
+	}
+	if n1.Performance.RTT != -1 {
+		t.Errorf("VPN Gate source ping must be untrusted, got RTT %d", n1.Performance.RTT)
 	}
 	if n1.EndpointPort != 1194 {
 		t.Errorf("Expected EndpointPort 1194, got %d", n1.EndpointPort)
@@ -125,4 +128,3 @@ func TestSecretCache_TTLAndExplicitEviction(t *testing.T) {
 		t.Fatalf("Expected secret to be deleted by DeleteOVPNSecret")
 	}
 }
-

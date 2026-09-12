@@ -9,11 +9,18 @@ discovery:
   url: "https://www.vpngate.net/api/iphone/"
   interval: 15
 reputation:
-  # Basic ASN ownership and obvious hosting detection are always enabled.
-  # Set enabled=true and add provider keys for active VPN/proxy/abuse detection.
-  enabled: false
+  # proxycheck.io v3 supplies ASN, Residential/Business/Wireless/Hosting type,
+  # risk, and active VPN/proxy/Tor detections. Prefer the environment variable
+  # XRAY_MANAGER_PROXYCHECK_KEY so the key does not need to live in this file.
+  enabled: true
   # conservative rejects UNKNOWN for every configured provider; lenient allows it.
   failure_policy: conservative
+  proxycheck_key: ""
+  proxycheck_days: 1
+scoring:
+  residential_bonus: 40
+  business_bonus: 20
+  wireless_bonus: 25
 api:
   listen: "127.0.0.1"
   port: 60000

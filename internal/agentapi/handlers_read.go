@@ -153,18 +153,19 @@ func handleCurrentExits(w http.ResponseWriter, r *http.Request) {
 			exitIP = tunnel.Node.IP
 		}
 		exits = append(exits, map[string]interface{}{
-			"slot":        slot,
-			"status":      tunnel.State,
-			"node_id":     tunnel.Node.ID,
-			"ip":          exitIP,
-			"endpoint_ip": tunnel.Node.IP,
-			"interface":   tunnel.Interface,
-			"country":     tunnel.Node.Country,
-			"region":      tunnel.Node.Country, // Simplified mapping
-			"score":       tunnel.Node.Score,
-			"reputation":  tunnel.Node.Reputation,
-			"throughput":  tunnel.Node.Performance.Throughput,
-			"last_check":  tunnel.Node.LastSeen,
+			"slot":          slot,
+			"status":        tunnel.State,
+			"node_id":       tunnel.Node.ID,
+			"ip":            exitIP,
+			"endpoint_ip":   tunnel.Node.IP,
+			"interface":     tunnel.Interface,
+			"country":       tunnel.Node.Country,
+			"region":        tunnel.Node.Country, // Simplified mapping
+			"score":         tunnel.Node.Score,
+			"reputation":    tunnel.Node.Reputation,
+			"network_class": tunnel.Node.NetClass,
+			"throughput":    tunnel.Node.Performance.Throughput,
+			"last_check":    tunnel.Node.LastSeen,
 		})
 	}
 	sendJSON(w, exits)
@@ -200,12 +201,13 @@ func handlePool(w http.ResponseWriter, r *http.Request) {
 	database.DB.Model(&models.Node{}).Select("status, count(*) as count").Group("status").Scan(&counts)
 
 	resp := map[string]int{
-		"active":    0,
-		"standby":   0,
-		"qualified": 0, // We map DISCOVERED to qualified here based on requirements
-		"candidate": 0, // NEW
-		"cooldown":  0,
-		"rejected":  0, // DEAD/FAILED
+		"active":         0,
+		"standby":        0,
+		"qualified":      0,
+		"candidate":      0, // NEW
+		"pending_review": 0,
+		"cooldown":       0,
+		"rejected":       0, // DEAD/FAILED
 	}
 
 	for _, c := range counts {
@@ -214,10 +216,12 @@ func handlePool(w http.ResponseWriter, r *http.Request) {
 			resp["active"] = c.Count
 		case "STANDBY":
 			resp["standby"] = c.Count
-		case "DISCOVERED":
+		case "REPUTATION_CHECKED":
+			resp["candidate"] += c.Count
+		case "QUALIFIED":
 			resp["qualified"] = c.Count
-		case "NEW":
-			resp["candidate"] = c.Count
+		case "NEW", "DISCOVERED":
+			resp["pending_review"] += c.Count
 		case "COOLDOWN":
 			resp["cooldown"] = c.Count
 		case "FAILED", "DEAD":
@@ -230,8 +234,8 @@ func handlePool(w http.ResponseWriter, r *http.Request) {
 
 func handlePoolQualified(w http.ResponseWriter, r *http.Request) {
 	nodes := make([]models.Node, 0)
-	// Return states accepted by the manual switch endpoint.
-	database.DB.Where("status IN ?", []string{"DISCOVERED", "QUALIFIED", "STANDBY"}).Find(&nodes)
+	// Only expose nodes that completed ASN and reputation admission.
+	database.DB.Where("status IN ?", []string{"REPUTATION_CHECKED", "QUALIFIED", "STANDBY"}).Find(&nodes)
 
 	// A node is switchable only while its raw OpenVPN credentials exist in the
 	// runtime cache. Never expose the credential itself.

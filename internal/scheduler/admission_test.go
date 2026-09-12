@@ -58,3 +58,15 @@ func TestAdmissionRejectsUnknownUnderConservativePolicy(t *testing.T) {
 		t.Fatal("UNKNOWN result must fail closed under conservative policy")
 	}
 }
+
+func TestAdmissionRejectsProviderCountryMismatch(t *testing.T) {
+	engine := reputation.NewEngine()
+	engine.AddProvider(&admissionTestProvider{result: &reputation.ReputationResult{
+		Provider: "admission-test", Status: reputation.StatusGood, CountryCode: "JP",
+		ProviderReason: "clean JP address",
+	}})
+	s := NewScheduler(3, 2, engine, config.RegionConfig{Primary: "KR"})
+	if _, err := s.EvaluateIPAdmissionForRegion(context.Background(), "198.51.100.10", "KR"); err == nil {
+		t.Fatal("expected KR candidate with JP provider geolocation to be rejected")
+	}
+}
