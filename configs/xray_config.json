@@ -61,7 +61,7 @@
           "exit-"
         ],
         "strategy": {
-          "type": "random"
+          "type": "roundRobin"
         },
         "tag": "vpn-balancer"
       }

@@ -507,7 +507,7 @@ func (s *Supervisor) generateBalancers() []map[string]interface{} {
 				"exit-",
 			},
 			"strategy": map[string]interface{}{
-				"type": "random",
+				"type": "roundRobin",
 			},
 		},
 	}
@@ -525,7 +525,7 @@ func (s *Supervisor) generateBalancers() []map[string]interface{} {
 				"tag":      "balancer-" + strings.Join(tagParts, "-"),
 				"selector": selector,
 				"strategy": map[string]interface{}{
-					"type": "random",
+					"type": "roundRobin",
 				},
 			})
 		}
@@ -1266,4 +1266,3 @@ func (s *Supervisor) SetReadyTimeout(d time.Duration) {
 	defer s.mu.Unlock()
 	s.readyTimeout = d
 }
-

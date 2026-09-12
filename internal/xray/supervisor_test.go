@@ -40,6 +40,45 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
+func TestGeneratedBalancersUseRoundRobin(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "xray_round_robin.json")
+	if err := GenerateConfigWithOptions(ConfigOptions{
+		SlotCount:   3,
+		ConfigPath:  configPath,
+		ApiPort:     10091,
+		SocksListen: "127.0.0.1",
+		SocksPort:   10891,
+	}); err != nil {
+		t.Fatalf("generate config: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var config struct {
+		Routing struct {
+			Balancers []struct {
+				Tag      string `json:"tag"`
+				Strategy struct {
+					Type string `json:"type"`
+				} `json:"strategy"`
+			} `json:"balancers"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if len(config.Routing.Balancers) == 0 {
+		t.Fatal("generated config has no balancers")
+	}
+	for _, balancer := range config.Routing.Balancers {
+		if balancer.Strategy.Type != "roundRobin" {
+			t.Errorf("balancer %s strategy = %q, want roundRobin", balancer.Tag, balancer.Strategy.Type)
+		}
+	}
+}
+
 func TestSupervisorLifecycleAndActiveSet(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "xray_lifecycle.json")
@@ -494,4 +533,3 @@ func TestXray_SupervisorLifecycleAndRuntimeEndpoint(t *testing.T) {
 		t.Errorf("expected runtime endpoint to be CLEARED after Stop")
 	}
 }
-

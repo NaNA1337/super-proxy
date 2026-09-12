@@ -8,7 +8,21 @@ Super-Proxy 是运行在 Linux 服务器上的多出口代理核心。它自动�
                      Manager → HTTPS/60000 Agent API
 ```
 
-当前稳定版为 [v1.1.5](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.5)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
+当前稳定版为 [v1.1.6](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.6)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
+
+### 三条 TUN 如何使用带宽
+
+Xray 对每个新 TCP/UDP 会话按轮询顺序选择 slot 0/1/2 当前对应的活动 TUN。多个下载连接、多个用户或浏览器并发请求可以同时占用三条隧道；已有连接在其生命周期内保持原出口。备用 TUN 晋升后接口名可能是 `tun3` 或 `tun4`，槽位和 fwmark 才是固定标识。
+
+单个 TCP 连接不会把数据包拆到三个 VPN Gate 出口。三个出口使用不同公网源 IP，逐包切换会破坏 TCP 会话。需要单连接叠加时必须另建一个共同的远端聚合端，并在两端部署 MPTCP、MLVPN 或同类 bonding；公共 VPN Gate 节点本身不能充当该聚合端。
+
+Dashboard 的每个槽位速度是该隧道的独立准入测速。三槽总容量是三个活动槽位测速值之和，它只表示多连接可利用的容量。安装包内的实测工具会同时通过活动策略路由表 100/101/102 发起多连接下载：
+
+```bash
+sudo super-proxy-benchmark -tunnels 3 -connections-per-tunnel 4 -duration 15
+```
+
+工具会从活动路由表读取真实 TUN 接口并设置对应 `SO_MARK`。默认测试三槽，每槽四个并发连接；测试目标、宿主机网卡和 VPN Gate 节点本身都可能成为瓶颈。
 
 ## 5 分钟部署
 
@@ -30,7 +44,7 @@ xray version
 ### 2. 安装 Super-Proxy
 
 ```bash
-VERSION=1.1.5
+VERSION=1.1.6
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in amd64|arm64) ;; *) echo "不支持的架构: $ARCH"; exit 1 ;; esac
 
@@ -165,7 +179,7 @@ curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
 ```bash
 sudo cp -a /etc/super-proxy "/etc/super-proxy.backup.$(date +%Y%m%d-%H%M%S)"
 
-VERSION=1.1.5
+VERSION=1.1.6
 ARCH="$(dpkg --print-architecture)"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"

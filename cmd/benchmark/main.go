@@ -16,11 +16,19 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/NaNA1337/super-proxy/internal/routing"
 )
+
+type tunnelTarget struct {
+	Interface string
+	Mark      int
+}
 
 type BenchmarkResult struct {
 	Tunnels            int
 	Interfaces         []string
+	ConnectionsPerTun  int
 	Duration           time.Duration
 	TotalBytes         int64
 	ThroughputBps      float64
@@ -39,66 +47,93 @@ type BenchmarkResult struct {
 }
 
 func main() {
-	tunnelCount := flag.Int("tunnels", 1, "Number of tunnels to benchmark (1, 2, 3)")
+	tunnelCount := flag.Int("tunnels", 3, "Maximum number of active slots to benchmark (1, 2, 3)")
 	ifacesFlag := flag.String("interfaces", "", "Comma-separated interface names to test (e.g. tun0,tun1,tun2 or eth0)")
 	targetURL := flag.String("url", "https://speed.cloudflare.com/__down?bytes=10000000", "Download benchmark target URL")
 	durationSec := flag.Int("duration", 5, "Test duration in seconds")
+	connectionsPerTunnel := flag.Int("connections-per-tunnel", 4, "Concurrent download connections opened through each tunnel")
 	flag.Parse()
+	if *tunnelCount < 1 || *tunnelCount > 3 {
+		log.Fatalf("-tunnels must be between 1 and 3")
+	}
+	if *connectionsPerTunnel < 1 || *connectionsPerTunnel > 32 {
+		log.Fatalf("-connections-per-tunnel must be between 1 and 32")
+	}
 
 	log.Println("==============================================================")
 	log.Println("     SUPER-PROXY PRODUCTION MULTI-TUNNEL BENCHMARK TOOL       ")
 	log.Println("==============================================================")
 
-	var ifaces []string
+	var targets []tunnelTarget
 	if *ifacesFlag != "" {
 		for _, s := range strings.Split(*ifacesFlag, ",") {
 			trimmed := strings.TrimSpace(s)
 			if trimmed != "" {
-				ifaces = append(ifaces, trimmed)
+				targets = append(targets, tunnelTarget{
+					Interface: trimmed,
+					Mark:      routing.BaseTableID + len(targets),
+				})
 			}
 		}
 	}
 
-	// Auto-detect interfaces if not specified
-	if len(ifaces) == 0 {
-		netIfaces, err := net.Interfaces()
-		if err == nil {
-			for _, ifc := range netIfaces {
-				if strings.HasPrefix(ifc.Name, "tun") || strings.HasPrefix(ifc.Name, "dummy") {
-					ifaces = append(ifaces, ifc.Name)
-				}
-			}
-		}
-		// If no tun/dummy found, fallback to primary default interface
-		if len(ifaces) == 0 {
-			cmd := exec.Command("ip", "route", "show", "default")
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				fields := strings.Fields(string(out))
-				for i, f := range fields {
-					if f == "dev" && i+1 < len(fields) {
-						ifaces = append(ifaces, fields[i+1])
-						break
-					}
-				}
-			}
-		}
-		if len(ifaces) == 0 {
-			ifaces = []string{"lo"}
+	// Active interfaces are discovered from the slot policy tables. Interface
+	// names are not stable because a standby tun3/tun4 may be promoted to slot 0.
+	if len(targets) == 0 {
+		targets = discoverActiveTunnels(*tunnelCount)
+		if len(targets) == 0 {
+			log.Fatalf("no active Super-Proxy slot routes found in tables %d-%d", routing.BaseTableID, routing.BaseTableID+*tunnelCount-1)
 		}
 	}
 
 	// Limit to requested tunnelCount
-	if len(ifaces) > *tunnelCount {
-		ifaces = ifaces[:*tunnelCount]
+	if len(targets) > *tunnelCount {
+		targets = targets[:*tunnelCount]
 	}
 
-	res := RunBenchmark(ifaces, *targetURL, time.Duration(*durationSec)*time.Second)
+	res := RunBenchmark(targets, *targetURL, time.Duration(*durationSec)*time.Second, *connectionsPerTunnel)
 	PrintResults(res)
 }
 
-func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) BenchmarkResult {
-	log.Printf("[Benchmark] Testing %d interface(s): %v over %v...", len(ifaces), ifaces, duration)
+func discoverActiveTunnels(limit int) []tunnelTarget {
+	var targets []tunnelTarget
+	for slot := 0; slot < limit; slot++ {
+		mark := routing.BaseTableID + slot
+		out, err := exec.Command("ip", "route", "show", "table", strconv.Itoa(mark)).CombinedOutput()
+		if err != nil {
+			continue
+		}
+		if dev := defaultRouteDevice(string(out)); dev != "" && dev != "lo" {
+			targets = append(targets, tunnelTarget{Interface: dev, Mark: mark})
+		}
+	}
+	return targets
+}
+
+func defaultRouteDevice(routeOutput string) string {
+	for _, line := range strings.Split(routeOutput, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "default" {
+			continue
+		}
+		for i := 1; i+1 < len(fields); i++ {
+			if fields[i] == "dev" {
+				return fields[i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func RunBenchmark(targets []tunnelTarget, targetURL string, duration time.Duration, connectionsPerTunnel int) BenchmarkResult {
+	if connectionsPerTunnel < 1 {
+		connectionsPerTunnel = 1
+	}
+	ifaces := make([]string, len(targets))
+	for i, target := range targets {
+		ifaces[i] = target.Interface
+	}
+	log.Printf("[Benchmark] Testing %d active tunnel(s): %v with %d connections each over %v...", len(targets), ifaces, connectionsPerTunnel, duration)
 
 	// Detect DCO vs Userspace
 	dcoMode := "USERS_SPACE (ovpn_dco kernel module not active)"
@@ -179,49 +214,54 @@ func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) Ben
 	var wg sync.WaitGroup
 
 	testStart := time.Now()
-	for _, ifaceName := range ifaces {
-		wg.Add(1)
-		go func(dev string) {
-			defer wg.Done()
+	for _, target := range targets {
+		for stream := 0; stream < connectionsPerTunnel; stream++ {
+			wg.Add(1)
+			go func(dev string, mark int) {
+				defer wg.Done()
 
-			dialer := &net.Dialer{
-				Timeout: 5 * time.Second,
-				Control: func(network, address string, c syscall.RawConn) error {
-					var err error
-					_ = c.Control(func(fd uintptr) {
-						err = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, dev)
-					})
-					return err
-				},
-			}
-			client := &http.Client{
-				Transport: &http.Transport{
-					DialContext:       dialer.DialContext,
-					DisableKeepAlives: true,
-				},
-				Timeout: duration,
-			}
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
-					if err != nil {
-						return
-					}
-					resp, err := client.Do(req)
-					if err != nil {
-						time.Sleep(100 * time.Millisecond)
-						continue
-					}
-					written, _ := io.Copy(io.Discard, resp.Body)
-					_ = resp.Body.Close()
-					totalBytes.Add(written)
+				dialer := &net.Dialer{
+					Timeout: 5 * time.Second,
+					Control: func(network, address string, c syscall.RawConn) error {
+						var err error
+						_ = c.Control(func(fd uintptr) {
+							err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, mark)
+							if err == nil {
+								err = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, dev)
+							}
+						})
+						return err
+					},
 				}
-			}
-		}(ifaceName)
+				client := &http.Client{
+					Transport: &http.Transport{
+						DialContext:       dialer.DialContext,
+						DisableKeepAlives: true,
+					},
+					Timeout: duration,
+				}
+
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
+						if err != nil {
+							return
+						}
+						resp, err := client.Do(req)
+						if err != nil {
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						written, _ := io.Copy(io.Discard, resp.Body)
+						_ = resp.Body.Close()
+						totalBytes.Add(written)
+					}
+				}
+			}(target.Interface, target.Mark)
+		}
 	}
 
 	wg.Wait()
@@ -261,8 +301,9 @@ func RunBenchmark(ifaces []string, targetURL string, duration time.Duration) Ben
 	}
 
 	return BenchmarkResult{
-		Tunnels:            len(ifaces),
+		Tunnels:            len(targets),
 		Interfaces:         ifaces,
+		ConnectionsPerTun:  connectionsPerTunnel,
 		Duration:           time.Duration(actualDuration * float64(time.Second)),
 		TotalBytes:         bytesCount,
 		ThroughputBps:      bps,
@@ -328,6 +369,7 @@ func PrintResults(r BenchmarkResult) {
 	fmt.Println("                PERFORMANCE BENCHMARK RESULTS                 ")
 	fmt.Println("==============================================================")
 	fmt.Printf("Active Tunnels Tested : %d %v\n", r.Tunnels, r.Interfaces)
+	fmt.Printf("Connections / Tunnel  : %d\n", r.ConnectionsPerTun)
 	fmt.Printf("Test Duration         : %v\n", r.Duration)
 	fmt.Printf("Total Data Received   : %.2f MB\n", float64(r.TotalBytes)/1_000_000.0)
 	fmt.Printf("Aggregate Throughput  : %.2f Mbps (%.0f bps)\n", r.ThroughputMbps, r.ThroughputBps)

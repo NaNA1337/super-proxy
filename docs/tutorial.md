@@ -23,6 +23,14 @@ sudo ./init-config -address 你的公网域名 -output /etc/super-proxy/config.y
 
 OpenVPN 凭据只存在 Core 内存中。服务重启后数据库里的旧运行节点先进入 `STALE`，不会出现在手动切换候选列表；VPN Gate 首次刷新重新取得配置后，仍在线且可重试的节点会自动恢复为 `DISCOVERED`。这通常只需等待一次抓取完成并刷新 Manager。
 
+三条活动 TUN 使用连接级轮询：第一个新连接进入一个槽位，后续新连接依次进入其他槽位。浏览器、多用户、下载器的并发连接可以同时利用三条出口；单个 TCP 连接始终保持同一个出口 IP，速度上限仍是单条隧道。直接检查三槽并发总吞吐：
+
+```bash
+sudo super-proxy-benchmark -tunnels 3 -connections-per-tunnel 4 -duration 15
+```
+
+输出的 `Aggregate Throughput` 才是并发总吞吐。节点页和每个槽位的 `throughput` 是独立隧道测速，不能把其中任意一个数当成三槽合计。
+
 带 Key 的威胁供应商默认关闭，内置 ASN 归属检测始终运行。`conservative` 会拒绝任一已配置供应商的未知结果；`lenient` 只允许查询失败或证据不足的 UNKNOWN，已经命中的机房、VPN、代理、Tor 和黑名单仍然会被拒绝。
 
 ## 3. 启动核心并分层检查

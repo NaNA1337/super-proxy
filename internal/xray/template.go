@@ -234,7 +234,7 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 				"exit-", // Matches exit-0, exit-1, exit-2, etc.
 			},
 			"strategy": map[string]interface{}{
-				"type": "random", // Connection-based balancing
+				"type": "roundRobin", // Deterministic connection-based balancing across active tunnels.
 			},
 		},
 	}
@@ -253,7 +253,7 @@ func GenerateConfigWithOptions(opts ConfigOptions) error {
 				"tag":      "balancer-" + strings.Join(tagParts, "-"),
 				"selector": selector,
 				"strategy": map[string]interface{}{
-					"type": "random",
+					"type": "roundRobin",
 				},
 			})
 		}

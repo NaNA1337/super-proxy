@@ -90,6 +90,121 @@ func dialSocks5(socksAddr, targetAddr string) (net.Conn, error) {
 	return conn, nil
 }
 
+func startExitMarker(t *testing.T, slot int) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for exit-%d marker: %v", slot, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				reader := bufio.NewReader(c)
+				if _, err := reader.ReadString('\n'); err != nil {
+					return
+				}
+				_, _ = fmt.Fprintf(c, "EXIT_SLOT_%d\n", slot)
+			}(conn)
+		}
+	}()
+	return ln
+}
+
+// TestXray_ThreeActiveSlotsDistributeIndependentConnections proves the actual
+// behavior promised by the multi-tunnel design: independent connections are
+// spread across all active slots. A single connection remains on one slot for
+// its lifetime because the exits have different source IP addresses.
+func TestXray_ThreeActiveSlotsDistributeIndependentConnections(t *testing.T) {
+	markers := []net.Listener{
+		startExitMarker(t, 0),
+		startExitMarker(t, 1),
+		startExitMarker(t, 2),
+	}
+
+	tempDir := t.TempDir()
+	configPath := tempDir + "/xray_three_active_slots.json"
+	apiPort := 10498
+	socksPort := 11298
+	redirects := make(map[int]string, len(markers))
+	for slot, marker := range markers {
+		redirects[slot] = marker.Addr().String()
+	}
+
+	if err := xray.GenerateConfigWithOptions(xray.ConfigOptions{
+		SlotCount:   3,
+		ConfigPath:  configPath,
+		ApiPort:     apiPort,
+		SocksListen: "127.0.0.1",
+		SocksPort:   socksPort,
+		Redirects:   redirects,
+	}); err != nil {
+		t.Fatalf("generate Xray config: %v", err)
+	}
+
+	xsup := xray.NewSupervisor(configPath, apiPort, "127.0.0.1", socksPort, 3)
+	if err := xsup.Start(); err != nil {
+		t.Fatalf("start Xray: %v", err)
+	}
+	t.Cleanup(func() { _ = xsup.Stop() })
+	if err := xsup.SyncActiveSlots([]int{0, 1, 2}); err != nil {
+		t.Fatalf("activate all three slots: %v", err)
+	}
+
+	const connections = 300
+	var counts [3]atomic.Int64
+	var failures atomic.Int64
+	var wg sync.WaitGroup
+	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
+
+	for i := 0; i < connections; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			conn, err := dialSocks5(socksAddr, "distribution.test:443")
+			if err != nil {
+				failures.Add(1)
+				return
+			}
+			defer conn.Close()
+			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+			if _, err := fmt.Fprintf(conn, "request-%d\n", id); err != nil {
+				failures.Add(1)
+				return
+			}
+			line, err := bufio.NewReader(conn).ReadString('\n')
+			if err != nil {
+				failures.Add(1)
+				return
+			}
+			var slot int
+			if _, err := fmt.Sscanf(strings.TrimSpace(line), "EXIT_SLOT_%d", &slot); err != nil || slot < 0 || slot >= len(counts) {
+				failures.Add(1)
+				return
+			}
+			counts[slot].Add(1)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := failures.Load(); got != 0 {
+		t.Fatalf("%d/%d connections failed", got, connections)
+	}
+	for slot := range counts {
+		got := counts[slot].Load()
+		t.Logf("slot %d handled %d/%d independent connections", slot, got, connections)
+		if got != connections/3 {
+			t.Fatalf("slot %d handled %d/%d connections; round-robin expected %d", slot, got, connections, connections/3)
+		}
+	}
+}
+
 // readIptablesPackets returns the packet count for a specific mark and destination port from iptables mangle OUTPUT.
 func readIptablesPackets(mark int, dport int) int64 {
 	out, err := exec.Command("iptables", "-t", "mangle", "-L", "OUTPUT", "-v", "-n", "-x").CombinedOutput()
@@ -352,8 +467,6 @@ func (pc *PacketCapture) PacketCount() (int, error) {
 	}
 	return count, nil
 }
-
-
 
 func TestXray_PacketPath_ExistingConnectionPreservedAnd100NewAvoidDraining(t *testing.T) {
 	tempDir := t.TempDir()
@@ -1113,4 +1226,3 @@ func TestLinuxPacketPathE2E_IPv6FailClosed(t *testing.T) {
 
 	t.Logf("SUCCESS: Real IPv6 socket fail-closed verified with independent TCP6/UDP6 sockets, unreachable policy, and WAN capture == 0.")
 }
-
