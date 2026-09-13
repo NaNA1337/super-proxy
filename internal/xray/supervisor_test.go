@@ -287,11 +287,7 @@ func TestXray_ExactSetMatchingRejectsPrefixOverlap(t *testing.T) {
 		t.Fatalf("failed to parse json: %v", err)
 	}
 
-	var activeRule *struct {
-		RuleTag     string `json:"ruleTag"`
-		Tag         string `json:"tag"`
-		BalancerTag string `json:"balancerTag"`
-	}
+	var activeRule *runtimeRoutingRule
 	for i := range lsResp.Rules {
 		if lsResp.Rules[i].RuleTag == "active-balancer-rule" {
 			activeRule = &lsResp.Rules[i]

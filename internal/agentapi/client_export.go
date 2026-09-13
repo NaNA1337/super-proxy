@@ -116,22 +116,6 @@ func BuildRealityClientProfile(r *http.Request) (*xray.RealityClientProfile, err
 		profile.OutboundOnly443 = cfg.OutboundOnlyPort443 || cfg.OnlyPort443
 	}
 
-	// Environment overrides
-	if u := os.Getenv("XRAY_VLESS_UUID"); u != "" {
-		profile.UUID = u
-	}
-	if pbk := os.Getenv("XRAY_VLESS_PUBLIC_KEY"); pbk != "" {
-		profile.PublicKey = pbk
-	}
-	if sid := os.Getenv("XRAY_VLESS_SHORT_ID"); sid != "" {
-		profile.ShortID = sid
-	}
-	if s := os.Getenv("XRAY_VLESS_SNI"); s != "" {
-		profile.SNI = s
-		// Keep RealityTarget in sync with SNI hostname
-		profile.RealityTarget = net.JoinHostPort(s, "443")
-	}
-
 	// 4. Perform strict validation on the completed profile
 	if err := profile.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid reality profile: %w", err)

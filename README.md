@@ -8,7 +8,7 @@ Super-Proxy 是运行在 Linux 服务器上的多出口代理核心。它自动�
                      Manager → HTTPS/60000 Agent API
 ```
 
-当前稳定版为 [v1.1.10](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.10)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
+当前稳定版为 [v1.1.11](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.11)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
 
 ### 三条 TUN 如何使用带宽
 
@@ -44,7 +44,7 @@ xray version
 ### 2. 安装 Super-Proxy
 
 ```bash
-VERSION=1.1.10
+VERSION=1.1.11
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in amd64|arm64) ;; *) echo "不支持的架构: $ARCH"; exit 1 ;; esac
 
@@ -173,6 +173,8 @@ Core 将单个地址的供应商结果缓存 24 小时。服务重启会重新�
 
 OpenVPN 私钥只保存在 Core 进程内存中，不写入数据库。Core 刚重启时，旧节点会暂时标记为 `STALE` 并从手动切换候选中隐藏；本轮 VPN Gate 刷新重新取得配置并完成审查后才恢复。日志出现 `Vetted ... accepted=... rejected=...` 后刷新 Manager 页面即可。无凭据节点不会再创建一个随后失败的切换任务。
 
+Reality 的 UUID、密钥、short ID 和 SNI 以 `config.yaml` 的 `xray.vless` 为唯一来源。旧版的 `XRAY_VLESS_UUID`、`XRAY_VLESS_PUBLIC_KEY`、`XRAY_VLESS_SHORT_ID` 和 `XRAY_VLESS_SNI` 环境变量会被忽略，防止 Manager 导出的分享链接与 Xray 实际加载的凭据不一致；`XRAY_VLESS_ADDRESS` 仍可用于指定公网入口地址。
+
 管理员可以在 Manager 的 **Slot Controller** 点击 **Pull Nodes & Fill Slots**。也可以直接调用 Core：
 
 ```bash
@@ -209,7 +211,7 @@ curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
 ```bash
 sudo cp -a /etc/super-proxy "/etc/super-proxy.backup.$(date +%Y%m%d-%H%M%S)"
 
-VERSION=1.1.10
+VERSION=1.1.11
 ARCH="$(dpkg --print-architecture)"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"

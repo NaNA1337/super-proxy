@@ -125,6 +125,12 @@ func TestSupervisor_Lifecycle_Test1_ReadyRegistersEndpoint(t *testing.T) {
 	if err := sup.CheckHealth(); err != nil {
 		t.Errorf("expected CheckHealth to pass on READY supervisor, got: %v", err)
 	}
+
+	// Synchronization must read back both the local SOCKS rule and public
+	// VLESS rule before the scheduler is allowed to report the slots active.
+	if err := sup.SyncActiveSlots([]int{0, 1}); err != nil {
+		t.Fatalf("expected VLESS active routing read-back to pass: %v", err)
+	}
 }
 
 // Test 2: process crash 自动清除

@@ -52,11 +52,11 @@ type Supervisor struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	vlessEnabled       bool
-	vlessOnly443       bool
-	vlessEndpoint      *PublicEndpoint
-	publicAddress      string
-	readyTimeout       time.Duration
+	vlessEnabled  bool
+	vlessOnly443  bool
+	vlessEndpoint *PublicEndpoint
+	publicAddress string
+	readyTimeout  time.Duration
 
 	// Callbacks for metrics and observability
 	OnCrash   func(err error)
@@ -140,7 +140,7 @@ func NewSupervisorWithContext(ctx context.Context, configPath string, apiPort in
 	marksMap := make(map[string]int)
 	for i := 0; i < slotCount; i++ {
 		tag := fmt.Sprintf("exit-%d", i)
-		activeMap[tag] = false // Initial state: no slots active until verified by scheduler
+		activeMap[tag] = false  // Initial state: no slots active until verified by scheduler
 		marksMap[tag] = 100 + i // base table
 	}
 
@@ -703,12 +703,60 @@ func (s *Supervisor) syncActiveSlotsLocked(activeSlots []int) error {
 	return nil
 }
 
+type runtimeRoutingRule struct {
+	RuleTag     string `json:"ruleTag"`
+	Tag         string `json:"tag"`
+	BalancerTag string `json:"balancerTag"`
+}
+
 type lsRulesResponse struct {
-	Rules []struct {
-		RuleTag     string `json:"ruleTag"`
-		Tag         string `json:"tag"`
-		BalancerTag string `json:"balancerTag"`
-	} `json:"rules"`
+	Rules []runtimeRoutingRule `json:"rules"`
+}
+
+func findRuntimeRule(rules []runtimeRoutingRule, ruleTag string) *runtimeRoutingRule {
+	for i := range rules {
+		if rules[i].RuleTag == ruleTag {
+			return &rules[i]
+		}
+	}
+	return nil
+}
+
+func expectedRuntimeTarget(expectedSlots []int) (outboundTag, balancerTag string) {
+	switch len(expectedSlots) {
+	case 0:
+		return "block", ""
+	case 1:
+		return fmt.Sprintf("exit-%d", expectedSlots[0]), ""
+	default:
+		parts := make([]string, len(expectedSlots))
+		for i, slot := range expectedSlots {
+			parts[i] = strconv.Itoa(slot)
+		}
+		return "", "balancer-" + strings.Join(parts, "-")
+	}
+}
+
+func validateRuntimeRuleTarget(rule *runtimeRoutingRule, expectedSlots []int) error {
+	if rule == nil {
+		return fmt.Errorf("rule not found")
+	}
+	expectedTag, expectedBalancer := expectedRuntimeTarget(expectedSlots)
+	// Xray lsrules currently omits balancerTag for balancing rules. It still
+	// exposes direct/blackhole outbound tags, so reject those here; the exact
+	// expected balancer and selector set are verified separately with `api bi`.
+	if len(expectedSlots) > 1 {
+		if rule.Tag != "" || (rule.BalancerTag != "" && rule.BalancerTag != expectedBalancer) {
+			return fmt.Errorf("expected balancing rule for %q, got outbound=%q balancer=%q",
+				expectedBalancer, rule.Tag, rule.BalancerTag)
+		}
+		return nil
+	}
+	if rule.Tag != expectedTag || rule.BalancerTag != expectedBalancer {
+		return fmt.Errorf("expected outbound=%q balancer=%q, got outbound=%q balancer=%q",
+			expectedTag, expectedBalancer, rule.Tag, rule.BalancerTag)
+	}
+	return nil
 }
 
 // verifyRuntimeRoutingLocked performs an active-set runtime read-back via Xray API (lsrules and bi)
@@ -726,20 +774,23 @@ func (s *Supervisor) verifyRuntimeRoutingLocked(expectedSlots []int, drainingSlo
 		return fmt.Errorf("failed to parse xray lsrules json output: %w (raw: %s)", parseErr, string(out))
 	}
 
-	// 1. Locate active-balancer-rule
-	var activeRule *struct {
-		RuleTag     string `json:"ruleTag"`
-		Tag         string `json:"tag"`
-		BalancerTag string `json:"balancerTag"`
-	}
-	for i := range lsResp.Rules {
-		if lsResp.Rules[i].RuleTag == "active-balancer-rule" {
-			activeRule = &lsResp.Rules[i]
-			break
-		}
-	}
+	// 1. Locate and verify the local SOCKS routing rule.
+	activeRule := findRuntimeRule(lsResp.Rules, "active-balancer-rule")
 	if activeRule == nil {
 		return fmt.Errorf("runtime read-back mismatch: active-balancer-rule not found in rules: %s", string(out))
+	}
+	if err := validateRuntimeRuleTarget(activeRule, expectedSlots); err != nil {
+		return fmt.Errorf("runtime read-back mismatch for SOCKS ingress: %w (rules: %s)", err, string(out))
+	}
+
+	// Public VLESS must target the exact same active set. Previously only the
+	// local SOCKS rule was checked, so a stale/blocking VLESS rule could coexist
+	// with three slots that appeared active in the Manager.
+	if s.vlessEnabled {
+		vlessRule := findRuntimeRule(lsResp.Rules, "active-balancer-rule-vless")
+		if err := validateRuntimeRuleTarget(vlessRule, expectedSlots); err != nil {
+			return fmt.Errorf("runtime read-back mismatch for VLESS ingress: %w (rules: %s)", err, string(out))
+		}
 	}
 
 	// 2. If a slot is DRAINING, strictly verify it is NOT targeted as the direct outbound tag
@@ -750,24 +801,10 @@ func (s *Supervisor) verifyRuntimeRoutingLocked(expectedSlots []int, drainingSlo
 		}
 	}
 
-	// 3. Exact comparison of the active target
-	if len(expectedSlots) == 0 {
-		if activeRule.Tag != "block" && activeRule.Tag != "" {
-			return fmt.Errorf("runtime read-back mismatch: expected block rule for empty active slots, got tag %s", activeRule.Tag)
-		}
-	} else if len(expectedSlots) == 1 {
-		expectedTag := fmt.Sprintf("exit-%d", expectedSlots[0])
-		// Strict exact equality comparison - never substring contains (e.g. exit-1 vs exit-10)
-		if activeRule.Tag != expectedTag {
-			return fmt.Errorf("runtime read-back mismatch: expected exact single outbound tag %q, got %q", expectedTag, activeRule.Tag)
-		}
-	} else {
+	// 3. Multi-slot balancers must contain the exact expected selector set.
+	if len(expectedSlots) > 1 {
 		// Multi-slot: verify balancer and exact selector set
-		tagParts := make([]string, len(expectedSlots))
-		for idx, sl := range expectedSlots {
-			tagParts[idx] = fmt.Sprintf("%d", sl)
-		}
-		expectedBalancer := "balancer-" + strings.Join(tagParts, "-")
+		_, expectedBalancer := expectedRuntimeTarget(expectedSlots)
 
 		/* #nosec G204 */
 		cmdBi := exec.Command(s.xrayBin, "api", "bi", "--server="+s.apiAddr, expectedBalancer)

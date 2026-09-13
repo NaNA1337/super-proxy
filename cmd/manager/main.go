@@ -218,6 +218,11 @@ func main() {
 	if os.Getenv("XRAY_VLESS_ENABLED") == "true" {
 		vlessCfg.Enabled = true
 	}
+	for _, legacyKey := range []string{"XRAY_VLESS_UUID", "XRAY_VLESS_PUBLIC_KEY", "XRAY_VLESS_SHORT_ID", "XRAY_VLESS_SNI"} {
+		if os.Getenv(legacyKey) != "" {
+			log.Printf("Warning: %s is ignored; configure xray.vless in config.yaml so Xray runtime and exported profiles use identical credentials", legacyKey)
+		}
+	}
 	if vlessCfg.Enabled {
 		if err := xray.NormalizeVlessConfig(&vlessCfg); err != nil {
 			log.Fatalf("Failed to normalize VLESS config: %v", err)
