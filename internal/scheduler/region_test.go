@@ -312,3 +312,24 @@ func TestCredentiallessQualifiedNodeDoesNotBlockFallback(t *testing.T) {
 		t.Fatalf("credentialless primary must not block ready fallback: %+v", result)
 	}
 }
+
+func TestHistoricalFailureCountDoesNotExcludeRediscoveredCandidate(t *testing.T) {
+	setupTestDB(t)
+	node := models.Node{
+		ID: "KR-RETRY", IP: "198.51.100.77", Country: "KR",
+		Status: models.StatusReputationChecked, FailCount: 27, Score: 70,
+	}
+	if err := database.DB.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	discovery.SetOVPNSecret(node.ID, "fresh-credential")
+
+	sched := NewScheduler(3, 0, reputation.NewEngine(), config.RegionConfig{Primary: "KR"})
+	result, err := sched.SelectNextCandidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Node == nil || result.Node.ID != node.ID {
+		t.Fatalf("rediscovered node was excluded by diagnostic failure history: %+v", result)
+	}
+}

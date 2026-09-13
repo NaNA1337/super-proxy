@@ -147,10 +147,6 @@ func TransitionNode(db *gorm.DB, node *models.Node, targetStatus string) error {
 		newFailCount := node.FailCount + 1
 		updates["fail_count"] = newFailCount
 		node.FailCount = newFailCount
-		if newFailCount >= 3 {
-			targetStatus = models.StatusDead
-			updates["status"] = models.StatusDead
-		}
 	}
 
 	// Evict cached secrets immediately when node enters DEAD or FAILED state

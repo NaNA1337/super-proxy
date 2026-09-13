@@ -48,9 +48,6 @@ func NewScoringEngine(cfg config.ScoringConfig) *ScoringEngine {
 	if cfg.PrefixPenalty <= 0 {
 		cfg.PrefixPenalty = 20
 	}
-	if cfg.FailurePenalty <= 0 {
-		cfg.FailurePenalty = 30
-	}
 	if cfg.SpeedWeight <= 0 {
 		cfg.SpeedWeight = 1.0
 	}
@@ -192,13 +189,10 @@ func (s *ScoringEngine) EvaluateNodeWithASN(node *models.Node, isPrimaryRegion b
 		reasons = append(reasons, fmt.Sprintf("Tor exit penalty: -%d", s.cfg.TorPenalty))
 	}
 
-	// 10. Historical failure penalty
-	failPenalty := node.FailCount * s.cfg.FailurePenalty
-	if failPenalty > 0 {
-		reasons = append(reasons, fmt.Sprintf("Failure history penalty: -%d (fails=%d)", failPenalty, node.FailCount))
-	}
-
-	finalScore := networkBonus + regionBonus + speedBonus + latencyBonus - lossPenalty - repPenalty - prefixPenalty - asnPenalty - netPenalty - failPenalty
+	// Connection failures remain diagnostic history only. Public VPN endpoints
+	// are volatile, so an old handshake failure must never lower admission score
+	// or permanently remove a newly rediscovered endpoint from consideration.
+	finalScore := networkBonus + regionBonus + speedBonus + latencyBonus - lossPenalty - repPenalty - prefixPenalty - asnPenalty - netPenalty
 
 	allowed := finalScore >= -100
 	var explanation string

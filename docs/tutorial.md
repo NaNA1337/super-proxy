@@ -30,7 +30,9 @@ reputation:
 
 Key 可以留空使用较低的公共额度，也可以通过 systemd 环境变量 `XRAY_MANAGER_PROXYCHECK_KEY` 提供。每轮发现会先完成整批 ASN、网络类型和 Reputation 检查，然后才将合格地址写入候选池；VPN Gate 自报的 Score 和 Ping 不参与评分。程序还会检查隧道实际出口，机房、VPN、代理、Tor、黑名单、UNKNOWN、国家不符以及与现有活动/备用出口重复的 IPv4 `/24` 都不会晋升。
 
-OpenVPN 凭据只存在 Core 内存中。服务重启后数据库里的旧运行节点先进入 `STALE`，不会出现在手动切换候选列表；VPN Gate 首次刷新重新取得配置后，仍在线且可重试的节点会自动恢复为 `DISCOVERED`。这通常只需等待一次抓取完成并刷新 Manager。
+OpenVPN 凭据只存在 Core 内存中。服务重启后数据库里的旧运行节点先进入 `STALE`，不会出现在手动切换候选列表；VPN Gate 首次刷新重新取得配置并通过审查后，节点会自动恢复为 `REPUTATION_CHECKED`。历史连接失败次数不会影响评分或重试资格。
+
+需要立即重新拉取时，在 Manager 的 Slot Controller 点击 **Pull Nodes & Fill Slots**。Core 会串行完成拉取和审查；不足三个活动出口时继续测试池内下一个候选，直至填满或池耗尽。
 
 三条活动 TUN 使用连接级轮询：第一个新连接进入一个槽位，后续新连接依次进入其他槽位。浏览器、多用户、下载器的并发连接可以同时利用三条出口；单个 TCP 连接始终保持同一个出口 IP，速度上限仍是单条隧道。直接检查三槽并发总吞吐：
 

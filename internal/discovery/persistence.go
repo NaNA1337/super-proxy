@@ -6,8 +6,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// UpsertFreshNodes persists public discovery metadata and revives only nodes
-// whose credentials were refreshed into the runtime cache by this discovery run.
+// UpsertFreshNodes persists public discovery metadata and revives nodes whose
+// credentials were refreshed into the runtime cache by this discovery run.
 func UpsertFreshNodes(db *gorm.DB, nodes []models.Node, upsertCols []string) error {
 	if db == nil || len(nodes) == 0 {
 		return nil
@@ -30,10 +30,11 @@ func UpsertFreshNodes(db *gorm.DB, nodes []models.Node, upsertCols []string) err
 			return nil
 		}
 		return tx.Model(&models.Node{}).
-			Where("id IN ? AND status IN ? AND fail_count < 3", ids, []string{
+			Where("id IN ? AND status IN ?", ids, []string{
 				models.StatusStale,
 				models.StatusFailed,
 				models.StatusCooldown,
+				models.StatusDead,
 			}).
 			Update("status", models.StatusDiscovered).Error
 	})
@@ -79,8 +80,7 @@ func UpsertVettedNodes(db *gorm.DB, nodes []models.Node, upsertCols []string) er
 					models.StatusNew, models.StatusDiscovered, models.StatusReputationChecked,
 					models.StatusStale, models.StatusFailed, models.StatusCooldown, models.StatusDead,
 				}).Updates(map[string]interface{}{
-				"status": models.StatusReputationChecked, "fail_count": 0,
-				"last_error": "", "last_failure_at": nil,
+				"status": models.StatusReputationChecked, "last_error": "", "last_failure_at": nil,
 			}).Error; err != nil {
 				return err
 			}

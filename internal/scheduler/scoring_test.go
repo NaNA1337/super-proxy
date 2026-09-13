@@ -70,17 +70,17 @@ func TestScoringEngine_Comprehensive(t *testing.T) {
 		t.Fatalf("Blacklisted node MUST NOT be allowed")
 	}
 
-	// Case 4: Repeated failures penalty
+	// Case 4: Repeated connection failures remain diagnostic only
 	nodeFails := &models.Node{
 		ID:        "node-fails",
 		IP:        "198.51.100.13",
 		Score:     50,
 		NetClass:  models.NetworkClass{NetworkType: "business"},
-		FailCount: 3, // 3 * 30 = 90 penalty
+		FailCount: 3,
 	}
 	resFails := engine.EvaluateNode(nodeFails, false, 0, "")
-	expectedFailScore := 20 - 90 // source score excluded; business bonus included
+	expectedFailScore := 20 // source score excluded; business bonus included
 	if resFails.FinalScore != expectedFailScore {
-		t.Fatalf("Expected score %d, got %d", expectedFailScore, resFails.FinalScore)
+		t.Fatalf("historical failures changed score: expected %d, got %d", expectedFailScore, resFails.FinalScore)
 	}
 }

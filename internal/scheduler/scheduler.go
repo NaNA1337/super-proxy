@@ -42,6 +42,7 @@ type Scheduler struct {
 	ctx                    context.Context
 	cancel                 context.CancelFunc
 	wg                     sync.WaitGroup
+	refillCh               chan struct{}
 	standbySlotCount       atomic.Int64 // Monotonically increasing counter for standby virtual slots
 }
 
@@ -58,6 +59,7 @@ func NewScheduler(maxActive, maxStandby int, repEngine *reputation.Engine, regio
 		drainingTunIPs:   make(map[int]string),
 		Slots:            NewSlotManager(maxActive),
 		ManualOverride:   make(map[int]bool),
+		refillCh:         make(chan struct{}, 1),
 		Benchmarker: func(ctx context.Context, dev string, mark int) (*models.PerformanceMetrics, error) {
 			cfg := benchmark.DefaultBenchmarkConfig()
 			cfg.RoutingMark = mark
@@ -180,6 +182,15 @@ func (s *Scheduler) Start() {
 	go s.monitorLoop()
 }
 
+// RequestCapacityFill wakes the single scheduler worker without starting a
+// competing qualification loop. Repeated requests coalesce while one is queued.
+func (s *Scheduler) RequestCapacityFill() {
+	select {
+	case s.refillCh <- struct{}{}:
+	default:
+	}
+}
+
 func (s *Scheduler) Stop() {
 	log.Println("[Scheduler] Stopping scheduler...")
 	s.cancel()
@@ -215,13 +226,60 @@ func (s *Scheduler) monitorLoop() {
 			s.Mu.Unlock()
 			return
 		case <-ticker.C:
-			s.reconcileActiveSlots()
 			s.cleanupDrainingSlots()
+			s.fillToActiveCapacity()
+			s.maintainStandbyPool()
+		case <-s.refillCh:
+			s.fillToActiveCapacity()
 			s.maintainStandbyPool()
 		case <-staleTicker.C:
 			s.cleanStaleNodes()
 		}
 	}
+}
+
+// fillToActiveCapacity keeps advancing through the vetted pool instead of
+// waiting ten seconds after every failed endpoint. It stops only when all
+// active slots are filled, no selectable candidates remain, or an attempt made
+// no observable progress.
+func (s *Scheduler) fillToActiveCapacity() {
+	const maxAttemptsPerRun = 256
+	for attempt := 0; attempt < maxAttemptsPerRun; attempt++ {
+		s.reconcileActiveSlots()
+		s.Mu.Lock()
+		activeCount := len(s.ActiveSlots)
+		standbyBefore := len(s.StandbyNodes)
+		s.Mu.Unlock()
+		if activeCount >= s.MaxActive {
+			return
+		}
+
+		before := s.selectableCandidateCount()
+		if before == 0 {
+			log.Printf("[Scheduler] Capacity fill stopped at %d/%d active slots: vetted candidate pool exhausted", activeCount, s.MaxActive)
+			return
+		}
+		s.maintainStandbyPool()
+
+		after := s.selectableCandidateCount()
+		s.Mu.Lock()
+		standbyAfter := len(s.StandbyNodes)
+		s.Mu.Unlock()
+		if after >= before && standbyAfter <= standbyBefore {
+			log.Printf("[Scheduler] Capacity fill paused at %d/%d active slots: candidate attempt made no progress", activeCount, s.MaxActive)
+			return
+		}
+	}
+	log.Printf("[Scheduler] Capacity fill reached the per-run safety limit (%d attempts)", maxAttemptsPerRun)
+}
+
+func (s *Scheduler) selectableCandidateCount() int64 {
+	if database.DB == nil {
+		return 0
+	}
+	var count int64
+	database.DB.Model(&models.Node{}).Where("status IN ?", candidateSelectStatuses).Count(&count)
+	return count
 }
 
 func (s *Scheduler) cleanStaleNodes() {

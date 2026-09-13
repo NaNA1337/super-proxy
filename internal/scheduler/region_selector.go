@@ -57,7 +57,7 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 	// current runtime credential before they count.
 	var qualifiedNodes []models.Node
 	primaryQuery := database.DB.Model(&models.Node{}).
-		Where("status IN (?) AND fail_count < 3", qualifiedCapacityStatuses)
+		Where("status IN (?)", qualifiedCapacityStatuses)
 	if primaryRegion != "" {
 		primaryQuery = primaryQuery.Where("UPPER(country) = ?", primaryRegion)
 	}
@@ -109,7 +109,7 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 	}
 
 	queryBestCandidate := func(countryFilter string) (*models.Node, error) {
-		q := database.DB.Where("status IN (?) AND fail_count < 3", candidateSelectStatuses)
+		q := database.DB.Where("status IN (?)", candidateSelectStatuses)
 		if countryFilter != "" {
 			q = q.Where("UPPER(country) = ?", countryFilter)
 		}
@@ -150,7 +150,7 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 		return nil, fmt.Errorf("primary candidates exhausted and no fallback regions configured")
 	}
 
-	fbNode, err := pickDiverseCandidate(database.DB.Where("status IN (?) AND fail_count < 3 AND UPPER(country) IN ?",
+	fbNode, err := pickDiverseCandidate(database.DB.Where("status IN (?) AND UPPER(country) IN ?",
 		candidateSelectStatuses, fallbackUpper))
 	if err != nil {
 		return nil, fmt.Errorf("no candidates found in fallback regions: %w", err)

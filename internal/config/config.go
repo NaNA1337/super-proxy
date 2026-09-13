@@ -68,7 +68,7 @@ type ScoringConfig struct {
 	HostingPenalty   int     `mapstructure:"hosting_penalty"`   // default 10
 	PrefixBadLimit   int     `mapstructure:"prefix_bad_limit"`  // default 3 bad IPs
 	PrefixPenalty    int     `mapstructure:"prefix_penalty"`    // default 20
-	FailurePenalty   int     `mapstructure:"failure_penalty"`   // default 30 per fail
+	FailurePenalty   int     `mapstructure:"failure_penalty"`   // deprecated: retained for config compatibility, ignored
 	SpeedWeight      float64 `mapstructure:"speed_weight"`      // default 1.0
 	LatencyWeight    float64 `mapstructure:"latency_weight"`    // default 0.5
 }
@@ -104,7 +104,6 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("scoring.hosting_penalty", 10)
 	v.SetDefault("scoring.prefix_bad_limit", 3)
 	v.SetDefault("scoring.prefix_penalty", 20)
-	v.SetDefault("scoring.failure_penalty", 30)
 	v.SetDefault("scoring.speed_weight", 1.0)
 	v.SetDefault("scoring.latency_weight", 0.5)
 	v.SetDefault("speed_test.enabled", true)

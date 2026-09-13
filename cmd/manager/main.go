@@ -283,7 +283,11 @@ func main() {
 		discoveryInterval = 15 * time.Minute
 	}
 	discoveryCtx, cancelDiscovery := context.WithCancel(context.Background())
-	go runPeriodicDiscovery(discoveryCtx, cfg.Discovery.URL, discoveryInterval, models.NodeUpsertColumns, sched)
+	refreshCoordinator := discovery.NewRefreshCoordinator(discoveryCtx, func(ctx context.Context) (discovery.RefreshResult, error) {
+		return performDiscoveryRefresh(ctx, cfg.Discovery.URL, models.NodeUpsertColumns, sched)
+	})
+	agentapi.SetDiscoveryCoordinator(refreshCoordinator)
+	go runPeriodicDiscovery(discoveryCtx, discoveryInterval, refreshCoordinator)
 	log.Printf("Periodic discovery refresh configured every %v", discoveryInterval)
 
 	// 10. Initialize Agent API
@@ -333,37 +337,53 @@ func main() {
 	log.Println("Super-Proxy Daemon cleanly exited.")
 }
 
-// runPeriodicDiscovery fetches VPN Gate data on a regular interval and upserts into DB.
-func runPeriodicDiscovery(ctx context.Context, url string, interval time.Duration, upsertCols []string, sched *scheduler.Scheduler) {
+func performDiscoveryRefresh(ctx context.Context, url string, upsertCols []string, sched *scheduler.Scheduler) (discovery.RefreshResult, error) {
+	result := discovery.RefreshResult{}
+	nodes, err := discovery.FetchAndParseNodes(url)
+	if err != nil {
+		log.Printf("[Discovery] Fetch failed (will retry): %v", err)
+		return result, err
+	}
+	result.Fetched = len(nodes)
+	if len(nodes) == 0 {
+		return result, fmt.Errorf("VPN Gate returned no usable OpenVPN nodes")
+	}
+
+	vetted, summary := discovery.VetNodes(ctx, nodes, 12, func(ctx context.Context, node *models.Node) (*reputation.Result, error) {
+		return sched.EvaluateIPAdmissionForRegion(ctx, node.IP, node.Country)
+	}, func(node *models.Node) int {
+		if sched.ScoringEngine == nil {
+			return 0
+		}
+		primary := strings.EqualFold(node.Country, sched.RegionConfig.Primary)
+		return sched.ScoringEngine.EvaluateNode(node, primary, 0, "").FinalScore
+	})
+	result.Accepted = summary.Accepted
+	result.Rejected = summary.Rejected
+	if err := discovery.UpsertVettedNodes(database.DB, vetted, upsertCols); err != nil {
+		log.Printf("[Discovery] Refresh failed: %v", err)
+		return result, err
+	}
+	log.Printf("[Discovery] Vetted %d fetched nodes before candidate admission: accepted=%d rejected=%d", len(nodes), summary.Accepted, summary.Rejected)
+
+	// Wake the scheduler immediately. It will keep trying distinct candidates
+	// until all three active slots are filled or this vetted pool is exhausted.
+	sched.RequestCapacityFill()
+	return result, nil
+}
+
+// runPeriodicDiscovery serializes startup, periodic and manual refreshes.
+func runPeriodicDiscovery(ctx context.Context, interval time.Duration, coordinator *discovery.RefreshCoordinator) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	coordinator.Trigger("startup")
 
 	for {
-		// Fetch once immediately, then on the configured interval. Never gate API startup on the network.
-		nodes, err := discovery.FetchAndParseNodes(url)
-		if err != nil {
-			log.Printf("[Discovery] Fetch failed (will retry): %v", err)
-		} else if len(nodes) > 0 {
-			vetted, summary := discovery.VetNodes(ctx, nodes, 12, func(ctx context.Context, node *models.Node) (*reputation.Result, error) {
-				return sched.EvaluateIPAdmissionForRegion(ctx, node.IP, node.Country)
-			}, func(node *models.Node) int {
-				if sched.ScoringEngine == nil {
-					return 0
-				}
-				primary := strings.EqualFold(node.Country, sched.RegionConfig.Primary)
-				return sched.ScoringEngine.EvaluateNode(node, primary, 0, "").FinalScore
-			})
-			txErr := discovery.UpsertVettedNodes(database.DB, vetted, upsertCols)
-			if txErr != nil {
-				log.Printf("[Discovery] Refresh failed: %v", txErr)
-			} else {
-				log.Printf("[Discovery] Vetted %d fetched nodes before candidate admission: accepted=%d rejected=%d", len(nodes), summary.Accepted, summary.Rejected)
-			}
-		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			coordinator.Trigger("periodic")
 		}
 	}
 }

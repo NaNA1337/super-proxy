@@ -43,12 +43,12 @@ func TestFSM_InvalidTransitions(t *testing.T) {
 		from string
 		to   string
 	}{
-		{models.StatusDiscovered, models.StatusActive},   // Bypass qualification
-		{models.StatusDiscovered, models.StatusStandby},  // Bypass reputation
-		{models.StatusFailed, models.StatusActive},       // Unqualified recovery
-		{models.StatusDraining, models.StatusActive},     // Cannot reactivate draining
-		{models.StatusNew, models.StatusActive},          // Immediate jump
-		{models.StatusDead, models.StatusActive},         // Dead node to active
+		{models.StatusDiscovered, models.StatusActive},  // Bypass qualification
+		{models.StatusDiscovered, models.StatusStandby}, // Bypass reputation
+		{models.StatusFailed, models.StatusActive},      // Unqualified recovery
+		{models.StatusDraining, models.StatusActive},    // Cannot reactivate draining
+		{models.StatusNew, models.StatusActive},         // Immediate jump
+		{models.StatusDead, models.StatusActive},        // Dead node to active
 	}
 
 	for _, tc := range invalidCases {
@@ -66,7 +66,7 @@ func TestFSM_InvalidTransitions(t *testing.T) {
 	}
 }
 
-func TestFSM_FailCountAndDeadTransition(t *testing.T) {
+func TestFSM_FailCountNeverAutomaticallyKillsNode(t *testing.T) {
 	node := &models.Node{
 		ID:        "node-fail-test",
 		IP:        "192.168.1.102",
@@ -102,11 +102,12 @@ func TestFSM_FailCountAndDeadTransition(t *testing.T) {
 	_ = TransitionNodeDirect(node, models.StatusQualified)
 	_ = TransitionNodeDirect(node, models.StatusActive)
 
-	// 3rd failure -> MUST transition to DEAD
+	// A third failure is retained as history, but the volatile public endpoint
+	// remains retryable after rediscovery instead of receiving a death sentence.
 	_ = TransitionNodeDirect(node, models.StatusDraining)
 	_ = TransitionNodeDirect(node, models.StatusFailed)
-	if node.Status != models.StatusDead || node.FailCount != 3 {
-		t.Fatalf("Expected DEAD with count 3, got %s, count %d", node.Status, node.FailCount)
+	if node.Status != models.StatusFailed || node.FailCount != 3 {
+		t.Fatalf("Expected retryable FAILED with count 3, got %s, count %d", node.Status, node.FailCount)
 	}
 }
 
@@ -164,11 +165,10 @@ func TestFSM_SecretEvictedOnFailedAndDead(t *testing.T) {
 		t.Fatalf("SECURITY VIOLATION: secret remained in cache after node transitioned to FAILED")
 	}
 
-	// Re-add secret and test Dead transition
+	// Re-add secret and verify an explicit DEAD transition still evicts it.
 	discovery.SetOVPNSecret(node.ID, "raw-secret-456")
-	node.Status = models.StatusDraining
-	node.FailCount = 2
-	if err := TransitionNodeDirect(node, models.StatusFailed); err != nil {
+	node.Status = models.StatusActive
+	if err := TransitionNodeDirect(node, models.StatusDead); err != nil {
 		t.Fatalf("unexpected transition error: %v", err)
 	}
 	if node.Status != models.StatusDead {
@@ -179,4 +179,3 @@ func TestFSM_SecretEvictedOnFailedAndDead(t *testing.T) {
 		t.Fatalf("SECURITY VIOLATION: secret remained in cache after node transitioned to DEAD")
 	}
 }
-

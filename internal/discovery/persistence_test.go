@@ -37,7 +37,7 @@ func TestUpsertFreshNodesRevivesOnlyCredentialBackedRetryableNodes(t *testing.T)
 	want := map[string]string{
 		"stale-fresh":   models.StatusDiscovered,
 		"failed-fresh":  models.StatusDiscovered,
-		"dead-fresh":    models.StatusDead,
+		"dead-fresh":    models.StatusDiscovered,
 		"stale-missing": models.StatusStale,
 	}
 	for id, status := range want {
@@ -63,6 +63,6 @@ func TestUpsertVettedNodesRevivesCleanDeadNodeWithFreshCredentials(t *testing.T)
 	var node models.Node
 	require.NoError(t, db.First(&node, "id = ?", "kr-node").Error)
 	require.Equal(t, models.StatusReputationChecked, node.Status)
-	require.Zero(t, node.FailCount)
+	require.Equal(t, 3, node.FailCount, "diagnostic failure history should be retained without affecting selection")
 	require.Equal(t, "AS64500", node.NetClass.ASN)
 }

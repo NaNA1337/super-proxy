@@ -8,7 +8,7 @@ Super-Proxy 是运行在 Linux 服务器上的多出口代理核心。它自动�
                      Manager → HTTPS/60000 Agent API
 ```
 
-当前稳定版为 [v1.1.9](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.9)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
+当前稳定版为 [v1.1.10](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.10)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
 
 ### 三条 TUN 如何使用带宽
 
@@ -44,7 +44,7 @@ xray version
 ### 2. 安装 Super-Proxy
 
 ```bash
-VERSION=1.1.9
+VERSION=1.1.10
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in amd64|arm64) ;; *) echo "不支持的架构: $ARCH"; exit 1 ;; esac
 
@@ -169,9 +169,23 @@ Core 将单个地址的供应商结果缓存 24 小时。服务重启会重新�
 
 `reputation.enabled: true` 时，即使没有 Key，Core 也会调用 proxycheck.io 的公共接口完成全套检查；日志会提示低额度。`reputation.enabled: false` 才退回无 Key 的基础 ASN/托管归属检查。AbuseIPDB、GreyNoise、IPQS 和 IPinfo 仍可作为附加供应商；保守模式要求所有已配置供应商成功返回。
 
-`hosting/datacenter`、`VPN`、`public proxy`、`Tor`、高风险、黑名单和保守模式下的 `UNKNOWN` 都是硬拒绝。VPN Gate 自带的 `Score` 不再参与系统评分；系统按独立查询得到的网络类型加分，默认住宅/宽带 `+40`、无线/移动 `+25`、企业网络 `+20`，再结合实际隧道测速、延迟、丢包、信誉和失败历史计算。
+`hosting/datacenter`、`VPN`、`public proxy`、`Tor`、高风险、黑名单和保守模式下的 `UNKNOWN` 都是硬拒绝。VPN Gate 自带的 `Score` 不再参与系统评分；系统按独立查询得到的网络类型加分，默认住宅/宽带 `+40`、无线/移动 `+25`、企业网络 `+20`，再结合实际隧道测速、延迟、丢包和信誉计算。历史连接失败次数只作为诊断信息，不扣分、不排除候选，也不会在第三次失败后自动判为 `DEAD`。
 
 OpenVPN 私钥只保存在 Core 进程内存中，不写入数据库。Core 刚重启时，旧节点会暂时标记为 `STALE` 并从手动切换候选中隐藏；本轮 VPN Gate 刷新重新取得配置并完成审查后才恢复。日志出现 `Vetted ... accepted=... rejected=...` 后刷新 Manager 页面即可。无凭据节点不会再创建一个随后失败的切换任务。
+
+管理员可以在 Manager 的 **Slot Controller** 点击 **Pull Nodes & Fill Slots**。也可以直接调用 Core：
+
+```bash
+curl -sk -X POST \
+  -H "Authorization: Bearer $XRAY_MANAGER_API_KEY" \
+  https://127.0.0.1:60000/api/v1/discovery/refresh
+
+curl -sk \
+  -H "Authorization: Bearer $XRAY_MANAGER_API_KEY" \
+  https://127.0.0.1:60000/api/v1/discovery/refresh
+```
+
+POST 会立即返回 `202`，后台完成拉取、ASN/Reputation 审查，然后唤醒单一调度队列。若活动出口不足三个，调度器会连续尝试下一个合格地址，直到三个槽位填满或本轮候选池耗尽。启动、定时和手动拉取不会并发执行。
 
 将 `$HOME/xray-client.json` 安全复制到客户端，先检查再启动：
 
@@ -195,7 +209,7 @@ curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
 ```bash
 sudo cp -a /etc/super-proxy "/etc/super-proxy.backup.$(date +%Y%m%d-%H%M%S)"
 
-VERSION=1.1.9
+VERSION=1.1.10
 ARCH="$(dpkg --print-architecture)"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"
@@ -247,7 +261,7 @@ sudo systemctl start super-proxy
 
 不要对所有公网来源开放 TCP/60000。Agent 已强制使用 HTTPS、Bearer Token、证书指纹校验和限速，但来源防火墙仍是远程管理入口的第一层保护。
 
-安装 [Manager v1.0.6](https://github.com/NaNA1337/super-proxy-manager/releases/tag/v1.0.6) 后，用下面的信息添加主机：
+安装 [Manager v1.0.7](https://github.com/NaNA1337/super-proxy-manager/releases/tag/v1.0.7) 后，用下面的信息添加主机：
 
 | Manager 字段 | 填写内容 |
 | --- | --- |
