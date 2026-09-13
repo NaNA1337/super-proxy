@@ -66,3 +66,34 @@ func TestUpsertVettedNodesRevivesCleanDeadNodeWithFreshCredentials(t *testing.T)
 	require.Equal(t, 3, node.FailCount, "diagnostic failure history should be retained without affecting selection")
 	require.Equal(t, "AS64500", node.NetClass.ASN)
 }
+
+func TestUpsertVettedNodesPreservesLiveObservedExitEvidence(t *testing.T) {
+	ClearOVPNSecretCache()
+	defer ClearOVPNSecretCache()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&models.Node{}))
+	existing := models.Node{
+		ID: "jp-live", IP: "192.0.2.80", Country: "JP", Status: models.StatusActive,
+		ObservedExitIP: "203.0.113.80",
+		Reputation:     models.ReputationMetrics{Status: "GOOD", IsBlacklisted: false, Details: "clean observed exit"},
+		NetClass:       models.NetworkClass{ASN: "AS64500", NetworkType: "residential"},
+	}
+	require.NoError(t, db.Create(&existing).Error)
+
+	refresh := []models.Node{{
+		ID: "jp-live", IP: "192.0.2.80", Country: "JP", Status: models.StatusFailed,
+		Reputation: models.ReputationMetrics{Status: "BAD", IsBlacklisted: true, Details: "public VPN endpoint"},
+		NetClass:   models.NetworkClass{ASN: "AS64501", IsVPN: true},
+		LastError:  "discovery reputation admission: public VPN endpoint",
+	}}
+	require.NoError(t, UpsertVettedNodes(db, refresh, models.NodeUpsertColumns))
+
+	var got models.Node
+	require.NoError(t, db.First(&got, "id = ?", existing.ID).Error)
+	require.Equal(t, models.StatusActive, got.Status)
+	require.Equal(t, "GOOD", got.Reputation.Status)
+	require.False(t, got.Reputation.IsBlacklisted)
+	require.Equal(t, "AS64500", got.NetClass.ASN)
+	require.Equal(t, "203.0.113.80", got.ObservedExitIP)
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/NaNA1337/super-proxy/internal/benchmark"
 	"github.com/NaNA1337/super-proxy/internal/config"
 	"github.com/NaNA1337/super-proxy/internal/database"
+	"github.com/NaNA1337/super-proxy/internal/discovery"
 	"github.com/NaNA1337/super-proxy/internal/health"
 	"github.com/NaNA1337/super-proxy/internal/metrics"
 	"github.com/NaNA1337/super-proxy/internal/models"
@@ -278,7 +280,32 @@ func (s *Scheduler) selectableCandidateCount() int64 {
 		return 0
 	}
 	var count int64
-	database.DB.Model(&models.Node{}).Where("status IN ?", candidateSelectStatuses).Count(&count)
+	primaryRegion := strings.ToUpper(strings.TrimSpace(s.RegionConfig.Primary))
+	cleanQuery := database.DB.Model(&models.Node{}).Where("status IN ?", candidateSelectStatuses)
+	if primaryRegion != "" {
+		cleanQuery = cleanQuery.Where("UPPER(country) = ?", primaryRegion)
+	}
+	var clean []models.Node
+	cleanQuery.Find(&clean)
+	for i := range clean {
+		if _, ok := discovery.GetOVPNSecret(clean[i].ID); ok {
+			count++
+		}
+	}
+	var quarantined []models.Node
+	quarantineQuery := database.DB.Where(
+		"status = ? AND rep_is_blacklisted = ? AND last_error LIKE ?",
+		models.StatusFailed, true, "discovery reputation admission:%",
+	)
+	if primaryRegion != "" {
+		quarantineQuery = quarantineQuery.Where("UPPER(country) = ?", primaryRegion)
+	}
+	quarantineQuery.Find(&quarantined)
+	for i := range quarantined {
+		if _, ok := discovery.GetOVPNSecret(quarantined[i].ID); ok {
+			count++
+		}
+	}
 	return count
 }
 
@@ -601,7 +628,7 @@ func (s *Scheduler) maintainStandbyPool() {
 	// Use monotonically increasing counter for standby virtual slot IDs to avoid collisions
 	standbyVirtualSlot := int(s.standbySlotCount.Add(1))
 
-	// Select best candidate node obeying strict Primary/Fallback threshold policy
+	// Automatic capacity maintenance is restricted to the configured primary region.
 	selection, err := s.SelectNextCandidate()
 	if err != nil || selection == nil || selection.Node == nil {
 		return // No qualified candidates available
@@ -610,37 +637,48 @@ func (s *Scheduler) maintainStandbyPool() {
 
 	log.Printf("[Scheduler] Evaluating node %s (%s, score=%d, fallback=%v) for standby pool",
 		node.IP, node.Country, node.Score, selection.IsFallbackNode)
-	if err := s.CheckPrefixDiversity(&node, "", -1); err != nil {
-		log.Printf("[Scheduler] Candidate %s deferred by /24 diversity policy: %v", node.IP, err)
-		return
+	if !selection.QuarantinedEndpoint {
+		if err := s.CheckPrefixDiversity(&node, "", -1); err != nil {
+			log.Printf("[Scheduler] Candidate %s deferred by /24 diversity policy: %v", node.IP, err)
+			return
+		}
 	}
 
 	// Windowed Prefix Intelligence check (multi-window statistical profile 24h/7d/30d/90d)
 	_, prefixPenalty, prefixReason := reputation.EvaluatePrefixRisk(database.DB, node.IP, 0)
 
-	// Reputation Check
-	res, admissionErr := s.EvaluateIPAdmissionForRegion(s.ctx, node.IP, node.Country)
-	PersistAdmissionResult(&node, res)
-	if admissionErr != nil {
-		_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, true, true)
-		log.Printf("[Scheduler] Candidate endpoint %s REJECTED by admission policy: %v", node.IP, admissionErr)
-		_ = FailNode(database.DB, &node, "endpoint reputation: "+admissionErr.Error())
-		return
-	}
-	if res != nil {
-		_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, res.ScorePenalty > 0, false)
-	}
-
-	// Evaluate candidate using unified ScoringEngine
-	if s.ScoringEngine != nil {
-		scoringRes := s.ScoringEngine.EvaluateNode(&node, !selection.IsFallbackNode, prefixPenalty, prefixReason)
-		log.Printf("[Scheduler] %s", scoringRes.Explanation)
-		if !scoringRes.Allowed {
-			log.Printf("[Scheduler] Candidate %s REJECTED by scoring engine: final score %d", node.IP, scoringRes.FinalScore)
-			_ = FailNode(database.DB, &node, "pre-connect scoring: "+scoringRes.Explanation)
+	if selection.QuarantinedEndpoint {
+		// Endpoint evidence remains rejected in the DB and UI. The endpoint is
+		// used only as transport for an isolated tunnel whose observed egress is
+		// subjected to the same strict policy below.
+		prefixPenalty = 0
+		prefixReason = ""
+		log.Printf("[Scheduler] Endpoint %s remains quarantined; only a clean observed exit may be promoted", node.IP)
+	} else {
+		// Reputation Check
+		res, admissionErr := s.EvaluateIPAdmissionForRegion(s.ctx, node.IP, node.Country)
+		PersistAdmissionResult(&node, res)
+		if admissionErr != nil {
+			_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, true, true)
+			log.Printf("[Scheduler] Candidate endpoint %s REJECTED by admission policy: %v", node.IP, admissionErr)
+			_ = FailNode(database.DB, &node, "endpoint reputation: "+admissionErr.Error())
 			return
 		}
-		node.Score = scoringRes.FinalScore
+		if res != nil {
+			_ = reputation.RecordPrefixSample(database.DB, node.IP, node.Score, res.ScorePenalty > 0, false)
+		}
+
+		// Evaluate candidate using unified ScoringEngine
+		if s.ScoringEngine != nil {
+			scoringRes := s.ScoringEngine.EvaluateNode(&node, !selection.IsFallbackNode, prefixPenalty, prefixReason)
+			log.Printf("[Scheduler] %s", scoringRes.Explanation)
+			if !scoringRes.Allowed {
+				log.Printf("[Scheduler] Candidate %s REJECTED by scoring engine: final score %d", node.IP, scoringRes.FinalScore)
+				_ = FailNode(database.DB, &node, "pre-connect scoring: "+scoringRes.Explanation)
+				return
+			}
+			node.Score = scoringRes.FinalScore
+		}
 	}
 
 	// Reputation/network evidence was persisted by PersistAdmissionResult above.
@@ -648,7 +686,9 @@ func (s *Scheduler) maintainStandbyPool() {
 		database.DB.Model(&node).Update("score", node.Score)
 	}
 
-	if node.Status == models.StatusReputationChecked {
+	if selection.QuarantinedEndpoint && node.Status == models.StatusFailed {
+		// FAILED -> CONNECTING is allowed only for this isolated endpoint probe.
+	} else if node.Status == models.StatusReputationChecked {
 		// No-op keeps a uniform audit log for newly admitted candidates.
 	} else if node.Status != models.StatusQualified && node.Status != models.StatusHealthy {
 		log.Printf("[Scheduler] Candidate %s has unexpected pre-connect status %s", node.IP, node.Status)
@@ -719,6 +759,7 @@ func (s *Scheduler) maintainStandbyPool() {
 		_ = FailNode(database.DB, &node, "observed exit /24 diversity: "+err.Error())
 		return
 	}
+	_, prefixPenalty, prefixReason = reputation.EvaluatePrefixRisk(database.DB, node.ObservedExitIP, 0)
 	// 3. SPEED_TEST
 	if err := TransitionNode(database.DB, &node, models.StatusSpeedTest); err != nil {
 		log.Printf("[Scheduler] FSM speed test error: %v", err)

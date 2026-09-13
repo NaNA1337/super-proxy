@@ -111,7 +111,7 @@ func TestDiscoveredDoesNotCountTowardQualifiedCapacity(t *testing.T) {
 	}
 }
 
-func TestFallbackOnlyWhenPrimaryInsufficient(t *testing.T) {
+func TestAutomaticReplacementNeverUsesFallbackRegion(t *testing.T) {
 	setupTestDB(t)
 
 	// Seed only 2 Primary nodes (JP), but required is 5
@@ -143,13 +143,13 @@ func TestFallbackOnlyWhenPrimaryInsufficient(t *testing.T) {
 	sched := NewScheduler(3, 2, reputation.NewEngine(), cfg) // required = 5
 	cacheAllTestNodeCredentials(t)
 
-	// 1. First selection: Fallback is enabled, but remaining Primary nodes MUST be chosen first!
+	// Remaining primary nodes are consumed first.
 	res1, err := sched.SelectNextCandidate()
 	if err != nil {
 		t.Fatalf("selection 1 failed: %v", err)
 	}
-	if !res1.FallbackEnabled {
-		t.Errorf("expected fallback to be ENABLED because primary count (2) < required (5)")
+	if res1.FallbackEnabled {
+		t.Errorf("automatic cross-region replacement must always be disabled")
 	}
 	if res1.Node.Country != "JP" {
 		t.Errorf("expected remaining primary node JP to be picked first, got %s", res1.Node.Country)
@@ -168,13 +168,10 @@ func TestFallbackOnlyWhenPrimaryInsufficient(t *testing.T) {
 	}
 	database.DB.Model(&models.Node{}).Where("id = ?", res2.Node.ID).Update("status", models.StatusActive)
 
-	// 3. Third selection: Primary is now completely exhausted! Must now pick Fallback KR node!
-	res3, err := sched.SelectNextCandidate()
-	if err != nil {
-		t.Fatalf("selection 3 failed: %v", err)
-	}
-	if !res3.IsFallbackNode || res3.Node.Country != "KR" {
-		t.Errorf("expected fallback node KR, got %s (isFallback=%v)", res3.Node.Country, res3.IsFallbackNode)
+	// Once primary is exhausted, KR remains available for an operator to select
+	// manually but cannot be used by automatic replacement.
+	if _, err := sched.SelectNextCandidate(); err == nil {
+		t.Fatal("automatic replacement selected a foreign-region node")
 	}
 }
 
@@ -292,7 +289,7 @@ func TestPrimaryQualifiedCapacitySatisfied(t *testing.T) {
 	}
 }
 
-func TestCredentiallessQualifiedNodeDoesNotBlockFallback(t *testing.T) {
+func TestCredentiallessPrimaryDoesNotEnableAutomaticFallback(t *testing.T) {
 	setupTestDB(t)
 	requireCreate := func(node *models.Node) {
 		if err := database.DB.Create(node).Error; err != nil {
@@ -304,12 +301,37 @@ func TestCredentiallessQualifiedNodeDoesNotBlockFallback(t *testing.T) {
 	discovery.SetOVPNSecret("US-READY", "test-credential")
 
 	sched := NewScheduler(1, 0, reputation.NewEngine(), config.RegionConfig{Primary: "JP", Fallback: []string{"US"}})
+	if _, err := sched.SelectNextCandidate(); err == nil {
+		t.Fatal("credentialless primary must leave the slot empty instead of selecting US-READY")
+	}
+}
+
+func TestQuarantinedProbeIsRestrictedToPrimaryRegion(t *testing.T) {
+	setupTestDB(t)
+	jp := models.Node{ID: "JP-QUARANTINE", IP: "192.0.2.40", Country: "JP", Status: models.StatusFailed,
+		Reputation: models.ReputationMetrics{IsBlacklisted: true}, LastError: "discovery reputation admission: public VPN"}
+	kr := models.Node{ID: "KR-QUARANTINE", IP: "198.51.100.40", Country: "KR", Status: models.StatusFailed,
+		Reputation: models.ReputationMetrics{IsBlacklisted: true}, LastError: "discovery reputation admission: public VPN"}
+	if err := database.DB.Create(&jp).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB.Create(&kr).Error; err != nil {
+		t.Fatal(err)
+	}
+	discovery.SetOVPNSecret(jp.ID, "jp-credential")
+	discovery.SetOVPNSecret(kr.ID, "kr-credential")
+
+	sched := NewScheduler(3, 0, reputation.NewEngine(), config.RegionConfig{Primary: "JP", Fallback: []string{"KR"}})
 	result, err := sched.SelectNextCandidate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.QualifiedCapacity != 0 || !result.FallbackEnabled || result.Node.ID != "US-READY" {
-		t.Fatalf("credentialless primary must not block ready fallback: %+v", result)
+	if result.Node.ID != jp.ID || !result.QuarantinedEndpoint || result.IsFallbackNode {
+		t.Fatalf("expected isolated JP endpoint probe, got %+v", result)
+	}
+	discovery.DeleteOVPNSecret(jp.ID)
+	if _, err := sched.SelectNextCandidate(); err == nil {
+		t.Fatal("foreign quarantined endpoint must not be selected automatically")
 	}
 }
 

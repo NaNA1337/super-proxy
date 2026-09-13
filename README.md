@@ -8,7 +8,7 @@ Super-Proxy 是运行在 Linux 服务器上的多出口代理核心。它自动�
                      Manager → HTTPS/60000 Agent API
 ```
 
-当前稳定版为 [v1.1.12](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.12)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
+当前稳定版为 [v1.1.13](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.13)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
 
 ### 三条 TUN 如何使用带宽
 
@@ -44,7 +44,7 @@ xray version
 ### 2. 安装 Super-Proxy
 
 ```bash
-VERSION=1.1.12
+VERSION=1.1.13
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in amd64|arm64) ;; *) echo "不支持的架构: $ARCH"; exit 1 ;; esac
 
@@ -139,6 +139,14 @@ sudo journalctl -fu super-proxy
 
 每次拉取 VPN Gate 列表后，Core 会先完成整批 ASN 和 Reputation 审查，审查结束后才把通过的节点写成 `REPUTATION_CHECKED` 候选。未经检查的 `DISCOVERED` 节点不会出现在 Slot Manager，也不能调用手动切换 API。系统还会检查隧道实际出口，并保证活动/备用节点的 IPv4 `/24` 不重复。
 
+自动补位严格锁定 `region.primary`：JP 只自动补 JP，KR 只自动补 KR，US 只自动补 US。即使旧配置中仍有 `region.fallback`，调度器也不会用其他地区填充空槽；本地区可用出口不足时，槽位保持空闲并在后续发现周期继续查找。管理员仍可在 Manager 中手动选择其他地区已通过检查的节点，人工切换同样会再次验证实际出口。
+
+```yaml
+region:
+  primary: JP
+  fallback: []  # 保留为空；自动调度不会跨地区
+```
+
 推荐使用 [proxycheck.io v3](https://proxycheck.io/api/)。它在一次查询中返回 ASN、ISP、组织、`Residential`/`Business`/`Wireless`/`Hosting` 网络类型、风险分和 VPN/公共代理/Tor/hosting 等检测。未配置 Key 也能运行，但官方公共额度较低；注册免费 Key 后每日可检查 1,000 个地址。VPN Gate 刷新量较大时应按实际节点数准备额度。Key 只配置在 Core：
 
 ```yaml
@@ -187,7 +195,7 @@ curl -sk \
   https://127.0.0.1:60000/api/v1/discovery/refresh
 ```
 
-POST 会立即返回 `202`，后台完成拉取、ASN/Reputation 审查，然后唤醒单一调度队列。若活动出口不足三个，调度器会连续尝试下一个合格地址，直到三个槽位填满或本轮候选池耗尽。启动、定时和手动拉取不会并发执行。
+POST 会立即返回 `202`，后台完成拉取、ASN/Reputation 审查，然后唤醒单一调度队列。若活动出口不足三个，调度器会连续尝试下一个同地区合格地址，直到三个槽位填满或本轮本地区候选池耗尽。启动、定时和手动拉取不会并发执行。
 
 将 `$HOME/xray-client.json` 安全复制到客户端，先检查再启动：
 
@@ -211,7 +219,7 @@ curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
 ```bash
 sudo cp -a /etc/super-proxy "/etc/super-proxy.backup.$(date +%Y%m%d-%H%M%S)"
 
-VERSION=1.1.12
+VERSION=1.1.13
 ARCH="$(dpkg --print-architecture)"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"

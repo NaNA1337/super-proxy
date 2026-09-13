@@ -55,7 +55,14 @@ func VetNodes(ctx context.Context, nodes []models.Node, concurrency int, admit A
 						nodes[i].Reputation.Status = string(reputation.StatusUnknown)
 						nodes[i].Reputation.Details = err.Error()
 					}
-					DeleteOVPNSecret(nodes[i].ID)
+					// A VPN Gate endpoint is commonly identified as a public VPN even
+					// when the address assigned to tunnel clients is a different,
+					// clean NAT egress. Keep credentials only for known hard-rejected
+					// endpoints so the scheduler can probe them in quarantine. Provider
+					// errors and UNKNOWN results remain fail-closed and lose credentials.
+					if result == nil || !result.HardReject {
+						DeleteOVPNSecret(nodes[i].ID)
+					}
 					continue
 				}
 				nodes[i].Status = models.StatusReputationChecked

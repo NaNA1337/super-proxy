@@ -19,6 +19,10 @@ type CandidateSelectionResult struct {
 	Required          int
 	FallbackEnabled   bool
 	IsFallbackNode    bool
+	// QuarantinedEndpoint means the VPN server address failed reputation
+	// admission and may only be used to discover its NAT egress. It can never be
+	// promoted unless the observed exit independently passes full admission.
+	QuarantinedEndpoint bool
 }
 
 // Eligible statuses that count toward primary qualified capacity
@@ -39,11 +43,9 @@ var candidateSelectStatuses = []string{
 }
 
 // SelectNextCandidate audits eligible candidates in the database and returns the best node.
-// GUARANTEES:
-// 1. If primary qualified capacity >= required (MaxActive + MaxStandby), Fallback is strictly disabled.
-// 2. High-score Fallback nodes can NEVER bypass Primary candidates when Primary >= required.
-// 3. Even when Fallback is enabled (Primary < required), any available Primary nodes are exhausted first.
-// 4. Detailed audit explanations are logged for full observability.
+// Automatic selection is deliberately locked to RegionConfig.Primary. Operators
+// can still select a fully vetted foreign node through the manual-switch API,
+// but an empty automatic slot is never backfilled from another region.
 func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 	required := s.MaxActive + s.MaxStandby
 	if required <= 0 {
@@ -75,15 +77,14 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 		}
 	}
 
-	fallbackEnabled := qualifiedCapacity < required
-	log.Printf("[Scheduler] Region capacity audit: primary=%s, qualified_capacity=%d, required=%d, fallback enabled=%v",
-		primaryRegion, qualifiedCapacity, required, fallbackEnabled)
+	log.Printf("[Scheduler] Region capacity audit: primary=%s, qualified_capacity=%d, required=%d, automatic_cross_region=false",
+		primaryRegion, qualifiedCapacity, required)
 
 	res := &CandidateSelectionResult{
 		QualifiedCapacity: qualifiedCapacity,
 		PrimaryCount:      qualifiedCapacity,
 		Required:          required,
-		FallbackEnabled:   fallbackEnabled,
+		FallbackEnabled:   false,
 	}
 
 	// Select the highest-scoring candidate that does not duplicate an active or
@@ -107,6 +108,21 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 		}
 		return nil, gorm.ErrRecordNotFound
 	}
+	pickQuarantinedCandidate := func(q *gorm.DB) (*models.Node, error) {
+		var candidates []models.Node
+		if err := q.
+			Order("net_is_hosting ASC, net_is_tor ASC, net_is_proxy ASC, net_is_vpn ASC, sessions DESC, total_traffic DESC").
+			Limit(512).Find(&candidates).Error; err != nil {
+			return nil, err
+		}
+		for i := range candidates {
+			if _, ok := discovery.GetOVPNSecret(candidates[i].ID); !ok {
+				continue
+			}
+			return &candidates[i], nil
+		}
+		return nil, gorm.ErrRecordNotFound
+	}
 
 	queryBestCandidate := func(countryFilter string) (*models.Node, error) {
 		q := database.DB.Where("status IN (?)", candidateSelectStatuses)
@@ -115,50 +131,36 @@ func (s *Scheduler) SelectNextCandidate() (*CandidateSelectionResult, error) {
 		}
 		return pickDiverseCandidate(q)
 	}
-
-	// Case 1: Primary qualified capacity meets or exceeds required threshold -> Fallback is FORBIDDEN
-	if !fallbackEnabled {
-		node, err := queryBestCandidate(primaryRegion)
-		if err != nil {
-			return nil, fmt.Errorf("error selecting primary candidate: %w", err)
+	queryQuarantinedCandidate := func(countries []string) (*models.Node, error) {
+		q := database.DB.Where(
+			"status = ? AND rep_is_blacklisted = ? AND last_error LIKE ?",
+			models.StatusFailed, true, "discovery reputation admission:%",
+		)
+		if len(countries) > 0 {
+			q = q.Where("UPPER(country) IN ?", countries)
 		}
+		return pickQuarantinedCandidate(q)
+	}
+
+	if node, err := queryBestCandidate(primaryRegion); err == nil {
 		res.Node = node
 		res.IsFallbackNode = false
 		log.Printf("[Scheduler] Candidate selected from Primary (%s, status=%s, score=%d)", node.Country, node.Status, node.Score)
 		return res, nil
 	}
 
-	// Case 2: Fallback is enabled because Primary < required.
-	// We STILL attempt to pick remaining Primary nodes first before falling back!
-	if node, err := queryBestCandidate(primaryRegion); err == nil {
-		res.Node = node
-		res.IsFallbackNode = false
-		log.Printf("[Scheduler] Candidate selected from Primary (%s, status=%s, score=%d) while fallback open", node.Country, node.Status, node.Score)
-		return res, nil
-	}
-
-	// Primary region candidates completely exhausted; select from Fallback regions
-	var fallbackUpper []string
-	for _, fb := range s.RegionConfig.Fallback {
-		trimmed := strings.ToUpper(strings.TrimSpace(fb))
-		if trimmed != "" {
-			fallbackUpper = append(fallbackUpper, trimmed)
+	// The endpoint itself may be a publicly listed VPN address while the tunnel
+	// receives a different NAT egress. Probe it without admitting it to the
+	// candidate pool; only the independently checked observed exit can promote it.
+	if primaryRegion != "" {
+		if node, err := queryQuarantinedCandidate([]string{primaryRegion}); err == nil {
+			res.Node = node
+			res.IsFallbackNode = false
+			res.QuarantinedEndpoint = true
+			log.Printf("[Scheduler] Primary pool exhausted; isolated exit probe selected for endpoint %s (%s)", node.IP, node.Country)
+			return res, nil
 		}
 	}
 
-	if len(fallbackUpper) == 0 {
-		return nil, fmt.Errorf("primary candidates exhausted and no fallback regions configured")
-	}
-
-	fbNode, err := pickDiverseCandidate(database.DB.Where("status IN (?) AND UPPER(country) IN ?",
-		candidateSelectStatuses, fallbackUpper))
-	if err != nil {
-		return nil, fmt.Errorf("no candidates found in fallback regions: %w", err)
-	}
-
-	res.Node = fbNode
-	res.IsFallbackNode = true
-	log.Printf("[Scheduler] Primary candidates exhausted (%d < %d). Using Fallback node %s (%s, status=%s, score=%d)",
-		qualifiedCapacity, required, fbNode.IP, fbNode.Country, fbNode.Status, fbNode.Score)
-	return res, nil
+	return nil, fmt.Errorf("primary region %s candidates exhausted; automatic cross-region replacement is disabled", primaryRegion)
 }

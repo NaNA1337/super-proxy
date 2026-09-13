@@ -74,6 +74,7 @@ var AllowedTransitions = map[string]map[string]bool{
 		models.StatusCooldown:   true,
 		models.StatusDead:       true,
 		models.StatusDiscovered: true, // re-entry after cooldown
+		models.StatusConnecting: true, // isolated probe of a hard-rejected VPN endpoint; exit still requires full admission
 	},
 	models.StatusCooldown: {
 		models.StatusDiscovered: true,

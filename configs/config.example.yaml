@@ -2,7 +2,9 @@
 # For production, generate stable keys with cmd/init-config; see README.md.
 region:
   primary: JP
-  fallback: [KR, SG]
+  # Automatic replacement always stays in primary. Foreign nodes can only be
+  # assigned by an operator through the manual-switch API.
+  fallback: []
 database:
   path: /var/lib/super-proxy/manager.db
 discovery:

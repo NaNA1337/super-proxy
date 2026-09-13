@@ -36,5 +36,5 @@ func TestVetNodesCompletesAdmissionBeforeCandidateStatus(t *testing.T) {
 	require.Equal(t, "AS64500", vetted[0].NetClass.ASN)
 	require.Equal(t, models.StatusFailed, vetted[1].Status)
 	_, credentialExists := GetOVPNSecret("bad")
-	require.False(t, credentialExists)
+	require.True(t, credentialExists, "known hard-rejected endpoints stay available only for isolated exit probing")
 }
