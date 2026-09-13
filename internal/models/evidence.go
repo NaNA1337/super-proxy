@@ -24,6 +24,9 @@ type ReputationEvidence struct {
 	CountryCode     string    `json:"country_code"`
 	Reports         int       `json:"reports"`
 	RawCategory     string    `json:"raw_category"`
+	HardReject      bool      `json:"hard_reject"`
+	ScorePenalty    int       `json:"score_penalty"`
+	ProviderReason  string    `json:"provider_reason"`
 	ObservedAt      time.Time `gorm:"index" json:"observed_at"`
 	Error           string    `json:"error,omitempty"`
 }

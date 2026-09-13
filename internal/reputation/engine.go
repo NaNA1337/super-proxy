@@ -2,6 +2,7 @@ package reputation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -133,6 +134,17 @@ func (e *Engine) EvaluateIP(ctx context.Context, ip string) (*Result, error) {
 				e.mergeProviderResult(finalResult, cachedProv, &unknownCount)
 				return
 			}
+			if persisted, expiresAt, hit := e.loadPersistedProviderResult(db, ip, provider.Name()); hit {
+				e.cache.SetProviderUntil(ip, provider.Name(), persisted, expiresAt)
+				log.Printf("[Reputation] Durable provider cache HIT for %s (%s), valid until %s",
+					ip, provider.Name(), expiresAt.UTC().Format(time.RFC3339))
+				mu.Lock()
+				defer mu.Unlock()
+				successCount++
+				finalResult.Evidences = append(finalResult.Evidences, *persisted)
+				e.mergeProviderResult(finalResult, persisted, &unknownCount)
+				return
+			}
 
 			// Query provider with timeout
 			provCtx, provCancel := context.WithTimeout(ctx, 8*time.Second)
@@ -159,15 +171,28 @@ func (e *Engine) EvaluateIP(ctx context.Context, ip string) (*Result, error) {
 				return
 			}
 
-			successCount++
 			if res == nil {
-				res = &ReputationResult{
+				errMessages = append(errMessages, fmt.Sprintf("%s: provider returned no result", provider.Name()))
+				unknownCount++
+				failedRes := ReputationResult{
 					Provider:   provider.Name(),
 					IP:         ip,
 					Status:     StatusUnknown,
 					ObservedAt: time.Now(),
+					Error:      "provider returned no result",
 				}
+				finalResult.Evidences = append(finalResult.Evidences, failedRes)
+				e.persistEvidence(db, failedRes)
+				return
 			}
+			if res.Error != "" {
+				errMessages = append(errMessages, fmt.Sprintf("%s: %s", provider.Name(), res.Error))
+				unknownCount++
+				finalResult.Evidences = append(finalResult.Evidences, *res)
+				e.persistEvidence(db, *res)
+				return
+			}
+			successCount++
 
 			// Store in per-provider cache
 			e.cache.SetProvider(ip, provider.Name(), res)
@@ -215,10 +240,98 @@ func (e *Engine) EvaluateIP(ctx context.Context, ip string) (*Result, error) {
 	// Persist consolidated NetworkIntelligence and ASNObservation to DB
 	e.persistNetworkAndASN(db, finalResult)
 
-	// Store in aggregate cache
-	e.cache.Set(ip, finalResult)
+	// Do not extend durable evidence past its original freshness window when an
+	// aggregate is rebuilt after restart.
+	aggregateExpiry := time.Now().Add(e.cache.TTL())
+	for _, evidence := range finalResult.Evidences {
+		if evidence.Error != "" || evidence.Status == StatusUnknown || evidence.ObservedAt.IsZero() {
+			continue
+		}
+		providerExpiry := evidence.ObservedAt.Add(e.cache.ProviderTTL(evidence.Provider))
+		if providerExpiry.Before(aggregateExpiry) {
+			aggregateExpiry = providerExpiry
+		}
+	}
+	e.cache.SetUntil(ip, finalResult, aggregateExpiry)
 
 	return finalResult, nil
+}
+
+// loadPersistedProviderResult restores fresh successful evidence after a
+// daemon restart. Provider errors and UNKNOWN decisions are deliberately not
+// reused, so a recovered provider can retry immediately.
+func (e *Engine) loadPersistedProviderResult(db *gorm.DB, ip, provider string) (*ReputationResult, time.Time, bool) {
+	if db == nil {
+		return nil, time.Time{}, false
+	}
+	ttl := e.cache.ProviderTTL(provider)
+	cutoff := time.Now().Add(-ttl)
+	var evidence models.ReputationEvidence
+	err := db.Where("ip = ? AND provider = ? AND error = '' AND observed_at >= ? AND status IN ?",
+		ip, provider, cutoff, []string{string(StatusGood), string(StatusRisky), string(StatusBad)}).
+		Order("observed_at DESC").First(&evidence).Error
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("[Reputation] Warning: failed to read durable evidence for %s (%s): %v", ip, provider, err)
+		}
+		return nil, time.Time{}, false
+	}
+	expiresAt := evidence.ObservedAt.Add(ttl)
+	if !expiresAt.After(time.Now()) {
+		return nil, time.Time{}, false
+	}
+	result, ok := reputationResultFromEvidence(evidence)
+	if !ok {
+		return nil, time.Time{}, false
+	}
+	return result, expiresAt, true
+}
+
+func reputationResultFromEvidence(evidence models.ReputationEvidence) (*ReputationResult, bool) {
+	status := ReputationStatus(evidence.Status)
+	if status != StatusGood && status != StatusRisky && status != StatusBad {
+		return nil, false
+	}
+
+	// Rows written before durable cache support do not contain the derived
+	// fields. ProxyCheck.io BAD is always a hard rejection, so it can be safely
+	// recovered. Other legacy provider rows are ignored unless their exact
+	// decision was persisted.
+	hardReject := evidence.HardReject
+	scorePenalty := evidence.ScorePenalty
+	providerReason := evidence.ProviderReason
+	if providerReason == "" {
+		if evidence.Provider == pNameProxyCheck {
+			hardReject = status == StatusBad
+			if status == StatusRisky {
+				scorePenalty = evidence.FraudScore
+			}
+			providerReason = "restored ProxyCheck.io verdict from durable evidence"
+		} else {
+			return nil, false
+		}
+	}
+
+	score := evidence.Score
+	abuseConfidence := float64(evidence.AbuseConfidence)
+	fraudScore := float64(evidence.FraudScore)
+	reports := evidence.Reports
+	networkType := strings.ToLower(strings.TrimSpace(evidence.RawCategory))
+	return &ReputationResult{
+		Provider: evidence.Provider, IP: evidence.IP, Status: status,
+		Score: &score, AbuseConfidence: &abuseConfidence, FraudScore: &fraudScore,
+		IsVPN: boolPtr(evidence.IsVPN), IsProxy: boolPtr(evidence.IsProxy),
+		IsTor: boolPtr(evidence.IsTor), IsHosting: boolPtr(evidence.IsHosting),
+		IsResidential: boolPtr(evidence.IsResidential), ASN: evidence.ASN,
+		ISP: evidence.ISP, Organization: evidence.Organization, Country: evidence.Country,
+		CountryCode: evidence.CountryCode, Reports: &reports, RawCategory: evidence.RawCategory,
+		ObservedAt: evidence.ObservedAt, HardReject: hardReject,
+		ScorePenalty: scorePenalty, ProviderReason: providerReason,
+		NetworkInfo: models.NetworkClass{ASN: evidence.ASN, ISP: evidence.ISP,
+			Organization: evidence.Organization, NetworkType: networkType,
+			IsVPN: evidence.IsVPN, IsProxy: evidence.IsProxy, IsTor: evidence.IsTor,
+			IsHosting: evidence.IsHosting},
+	}, true
 }
 
 func (e *Engine) mergeProviderResult(finalResult *Result, res *ReputationResult, unknownCount *int) {
@@ -355,9 +468,13 @@ func (e *Engine) persistEvidence(db *gorm.DB, res ReputationResult) {
 		ASN:             res.ASN,
 		ISP:             res.ISP,
 		Organization:    res.Organization,
+		Country:         res.Country,
 		CountryCode:     res.CountryCode,
 		Reports:         reportsVal,
 		RawCategory:     res.RawCategory,
+		HardReject:      res.HardReject,
+		ScorePenalty:    res.ScorePenalty,
+		ProviderReason:  res.ProviderReason,
 		ObservedAt:      res.ObservedAt,
 		Error:           res.Error,
 	}

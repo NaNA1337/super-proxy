@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/NaNA1337/super-proxy/internal/models"
-	"github.com/stretchr/testify/require"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
 
@@ -172,6 +172,46 @@ func TestReputation_DatabaseEvidencePersistence(t *testing.T) {
 	if netIntel.ASN != "AS13335" || netIntel.ISP != "Cloudflare" {
 		t.Errorf("persisted network intelligence mismatch: %+v", netIntel)
 	}
+}
+
+func TestReputation_RestoresFreshProxyCheckEvidenceAfterRestart(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&models.ReputationEvidence{}, &models.NetworkIntelligence{}, &models.ASNObservation{}))
+	require.NoError(t, db.Create(&models.ReputationEvidence{
+		IP: "198.51.100.17", Provider: pNameProxyCheck, Status: string(StatusGood),
+		ASN: "AS64500", ISP: "Example Fiber", CountryCode: "JP",
+		RawCategory: "residential", IsResidential: true,
+		ObservedAt: time.Now().Add(-time.Hour),
+	}).Error)
+
+	provider := &mockProvider{name: pNameProxyCheck, healthy: true, err: errors.New("quota exhausted")}
+	engine := NewEngineWithConfig(EngineConfig{FailurePolicy: "conservative", CacheTTL: 24 * time.Hour})
+	engine.SetDB(db)
+	engine.AddProvider(provider)
+
+	result, err := engine.EvaluateIP(context.Background(), "198.51.100.17")
+	require.NoError(t, err)
+	require.Equal(t, 0, provider.callCount)
+	require.Equal(t, StatusGood, result.Status)
+	require.Equal(t, "AS64500", result.NetworkInfo.ASN)
+	require.Equal(t, "JP", result.CountryCode)
+}
+
+func TestReputation_DoesNotCacheProviderBackoffAsSuccess(t *testing.T) {
+	provider := &mockProvider{name: "BackoffProvider", healthy: true, result: &ReputationResult{
+		Provider: "BackoffProvider", IP: "198.51.100.18", Status: StatusUnknown,
+		ObservedAt: time.Now(), Error: "provider in backoff", ProviderReason: "provider in backoff",
+	}}
+	engine := NewEngineWithConfig(EngineConfig{FailurePolicy: "conservative", CacheTTL: 24 * time.Hour})
+	engine.AddProvider(provider)
+
+	for range 2 {
+		result, err := engine.EvaluateIP(context.Background(), "198.51.100.18")
+		require.NoError(t, err)
+		require.Equal(t, StatusUnknown, result.Status)
+	}
+	require.Equal(t, 2, provider.callCount)
 }
 
 func TestReputation_PrefixIntelligence_AbolishNaive3BadRule(t *testing.T) {
@@ -407,4 +447,3 @@ func TestReputation_SmallSampleProtectionAnd90dWindow(t *testing.T) {
 	rdapProv := NewExternalRDAPPrefixProvider("")
 	require.Equal(t, "ExternalRDAPPrefixProvider", rdapProv.Name())
 }
-

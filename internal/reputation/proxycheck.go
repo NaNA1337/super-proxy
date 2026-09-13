@@ -114,31 +114,49 @@ func (p *ProxyCheckProvider) CheckIP(ctx context.Context, ip string) (*Reputatio
 		return nil, fmt.Errorf("proxycheck.io request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		p.RecordFailure(true, parseRetryAfter(resp.Header.Get("Retry-After")))
-		return nil, fmt.Errorf("proxycheck.io rate limit or daily quota exceeded (HTTP 429)")
-	}
-	if resp.StatusCode != http.StatusOK {
-		p.RecordFailure(resp.StatusCode >= 500, 0)
-		return nil, fmt.Errorf("proxycheck.io returned HTTP %d", resp.StatusCode)
-	}
-
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	if err != nil {
 		p.RecordFailure(false, 0)
 		return nil, fmt.Errorf("read proxycheck.io response: %w", err)
 	}
 	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		p.RecordFailure(false, 0)
-		return nil, fmt.Errorf("decode proxycheck.io response: %w", err)
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &envelope)
 	}
 	var status string
 	_ = json.Unmarshal(envelope["status"], &status)
 	var message string
 	_ = json.Unmarshal(envelope["message"], &message)
+	message = strings.TrimSpace(message)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		p.RecordFailure(true, parseRetryAfter(resp.Header.Get("Retry-After")))
+		return nil, fmt.Errorf("proxycheck.io rate limit or daily quota exceeded (HTTP 429): %s", message)
+	}
+	if resp.StatusCode != http.StatusOK {
+		quotaExhausted := strings.Contains(strings.ToLower(message), "queries exhausted") ||
+			strings.Contains(strings.ToLower(message), "quota")
+		if quotaExhausted {
+			p.RecordFailure(true, proxyCheckDailyQuotaBackoff(now))
+		} else {
+			p.RecordFailure(resp.StatusCode >= 500, 0)
+		}
+		if message != "" {
+			return nil, fmt.Errorf("proxycheck.io returned HTTP %d: %s", resp.StatusCode, message)
+		}
+		return nil, fmt.Errorf("proxycheck.io returned HTTP %d", resp.StatusCode)
+	}
+	if envelope == nil {
+		p.RecordFailure(false, 0)
+		return nil, fmt.Errorf("decode proxycheck.io response: invalid JSON")
+	}
 	if status != "ok" && status != "warning" {
-		p.RecordFailure(status == "denied", 0)
+		quotaExhausted := strings.Contains(strings.ToLower(message), "queries exhausted") ||
+			strings.Contains(strings.ToLower(message), "quota")
+		if quotaExhausted {
+			p.RecordFailure(true, proxyCheckDailyQuotaBackoff(now))
+		} else {
+			p.RecordFailure(status == "denied", 0)
+		}
 		return nil, fmt.Errorf("proxycheck.io status %q: %s", status, message)
 	}
 	raw, ok := envelope[parsed.String()]
@@ -153,6 +171,16 @@ func (p *ProxyCheckProvider) CheckIP(ctx context.Context, ip string) (*Reputatio
 	}
 	p.RecordSuccess()
 	return buildProxyCheckResult(parsed.String(), now, apiResult), nil
+}
+
+func proxyCheckDailyQuotaBackoff(now time.Time) time.Duration {
+	nowUTC := now.UTC()
+	nextUTCDate := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day()+1, 0, 5, 0, 0, time.UTC)
+	backoff := nextUTCDate.Sub(nowUTC)
+	if backoff < time.Hour {
+		return time.Hour
+	}
+	return backoff
 }
 
 func buildProxyCheckResult(ip string, observedAt time.Time, r proxyCheckIPResult) *ReputationResult {

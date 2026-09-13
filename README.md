@@ -8,7 +8,7 @@ Super-Proxy 是运行在 Linux 服务器上的多出口代理核心。它自动�
                      Manager → HTTPS/60000 Agent API
 ```
 
-当前稳定版为 [v1.1.14](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.14)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
+当前稳定版为 [v1.1.15](https://github.com/NaNA1337/super-proxy/releases/tag/v1.1.15)，已实测 VPN Gate 获取、三出口、Reality HTTPS、手动切换以及 [Super-Proxy Manager](https://github.com/NaNA1337/super-proxy-manager) 联动。
 
 ### 三条 TUN 如何使用带宽
 
@@ -44,7 +44,7 @@ xray version
 ### 2. 安装 Super-Proxy
 
 ```bash
-VERSION=1.1.14
+VERSION=1.1.15
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in amd64|arm64) ;; *) echo "不支持的架构: $ARCH"; exit 1 ;; esac
 
@@ -173,7 +173,7 @@ sudo systemctl restart super-proxy
 sudo journalctl -u super-proxy -n 100 --no-pager | grep -E 'Reputation|REJECTED|/24'
 ```
 
-Core 将单个地址的供应商结果缓存 24 小时。服务重启会重新审查本轮拉取的所有地址；若额度耗尽或供应商超时，`conservative` 会把结果作为 `UNKNOWN` 拒绝，节点不会偷偷进入候选池。日志中的 `accepted`、`rejected` 和具体供应商原因可用于确认准入结果。
+Core 将单个地址的成功供应商结果缓存 24 小时，并写入数据库供服务重启后继续使用，不会因为重启而重复消耗整批查询额度。限流、超时和 `UNKNOWN` 不会作为成功结果缓存；供应商恢复后可立即重试。若当前没有新鲜的成功结果，`conservative` 会把供应商失败作为 `UNKNOWN` 拒绝，节点不会偷偷进入候选池。日志中的 `Durable provider cache HIT`、`accepted`、`rejected` 和具体供应商原因可用于确认准入结果。
 
 `reputation.enabled: true` 时，即使没有 Key，Core 也会调用 proxycheck.io 的公共接口完成全套检查；日志会提示低额度。`reputation.enabled: false` 才退回无 Key 的基础 ASN/托管归属检查。AbuseIPDB、GreyNoise、IPQS 和 IPinfo 仍可作为附加供应商；保守模式要求所有已配置供应商成功返回。
 
@@ -219,7 +219,7 @@ curl --proxy socks5h://127.0.0.1:10808 https://api.ipify.org
 ```bash
 sudo cp -a /etc/super-proxy "/etc/super-proxy.backup.$(date +%Y%m%d-%H%M%S)"
 
-VERSION=1.1.14
+VERSION=1.1.15
 ARCH="$(dpkg --print-architecture)"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb"
 curl -fLO "https://github.com/NaNA1337/super-proxy/releases/download/v${VERSION}/super-proxy_${VERSION}_${ARCH}.deb.sha256"

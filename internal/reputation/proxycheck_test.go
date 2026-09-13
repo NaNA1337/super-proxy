@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProxyCheckProviderCleanResidential(t *testing.T) {
@@ -31,6 +32,26 @@ func TestProxyCheckProviderCleanResidential(t *testing.T) {
 	}
 	if result.CountryCode != "JP" {
 		t.Fatalf("live v3 country_code shape was not mapped: %+v", result)
+	}
+}
+
+func TestProxyCheckProviderReportsDailyQuotaAndBacksOff(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"status":"denied","message":"1,000 Free queries exhausted. Please try the API again tomorrow."}`))
+	}))
+	defer server.Close()
+
+	p := newProxyCheckProvider("test-key", 1, server.URL, server.Client())
+	_, err := p.CheckIP(context.Background(), "198.51.100.7")
+	if err == nil || !strings.Contains(err.Error(), "queries exhausted") {
+		t.Fatalf("expected actionable quota error, got %v", err)
+	}
+	if p.IsHealthy() {
+		t.Fatal("daily quota exhaustion must put the provider into backoff")
+	}
+	if got := proxyCheckDailyQuotaBackoff(time.Date(2026, 9, 13, 23, 50, 0, 0, time.UTC)); got != time.Hour {
+		t.Fatalf("near-midnight quota backoff must retain the one-hour minimum, got %s", got)
 	}
 }
 

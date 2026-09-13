@@ -75,20 +75,38 @@ func (c *Cache) GetProvider(ip, provider string) (*ReputationResult, bool) {
 
 // SetProvider stores a provider's reputation evaluation with provider-specific TTL.
 func (c *Cache) SetProvider(ip, provider string, res *ReputationResult) {
+	c.SetProviderUntil(ip, provider, res, time.Now().Add(c.ProviderTTL(provider)))
+}
+
+// ProviderTTL returns the configured freshness window for a provider.
+func (c *Cache) ProviderTTL(provider string) time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if ttl, ok := c.providerTTLs[provider]; ok && ttl > 0 {
+		return ttl
+	}
+	return c.ttl
+}
+
+// TTL returns the aggregate freshness window.
+func (c *Cache) TTL() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ttl
+}
+
+// SetProviderUntil stores a provider result without extending its original
+// expiry. This is used when hydrating the in-memory cache from durable evidence.
+func (c *Cache) SetProviderUntil(ip, provider string, res *ReputationResult, expiresAt time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	ttl := c.ttl
-	if pTTL, ok := c.providerTTLs[provider]; ok && pTTL > 0 {
-		ttl = pTTL
-	}
 
 	if _, ok := c.providerEntries[ip]; !ok {
 		c.providerEntries[ip] = make(map[string]providerCacheEntry)
 	}
 	c.providerEntries[ip][provider] = providerCacheEntry{
 		result:    res,
-		expiresAt: time.Now().Add(ttl),
+		expiresAt: expiresAt,
 	}
 }
 
@@ -110,12 +128,17 @@ func (c *Cache) Get(ip string) (*Result, bool) {
 
 // Set stores an aggregated reputation result in the cache with the configured TTL.
 func (c *Cache) Set(ip string, res *Result) {
+	c.SetUntil(ip, res, time.Now().Add(c.ttl))
+}
+
+// SetUntil stores an aggregate result with an explicit expiry.
+func (c *Cache) SetUntil(ip string, res *Result, expiresAt time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.entries[ip] = cacheEntry{
 		result:    res,
-		expiresAt: time.Now().Add(c.ttl),
+		expiresAt: expiresAt,
 	}
 }
 
