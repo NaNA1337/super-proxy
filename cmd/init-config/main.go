@@ -38,7 +38,7 @@ func main() {
 	}
 	dir := filepath.Dir(absolute)
 	cfg := map[string]any{
-		"region":     map[string]any{"primary": "JP", "fallback": []string{"KR", "SG"}},
+		"region":     map[string]any{"primary": "JP", "fallback": []string{}},
 		"database":   map[string]any{"path": filepath.Join(dir, "manager.db")},
 		"discovery":  map[string]any{"url": "https://www.vpngate.net/api/iphone/", "interval": 15},
 		"reputation": map[string]any{"enabled": false, "failure_policy": "conservative"},

@@ -512,10 +512,7 @@ func BuildClientConfigBundle(r *http.Request) (*ClientConfigBundle, error) {
 	if nodeName == "" {
 		nodeName = "Super-Proxy Egress Node"
 	}
-	nodeRegion := os.Getenv("XRAY_MANAGER_REGION")
-	if nodeRegion == "" && sched != nil && sched.RegionConfig.Primary != "" {
-		nodeRegion = sched.RegionConfig.Primary
-	}
+	nodeRegion := configuredRegion()
 	if nodeRegion == "" {
 		nodeRegion = "JP"
 	}

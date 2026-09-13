@@ -55,10 +55,10 @@ func setupTestServer() http.Handler {
 	mux.Handle("/api/v1/slots/", secureChain(http.HandlerFunc(handleSlotAction)))
 	mux.Handle("/api/v1/nodes/", secureChain(http.HandlerFunc(handleNodeDetails)))
 	mux.Handle("/api/v1/pool/qualified", secureChain(http.HandlerFunc(handlePoolQualified)))
-        mux.Handle("/api/v1/nodes", secureChain(http.HandlerFunc(handleNodesList)))
-        mux.Handle("/api/v1/routing", secureChain(http.HandlerFunc(handleRoutingOverview)))
-        mux.Handle("/api/v1/client-config", secureChain(http.HandlerFunc(handleClientConfig)))
-        mux.Handle("/api/v1/client-config/all", secureChain(http.HandlerFunc(handleClientConfigAll)))
+	mux.Handle("/api/v1/nodes", secureChain(http.HandlerFunc(handleNodesList)))
+	mux.Handle("/api/v1/routing", secureChain(http.HandlerFunc(handleRoutingOverview)))
+	mux.Handle("/api/v1/client-config", secureChain(http.HandlerFunc(handleClientConfig)))
+	mux.Handle("/api/v1/client-config/all", secureChain(http.HandlerFunc(handleClientConfigAll)))
 	mux.Handle("/api/v1/export/clash", secureChain(http.HandlerFunc(handleExportClash)))
 	mux.Handle("/api/v1/export/singbox", secureChain(http.HandlerFunc(handleExportSingbox)))
 	mux.Handle("/api/v1/export/xray", secureChain(http.HandlerFunc(handleExportXray)))
@@ -104,6 +104,25 @@ func TestAPI_ValidAuth(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected 200 OK for valid token, got %d", rr.Code)
+	}
+}
+
+func TestAPI_StatusUsesConfiguredPrimaryRegion(t *testing.T) {
+	t.Setenv("XRAY_MANAGER_REGION", "KR")
+	handler := setupTestServer() // test scheduler primary is JP
+	req, _ := http.NewRequest("GET", "/api/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer test-secret-api-key-12345")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var response map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["region"] != "JP" {
+		t.Fatalf("status region must come from config primary, got %v", response["region"])
 	}
 }
 
@@ -211,8 +230,6 @@ func TestAPI_SecretRedaction(t *testing.T) {
 		t.Errorf("Expected [PRIVATE KEY REDACTED] placeholder in response, got: %s", bodyStr)
 	}
 }
-
-
 
 func TestAPI_WebManagerSupplementaryEndpoints(t *testing.T) {
 	_ = database.InitDatabase(":memory:")
@@ -768,6 +785,7 @@ func TestAPI_SubscriptionTokenHashingAndRevocation(t *testing.T) {
 }
 
 func TestClientConfigAll(t *testing.T) {
+	t.Setenv("XRAY_MANAGER_REGION", "KR")
 	InitAuth("test-secret-api-key-12345")
 	handler := setupTestServer()
 
@@ -813,6 +831,9 @@ func TestClientConfigAll(t *testing.T) {
 	}
 	if bundle.GeneratedAt == "" {
 		t.Errorf("expected non-empty generated_at")
+	}
+	if bundle.Node.Region != "JP" || bundle.Node.Country != "JP" {
+		t.Errorf("bundle node region must come from configured primary: %+v", bundle.Node)
 	}
 	if bundle.Endpoint.Address != "203.0.113.10" || bundle.Endpoint.Port != 443 || bundle.Endpoint.Network != "tcp" || bundle.Endpoint.Protocol != "vless" || !bundle.Endpoint.TLS {
 		t.Errorf("unexpected endpoint fields in bundle: %+v", bundle.Endpoint)

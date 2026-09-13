@@ -101,12 +101,24 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"server_id": hostname,
 		"name":      "Super-Proxy Egress Manager",
-		"region":    os.Getenv("XRAY_MANAGER_REGION"), // E.g., JP
+		"region":    configuredRegion(),
 		"version":   buildVersion,
 		"status":    "online",
 		"uptime":    int64(time.Since(appStartTime).Seconds()),
 	}
 	sendJSON(w, resp)
+}
+
+// configuredRegion keeps API metadata aligned with the running scheduler.
+// The YAML configuration is authoritative; the environment variable remains
+// only as a compatibility fallback for handlers constructed without a scheduler.
+func configuredRegion() string {
+	if sched != nil {
+		if region := strings.ToUpper(strings.TrimSpace(sched.RegionConfig.Primary)); region != "" {
+			return region
+		}
+	}
+	return strings.ToUpper(strings.TrimSpace(os.Getenv("XRAY_MANAGER_REGION")))
 }
 
 func handleSystem(w http.ResponseWriter, r *http.Request) {
