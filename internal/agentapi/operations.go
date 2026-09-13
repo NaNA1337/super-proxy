@@ -148,10 +148,14 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 	log.Printf("[Operation-%s] Launching candidate tunnel for node %s on virtual slot %d (active slot %d remains healthy)",
 		op.ID, node.IP, candidateSlot, op.Slot)
 
-	ctx, cancel := context.WithTimeout(sched.Context(), 60*time.Second)
+	// The operation deadline only bounds qualification work.  The OpenVPN
+	// process must remain attached to the scheduler lifetime after this function
+	// returns; otherwise the deferred deadline cancellation tears down a tunnel
+	// immediately after a successful cutover.
+	operationCtx, cancel := context.WithTimeout(sched.Context(), 60*time.Second)
 	defer cancel()
 
-	tunnel, err := openvpn.StartTunnel(ctx, candidateSlot, &node)
+	tunnel, err := openvpn.StartTunnel(sched.Context(), candidateSlot, &node)
 	if err != nil {
 		log.Printf("[Operation-%s] Candidate tunnel failed to start: %v. Old active slot %d is unaffected.",
 			op.ID, err, op.Slot)
@@ -177,7 +181,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 
 	candidateIdent := routing.SlotRoutingIdentity(candidateSlot)
 	node.ObservedExitIP = ""
-	res := health.VerifyTunnel(ctx, candidateSlot, tunnel.Interface, candidateIdent.TableID, &node)
+	res := health.VerifyTunnel(operationCtx, candidateSlot, tunnel.Interface, candidateIdent.TableID, &node)
 	if !res.TunnelHealthy || res.Error != nil {
 		log.Printf("[Operation-%s] Candidate health verification failed on %s: %v. Old active slot %d remains healthy.",
 			op.ID, tunnel.Interface, res.Error, op.Slot)
@@ -192,7 +196,7 @@ func executeManualSwitch(op *SwitchOperation, lease *scheduler.SlotLease) {
 
 	node.ObservedExitIP = res.ObservedExitIP
 	database.DB.Model(&node).Update("observed_exit_ip", node.ObservedExitIP)
-	exitAdmission, err := sched.EvaluateIPAdmissionForRegion(ctx, node.ObservedExitIP, node.Country)
+	exitAdmission, err := sched.EvaluateIPAdmissionForRegion(operationCtx, node.ObservedExitIP, node.Country)
 	scheduler.PersistAdmissionResult(&node, exitAdmission)
 	if err != nil {
 		log.Printf("[Operation-%s] Observed exit %s rejected by admission policy: %v", op.ID, node.ObservedExitIP, err)

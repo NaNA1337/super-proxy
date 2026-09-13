@@ -429,6 +429,44 @@ func (s *Scheduler) transitionToDrainingLocked(slot int, tunnel *openvpn.Tunnel)
 		}
 	}
 
+	// A process that has already exited has no interface or connections left to
+	// drain.  Trying to build a draining route for it fails, and the old rollback
+	// path then incorrectly resurrects the in-memory tunnel as ACTIVE forever.
+	// Retire it immediately after Xray has excluded the slot.
+	tunnel.Mu.Lock()
+	stateBeforeDrain := tunnel.State
+	tunnel.Mu.Unlock()
+	processExited := false
+	if tunnel.Done() != nil {
+		select {
+		case <-tunnel.Done():
+			processExited = true
+		default:
+		}
+	}
+	if stateBeforeDrain != string(SlotActive) || processExited {
+		_ = routing.ClearSlotRouting(slot)
+		delete(s.ActiveSlots, slot)
+		tunnel.Mu.Lock()
+		tunnel.State = string(SlotFailed)
+		tunnel.Mu.Unlock()
+		if database.DB != nil && tunnel.Node != nil {
+			_ = FailNode(database.DB, tunnel.Node, "openvpn process exited before draining")
+		}
+		if sc, _ := s.Slots.GetSlot(slot); sc != nil {
+			sc.Mu.Lock()
+			sc.ActiveTunnel = nil
+			sc.DrainingTunnel = nil
+			sc.DrainingTableID = 0
+			sc.State = SlotFailed
+			sc.OutboundActive = false
+			sc.Mu.Unlock()
+		}
+		tunnel.Stop()
+		log.Printf("[Scheduler] Slot %d retired after OpenVPN exit; slot is ready for refill", slot)
+		return
+	}
+
 	// 2. Only after Xray drain succeeds: mark tunnel state = SlotDraining
 	tunnel.Mu.Lock()
 	tunnel.State = string(SlotDraining)
@@ -629,9 +667,13 @@ func (s *Scheduler) maintainStandbyPool() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+	// Keep the qualification deadline separate from the tunnel lifetime.  A
+	// standby tunnel is promoted after this function returns, so binding the
+	// OpenVPN child to this short-lived context would immediately remove its TUN
+	// interface on a successful qualification.
+	qualificationCtx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
 	defer cancel()
-	tunnel, err := openvpn.StartTunnel(ctx, standbyVirtualSlot, &node)
+	tunnel, err := openvpn.StartTunnel(s.ctx, standbyVirtualSlot, &node)
 	if err != nil {
 		_ = FailNode(database.DB, &node, "openvpn startup: "+err.Error())
 		return
@@ -645,7 +687,7 @@ func (s *Scheduler) maintainStandbyPool() {
 	// Verify the tunnel without polluting main route table
 	_ = routing.SetupSlotRouting(standbyVirtualSlot, tunnel.Interface)
 	node.ObservedExitIP = "" // Establish a fresh baseline for this new tunnel.
-	hRes := health.VerifyTunnel(ctx, standbyVirtualSlot, tunnel.Interface, routing.BaseTableID+standbyVirtualSlot, &node)
+	hRes := health.VerifyTunnel(qualificationCtx, standbyVirtualSlot, tunnel.Interface, routing.BaseTableID+standbyVirtualSlot, &node)
 
 	if !hRes.TunnelHealthy || hRes.Error != nil {
 		log.Printf("[Scheduler] Tunnel %s qualification failed: %v", tunnel.Interface, hRes.Error)
@@ -661,7 +703,7 @@ func (s *Scheduler) maintainStandbyPool() {
 
 	// The VPN server endpoint can NAT through a different public egress. Check
 	// the address clients will actually use before speed testing or promotion.
-	exitResult, exitAdmissionErr := s.EvaluateIPAdmissionForRegion(ctx, node.ObservedExitIP, node.Country)
+	exitResult, exitAdmissionErr := s.EvaluateIPAdmissionForRegion(qualificationCtx, node.ObservedExitIP, node.Country)
 	PersistAdmissionResult(&node, exitResult)
 	if exitAdmissionErr != nil {
 		log.Printf("[Scheduler] Observed exit %s REJECTED by admission policy: %v", node.ObservedExitIP, exitAdmissionErr)
