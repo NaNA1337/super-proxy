@@ -154,12 +154,19 @@ func (c *Config) Validate() error {
 	if err := xray.ValidateManagementPort(c.API.Port); err != nil {
 		return fmt.Errorf("invalid api.port: %w", err)
 	}
-	if strings.TrimSpace(c.API.Listen) == "" {
+	listen := strings.TrimSpace(c.API.Listen)
+	if listen == "" {
 		return fmt.Errorf("api.listen cannot be empty")
 	}
-	if net.ParseIP(strings.Trim(c.API.Listen, "[]")) == nil && c.API.Listen != "localhost" {
+	// Preserve explicit wildcard binds used by remote Manager deployments. The
+	// old check passed the untrimmed YAML value to net.ParseIP, so otherwise
+	// harmless surrounding whitespace could prevent the entire service from
+	// starting. Normalize once and keep IPv6 bracket handling predictable.
+	if listen != "localhost" && listen != "0.0.0.0" && listen != "::" && listen != "[::]" &&
+		net.ParseIP(strings.Trim(listen, "[]")) == nil {
 		return fmt.Errorf("invalid api.listen address: %q", c.API.Listen)
 	}
+	c.API.Listen = listen
 
 	// 2. Database path validation
 	if strings.TrimSpace(c.Database.Path) == "" {
