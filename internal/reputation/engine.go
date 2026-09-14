@@ -2,7 +2,6 @@ package reputation
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -267,13 +266,14 @@ func (e *Engine) loadPersistedProviderResult(db *gorm.DB, ip, provider string) (
 	ttl := e.cache.ProviderTTL(provider)
 	cutoff := time.Now().Add(-ttl)
 	var evidence models.ReputationEvidence
-	err := db.Where("ip = ? AND provider = ? AND error = '' AND observed_at >= ? AND status IN ?",
+	query := db.Where("ip = ? AND provider = ? AND error = '' AND observed_at >= ? AND status IN ?",
 		ip, provider, cutoff, []string{string(StatusGood), string(StatusRisky), string(StatusBad)}).
-		Order("observed_at DESC").First(&evidence).Error
-	if err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("[Reputation] Warning: failed to read durable evidence for %s (%s): %v", ip, provider, err)
-		}
+		Order("observed_at DESC").Limit(1).Find(&evidence)
+	if query.Error != nil {
+		log.Printf("[Reputation] Warning: failed to read durable evidence for %s (%s): %v", ip, provider, query.Error)
+		return nil, time.Time{}, false
+	}
+	if query.RowsAffected == 0 {
 		return nil, time.Time{}, false
 	}
 	expiresAt := evidence.ObservedAt.Add(ttl)

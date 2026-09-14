@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,6 +34,31 @@ func TestProxyCheckProviderCleanResidential(t *testing.T) {
 	}
 	if result.CountryCode != "JP" {
 		t.Fatalf("live v3 country_code shape was not mapped: %+v", result)
+	}
+}
+
+func TestProxyCheckQuotaBackoffStopsQueuedRequests(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"status":"denied","message":"Free queries exhausted."}`))
+	}))
+	defer server.Close()
+
+	p := newProxyCheckProvider("test-key", 1, server.URL, server.Client())
+	p.queries = make(chan struct{}, 1)
+	var wg sync.WaitGroup
+	for range 25 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = p.CheckIP(context.Background(), "198.51.100.7")
+		}()
+	}
+	wg.Wait()
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("quota backoff should stop queued HTTP requests; got %d requests", got)
 	}
 }
 

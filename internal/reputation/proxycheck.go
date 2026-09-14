@@ -16,6 +16,7 @@ import (
 )
 
 const proxyCheckAPIURL = "https://proxycheck.io/v3/"
+const proxyCheckMaxConcurrentQueries = 8
 
 // ProxyCheckProvider implements proxycheck.io's stable v3 API. It supplies the
 // ASN/allocation class and active proxy, VPN, Tor, hosting, scraper and abuse
@@ -26,6 +27,7 @@ type ProxyCheckProvider struct {
 	days    float64
 	client  *http.Client
 	baseURL string
+	queries chan struct{}
 }
 
 type proxyCheckIPResult struct {
@@ -73,6 +75,7 @@ func newProxyCheckProvider(apiKey string, days float64, baseURL string, client *
 		days:    days,
 		baseURL: strings.TrimRight(baseURL, "/") + "/",
 		client:  client,
+		queries: make(chan struct{}, proxyCheckMaxConcurrentQueries),
 	}
 	p.SetName("ProxyCheck.io")
 	return p
@@ -84,6 +87,16 @@ func (p *ProxyCheckProvider) CheckIP(ctx context.Context, ip string) (*Reputatio
 	if parsed == nil {
 		return nil, fmt.Errorf("proxycheck.io requires a valid IP address: %q", ip)
 	}
+	select {
+	case p.queries <- struct{}{}:
+		defer func() { <-p.queries }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("proxycheck.io query queue: %w", ctx.Err())
+	}
+
+	// Re-check health after entering the concurrency gate. If one of the first
+	// requests discovers an exhausted quota, queued lookups stop before making
+	// their own HTTP request.
 	if !p.IsHealthy() {
 		return &ReputationResult{Provider: p.Name(), IP: parsed.String(), Status: StatusUnknown,
 			ObservedAt: now, ProviderReason: "proxycheck.io provider in backoff", Error: "provider in backoff"}, nil
