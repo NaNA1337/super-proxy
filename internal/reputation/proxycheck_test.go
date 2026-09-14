@@ -57,8 +57,39 @@ func TestProxyCheckQuotaBackoffStopsQueuedRequests(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if got := requests.Load(); got != 1 {
-		t.Fatalf("quota backoff should stop queued HTTP requests; got %d requests", got)
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected one keyed request and one anonymous fallback before backoff; got %d requests", got)
+	}
+}
+
+func TestProxyCheckUsesAnonymousAllowanceAfterKeyQuota(t *testing.T) {
+	var keyedRequests atomic.Int32
+	var anonymousRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("key") != "" {
+			keyedRequests.Add(1)
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"status":"denied","message":"1,000 Free queries exhausted."}`))
+			return
+		}
+		anonymousRequests.Add(1)
+		_, _ = w.Write([]byte(`{"status":"ok","198.51.100.7":{"risk":4,"network":{"asn":"AS64500","provider":"Example Fiber","organisation":"Example ISP","type":"Residential"},"location":{"country_name":"Japan","country_code":"JP"},"detections":{}}}`))
+	}))
+	defer server.Close()
+
+	p := newProxyCheckProvider("test-key", 1, server.URL, server.Client())
+	result, err := p.CheckIP(context.Background(), "198.51.100.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StatusGood || result.CountryCode != "JP" {
+		t.Fatalf("unexpected anonymous fallback result: %+v", result)
+	}
+	if keyedRequests.Load() != 1 || anonymousRequests.Load() != 1 {
+		t.Fatalf("unexpected request split: keyed=%d anonymous=%d", keyedRequests.Load(), anonymousRequests.Load())
+	}
+	if p.activeAPIKey(time.Now()) != "" {
+		t.Fatal("exhausted key must remain disabled for the daily backoff window")
 	}
 }
 
